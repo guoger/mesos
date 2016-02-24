@@ -35,6 +35,7 @@
 #include <process/http.hpp>
 #include <process/owned.hpp>
 #include <process/pid.hpp>
+#include <process/dispatch.hpp>
 
 #include <process/metrics/counter.hpp>
 #include <process/metrics/metrics.hpp>
@@ -983,6 +984,24 @@ TEST_F(MasterTest, MasterInfo)
 
   driver.stop();
   driver.join();
+}
+
+
+// This tests #master::getFlags. We first create a fake flag.
+// This flag is used to start a master. Then we retrieve this flag from
+// master process and compare it with the one we just created.
+TEST_F(MasterTest, Flags)
+{
+  master::Flags flags = CreateMasterFlags();
+  flags.work_dir = path::join(os::getcwd(), "fake-work-dir");
+  CHECK_SOME(os::mkdir(flags.work_dir.get()));
+
+  Try<Owned<cluster::Master>> master = StartMaster(flags);
+  ASSERT_SOME(master);
+
+  PID<Master> pid = master.get()->pid;
+  EXPECT_EQ(flags.work_dir,
+      dispatch(pid, &Master::getFlags).get().work_dir);
 }
 
 

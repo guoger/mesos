@@ -543,6 +543,11 @@ public:
     return info_;
   }
 
+  const Flags getFlags()
+  {
+    return flags;
+  }
+
 protected:
   virtual void initialize();
   virtual void finalize();
