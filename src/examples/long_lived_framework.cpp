@@ -17,8 +17,6 @@
 #include <iostream>
 #include <string>
 
-#include <boost/lexical_cast.hpp>
-
 #include <mesos/scheduler.hpp>
 
 #include <stout/numify.hpp>
@@ -26,10 +24,9 @@
 #include <stout/os.hpp>
 #include <stout/path.hpp>
 #include <stout/stringify.hpp>
+#include <stout/format.hpp>
 
 using namespace mesos;
-
-using boost::lexical_cast;
 
 using std::cout;
 using std::cerr;
@@ -88,14 +85,14 @@ public:
       // Launch tasks (only one per offer).
       vector<TaskInfo> tasks;
       if (cpus >= CPUS_PER_TASK && mem >= MEM_PER_TASK) {
-        int taskId = tasksLaunched++;
+        string taskId = strings::format("%06d", tasksLaunched++).get();
 
         cout << "Starting task " << taskId << " on "
              << offer.hostname() << endl;
 
         TaskInfo task;
-        task.set_name("Task " + lexical_cast<string>(taskId));
-        task.mutable_task_id()->set_value(lexical_cast<string>(taskId));
+        task.set_name("Task " + taskId);
+        task.mutable_task_id()->set_value(taskId);
         task.mutable_slave_id()->MergeFrom(offer.slave_id());
         task.mutable_executor()->MergeFrom(executor);
 
@@ -126,8 +123,7 @@ public:
 
   virtual void statusUpdate(SchedulerDriver* driver, const TaskStatus& status)
   {
-    int taskId = lexical_cast<int>(status.task_id().value());
-    cout << "Task " << taskId << " is in state "
+    cout << "Task " << status.task_id().value() << " is in state "
          << TaskState_Name(status.state()) << endl;
   }
 
