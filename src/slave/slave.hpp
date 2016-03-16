@@ -398,6 +398,9 @@ public:
   // Returns the resource usage information for all executors.
   process::Future<ResourceUsage> usage();
 
+  process::Future<process::http::Response> containers(
+      const process::http::Request& request);
+
   // Handle the second phase of shutting down an executor for those
   // executors that have not properly shutdown within a timeout.
   void shutdownExecutorTimeout(
@@ -408,6 +411,10 @@ public:
 private:
   void _authenticate();
   void authenticationTimeout(process::Future<bool> future);
+
+  process::Future<process::http::Response> _containers(
+      const Future<ResourceUsage>& future,
+      const process::http::Request& request) const;
 
   // Shut down an executor. This is a two phase process. First, an
   // executor receives a shut down message (shut down phase), then
@@ -445,10 +452,15 @@ private:
         const process::http::Request& request,
         const Option<std::string>& /* principal */) const;
 
+    // /slave/containers
+    process::Future<process::http::Response> containers(
+        const process::http::Request& request) const;
+
     static std::string EXECUTOR_HELP();
     static std::string FLAGS_HELP();
     static std::string HEALTH_HELP();
     static std::string STATE_HELP();
+    static std::string CONTAINERS_HELP();
 
   private:
     Slave* slave;

@@ -1599,6 +1599,145 @@ TEST_F(SlaveTest, HTTPEndpointsBadAuthentication)
 }
 
 
+// This test checks /containers endpoint when no executor is running
+TEST_F(SlaveTest, ContainersEndpointNoExecutors)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  slave::Flags flags = this->CreateSlaveFlags();
+
+  MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer(&exec);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  Try<Owned<cluster::Slave>> slave =
+    StartSlave(detector.get(), &containerizer, flags);
+  ASSERT_SOME(slave);
+
+  Future<Response> response =
+    process::http::get(slave.get()->pid, "containers");
+
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(http::OK().status, response);
+  AWAIT_EXPECT_RESPONSE_HEADER_EQ(APPLICATION_JSON, "Content-Type", response);
+  AWAIT_EXPECT_RESPONSE_BODY_EQ("[]", response);
+}
+
+
+// This test checks /containers endpoint with 1 executor running
+TEST_F(SlaveTest, ContainersEndpoint)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  slave::Flags flags = this->CreateSlaveFlags();
+
+  flags.hostname = "localhost";
+  flags.resources = "cpus:4;mem:2048;disk:512;ports:[33000-34000]";
+  flags.attributes = "rack:abc;host:myhost";
+
+  MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer(&exec);
+
+  // Mock usage() and status() methods with expected results here
+
+  ResourceStatistics resourceStatistics;
+  resourceStatistics.set_cpus_nr_periods(100);
+  resourceStatistics.set_cpus_nr_throttled(2);
+  resourceStatistics.set_cpus_user_time_secs(4);
+  resourceStatistics.set_cpus_system_time_secs(1);
+  resourceStatistics.set_cpus_throttled_time_secs(0.5);
+  resourceStatistics.set_cpus_limit(1.0);
+  resourceStatistics.set_mem_file_bytes(0);
+  resourceStatistics.set_mem_anon_bytes(0);
+  resourceStatistics.set_mem_mapped_file_bytes(0);
+  resourceStatistics.set_mem_rss_bytes(1024);
+  resourceStatistics.set_mem_limit_bytes(2048);
+  resourceStatistics.set_timestamp(0);
+
+  EXPECT_CALL(containerizer, usage(_))
+    .WillOnce(Return(resourceStatistics));
+
+  CgroupInfo_NetCls* cgroupInfoNetCls = new CgroupInfo_NetCls();
+  cgroupInfoNetCls->set_classid(42);
+
+  CgroupInfo* cgroupInfo = new CgroupInfo();
+  cgroupInfo->set_allocated_net_cls(cgroupInfoNetCls);
+
+  ContainerStatus containerStatus;
+  containerStatus.set_allocated_cgroup_info(cgroupInfo);
+
+  EXPECT_CALL(containerizer, status(_))
+    .WillRepeatedly(Return(containerStatus));
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  Try<Owned<cluster::Slave>> slave =
+    StartSlave(detector.get(), &containerizer, flags);
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _))
+    .Times(1);
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  driver.start();
+
+  AWAIT_READY(offers);
+  EXPECT_NE(0u, offers.get().size());
+
+  TaskID taskId;
+  taskId.set_value("1");
+
+  TaskInfo task;
+  task.set_name("");
+  task.mutable_task_id()->MergeFrom(taskId);
+  task.mutable_slave_id()->MergeFrom(offers.get()[0].slave_id());
+  task.mutable_resources()->MergeFrom(offers.get()[0].resources());
+  task.mutable_executor()->MergeFrom(DEFAULT_EXECUTOR_INFO);
+
+  EXPECT_CALL(exec, registered(_, _, _, _))
+    .Times(1);
+
+  EXPECT_CALL(exec, launchTask(_, _))
+    .WillOnce(SendStatusUpdateFromTask(TASK_RUNNING));
+
+  Future<TaskStatus> status;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&status));
+
+  driver.launchTasks(offers.get()[0].id(), {task});
+
+  AWAIT_READY(status);
+  EXPECT_EQ(TASK_RUNNING, status.get().state());
+
+  Future<Response> response =
+    process::http::get(slave.get()->pid, "containers");
+
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(http::OK().status, response);
+  AWAIT_EXPECT_RESPONSE_HEADER_EQ(APPLICATION_JSON, "Content-Type", response);
+
+  Try<JSON::Array> parse = JSON::parse<JSON::Array>(response.get().body);
+  ASSERT_SOME(parse);
+
+  // Assert /containers response body here
+
+  EXPECT_CALL(exec, shutdown(_))
+    .Times(AtMost(1));
+
+  driver.stop();
+  driver.join();
+}
+
+
 // This test ensures that when a slave is shutting down, it will not
 // try to re-register with the master.
 TEST_F(SlaveTest, DISABLED_TerminatingSlaveDoesNotReregister)

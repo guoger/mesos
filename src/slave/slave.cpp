@@ -740,6 +740,11 @@ void Slave::initialize()
         [http](const process::http::Request& request) {
           return http.health(request);
         });
+  route("/containers",
+        Http::CONTAINERS_HELP(),
+        [http](const process::http::Request& request) {
+          return http.containers(request);
+        });
 
   // Expose the log file for the webui. Fall back to 'log_dir' if
   // an explicit file was not specified.
@@ -5195,6 +5200,52 @@ Future<ResourceUsage> Slave::usage()
 
         return Future<ResourceUsage>(*usage);
       });
+}
+
+
+Future<process::http::Response> Slave::containers(
+    const process::http::Request& request)
+{
+  return usage()
+    .then(defer(self(), [this, request](ResourceUsage resourceUsage)
+        -> Future<process::http::Response> {
+        return _containers(resourceUsage, request);
+  }));
+}
+
+
+Future<process::http::Response> Slave::_containers(
+      const Future<ResourceUsage>& future,
+      const process::http::Request& request) const
+{
+  if (!future.isReady()) {
+    LOG(WARNING) << "Could not collect resource usage: "
+                 << (future.isFailed() ? future.failure() : "discarded");
+
+    return process::http::InternalServerError();
+  }
+
+  JSON::Array result;
+
+  foreach (const ResourceUsage::Executor& executor,
+           future.get().executors()) {
+    if (executor.has_statistics()) {
+      const ExecutorInfo info = executor.executor_info();
+
+      JSON::Object entry;
+      entry.values["framework_id"] = info.framework_id().value();
+      entry.values["executor_id"] = info.executor_id().value();
+      entry.values["executor_name"] = info.name();
+      entry.values["source"] = info.source();
+      entry.values["statistics"] = JSON::protobuf(executor.statistics());
+      result.values.push_back(entry);
+    }
+  }
+
+  // Retrieve ContainerStatus using containerId in ResourceUsage here
+  // and assemble response using both ResourceUsage and ContainerStatus
+
+  return process::http::OK(result, request.url.query.get("jsonp"));
 }
 
 
