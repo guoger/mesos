@@ -718,6 +718,11 @@ void Slave::initialize()
         [http](const process::http::Request& request) {
           return http.health(request);
         });
+  route("/containers",
+        Http::CONTAINERS_HELP(),
+        [http](const process::http::Request& request) {
+          return http.containers(request);
+        });
 
   // Expose the log file for the webui. Fall back to 'log_dir' if
   // an explicit file was not specified.

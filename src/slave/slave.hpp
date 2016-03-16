@@ -445,10 +445,15 @@ private:
         const process::http::Request& request,
         const Option<std::string>& /* principal */) const;
 
+    // /slave/containers
+    process::Future<process::http::Response> containers(
+        const process::http::Request& request) const;
+
     static std::string EXECUTOR_HELP();
     static std::string FLAGS_HELP();
     static std::string HEALTH_HELP();
     static std::string STATE_HELP();
+    static std::string CONTAINERS_HELP();
 
   private:
     Slave* slave;

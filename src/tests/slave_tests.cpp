@@ -1379,6 +1379,26 @@ TEST_F(SlaveTest, StateEndpoint)
   driver.join();
 }
 
+TEST_F(SlaveTest, ContainersEndpointNoExecutors)
+{
+  Try<PID<Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  MockExecutor exec(DEFAULT_EXECUTOR_ID);
+
+  TestContainerizer containerizer(&exec);
+
+  Try<PID<Slave>> slave = StartSlave(&containerizer);
+  ASSERT_SOME(slave);
+
+  Future<Response> response = process::http::get(slave.get(), "containers");
+
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(http::OK().status, response);
+  AWAIT_EXPECT_RESPONSE_HEADER_EQ(APPLICATION_JSON, "Content-Type", response);
+  AWAIT_EXPECT_RESPONSE_BODY_EQ("[]", response);
+
+  Shutdown();
+}
 
 // This test checks that when a slave is in RECOVERING state it responds
 // to HTTP requests for "/state" endpoint with ServiceUnavailable.
