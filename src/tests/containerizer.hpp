@@ -113,8 +113,8 @@ public:
       process::Future<ResourceStatistics>(const ContainerID&));
 
   MOCK_METHOD1(
-        status,
-        process::Future<ContainerStatus>(const ContainerID&));
+      status,
+      process::Future<ContainerStatus>(const ContainerID&));
 
   MOCK_METHOD1(
       wait,

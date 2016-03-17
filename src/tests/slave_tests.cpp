@@ -1525,30 +1525,32 @@ TEST_F(SlaveTest, HTTPEndpointsBadAuthentication)
 // This test checks /containers endpoint when no executor is running
 TEST_F(SlaveTest, ContainersEndpointNoExecutors)
 {
-  Try<PID<Master>> master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
-  MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  slave::Flags flags = this->CreateSlaveFlags();
 
+  MockExecutor exec(DEFAULT_EXECUTOR_ID);
   TestContainerizer containerizer(&exec);
 
-  Try<PID<Slave>> slave = StartSlave(&containerizer);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  Try<Owned<cluster::Slave>> slave =
+    StartSlave(detector.get(), &containerizer, flags);
   ASSERT_SOME(slave);
 
-  Future<Response> response = process::http::get(slave.get(), "containers");
+  Future<Response> response = process::http::get(slave.get()->pid, "containers");
 
   AWAIT_EXPECT_RESPONSE_STATUS_EQ(http::OK().status, response);
   AWAIT_EXPECT_RESPONSE_HEADER_EQ(APPLICATION_JSON, "Content-Type", response);
   AWAIT_EXPECT_RESPONSE_BODY_EQ("[]", response);
-
-  Shutdown();
 }
 
 
 // This test checks /containers endpoint with 1 executor running
-TEST_F(SlaveTest, ContainersEndpoit)
+TEST_F(SlaveTest, ContainersEndpoint)
 {
-  Try<PID<Master>> master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   slave::Flags flags = this->CreateSlaveFlags();
@@ -1559,6 +1561,8 @@ TEST_F(SlaveTest, ContainersEndpoit)
 
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
   TestContainerizer containerizer(&exec);
+
+  // Mock usage() and status() methods with expected results here
 
   ResourceStatistics resourceStatistics;
   resourceStatistics.set_cpus_nr_periods(100);
@@ -1577,21 +1581,28 @@ TEST_F(SlaveTest, ContainersEndpoit)
   EXPECT_CALL(containerizer, usage(_))
     .WillOnce(Return(resourceStatistics));
 
-  CgroupInfo_NetCls* cgroupInfoNetCls = CgroupInfo_NetCls();
+  CgroupInfo_NetCls* cgroupInfoNetCls = new CgroupInfo_NetCls();
   cgroupInfoNetCls->set_classid(42);
 
-  CgroupInfo* cgroupInfo = CgroupInfo();
+  CgroupInfo* cgroupInfo = new CgroupInfo();
+//  cgroupInfo.mutable_net_cls()
   cgroupInfo->set_allocated_net_cls(cgroupInfoNetCls);
- 
+
   ContainerStatus containerStatus;
   containerStatus.set_allocated_cgroup_info(cgroupInfo);
 
-  Try<PID<Slave>> slave = StartSlave(&containerizer, flags);
+  EXPECT_CALL(containerizer, status(_))
+    .WillRepeatedly(Return(containerStatus));
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  Try<Owned<cluster::Slave>> slave =
+    StartSlave(detector.get(), &containerizer, flags);
   ASSERT_SOME(slave);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(&driver, _, _))
     .Times(1);
@@ -1623,38 +1634,30 @@ TEST_F(SlaveTest, ContainersEndpoit)
     .WillOnce(SendStatusUpdateFromTask(TASK_RUNNING));
 
   Future<TaskStatus> status;
-  driver.launchTasks(offers.get()[0].id(), {task});
-
   EXPECT_CALL(sched, statusUpdate(&driver, _))
     .WillOnce(FutureArg<1>(&status));
 
+  driver.launchTasks(offers.get()[0].id(), {task});
+
   AWAIT_READY(status);
-  std::cout << "22222222222" << std::endl;
-  std::cout << status->container_status().DebugString() << std::endl;
+  EXPECT_EQ(TASK_RUNNING, status.get().state());
 
-
-
-//  AWAIT_READY(status);
-//  EXPECT_EQ(TASK_RUNNING, status.get().state());
-/*
-  EXPECT_TRUE(status->has_container_status());
-  ContainerStatus containerStatus = status->container_status();
-  std::cout << "***********************" << std::endl;
-  std::cout << containerStatus.DebugString() << std::endl;
-  Future<Response> response = http::get(slave.get(), "containers");
+  Future<Response> response = process::http::get(slave.get()->pid, "containers");
 
   AWAIT_EXPECT_RESPONSE_STATUS_EQ(http::OK().status, response);
   AWAIT_EXPECT_RESPONSE_HEADER_EQ(APPLICATION_JSON, "Content-Type", response);
 
-  Try<JSON::Array> result = JSON::parse<JSON::Array>(response.get().body);
-  ASSERT_SOME(result);
-  std::cout << result.get() << std::endl;
-//  ASSERT_EQ(expected, result.get());
-  */
+  Try<JSON::Array> parse = JSON::parse<JSON::Array>(response.get().body);
+  ASSERT_SOME(parse);
+  std::cout << parse.get() << std::endl;
+
+  // Assert /containers response body here
+
+  EXPECT_CALL(exec, shutdown(_))
+    .Times(AtMost(1));
+
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 

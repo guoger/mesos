@@ -601,23 +601,49 @@ string Slave::Http::CONTAINERS_HELP()
 
 Future<Response> Slave::Http::containers(const Request& request) const
 {
-  JSON::Array result;
-  Future<ResourceUsage> resourceUsageFuture = slave->usage();
-  ResourceUsage resourceUsage = resourceUsageFuture.get();
-  ContainerID containerID = resourceUsage.executors().Get(0).container_id();
-  Future<ContainerStatus> containerStatusFuture = slave->containerizer->status(containerID);
-  ContainerStatus containerStatus = containerStatusFuture.get();
-  Future<ResourceStatistics> resourceStatisticsFuture = slave->containerizer->usage(containerID);
-  ResourceStatistics resourceStatistics = resourceStatisticsFuture.get();
-
-  std::cout << "########### ResourceUsage ##########" << std::endl;
-  std::cout << resourceUsage.DebugString() << std::endl;
-  std::cout << "########### ContainerStatus ##########" << std::endl;
-  std::cout << containerStatus.DebugString() << std::endl;
-  std::cout << "########### ContainerID ##########" << std::endl;
-  std::cout << containerID.DebugString() << std::endl;
-  std::cout << "########### ResourceStatistics ##########" << std::endl;
-  std::cout << resourceStatistics.DebugString() << std::endl;
+  return slave->containers(request);
+//  if (!usage.isReady()) {
+//    LOG(WARNING) << "Could not collect resource usage: "
+//                 << (usage.isFailed() ? usage.failure() : "discarded");
+//
+//    return http::InternalServerError();
+//  }
+//
+//  JSON::Array result;
+//
+//  foreach (const ResourceUsage::Executor& executor,
+//      usage.get().executors()) {
+//    if (executor.has_statistics()) {
+//      const ExecutorInfo info = executor.executor_info();
+//
+//      JSON::Object entry;
+//      entry.values["framework_id"] = info.framework_id().value();
+//      entry.values["executor_id"] = info.executor_id().value();
+//      entry.values["executor_name"] = info.name();
+//      entry.values["source"] = info.source();
+//      entry.values["statistics"] = JSON::protobuf(executor.statistics());
+//
+//      result.values.push_back(entry);
+//    }
+//  }
+//
+//  return http::OK(result, request.url.query.get("jsonp"));
+//  Future<ResourceUsage> resourceUsageFuture = slave->usage();
+//  ResourceUsage resourceUsage = resourceUsageFuture.get();
+//  ContainerID containerID = resourceUsage.executors().Get(0).container_id();
+//  Future<ContainerStatus> containerStatusFuture = slave->containerizer->status(containerID);
+//  ContainerStatus containerStatus = containerStatusFuture.get();
+//  Future<ResourceStatistics> resourceStatisticsFuture = slave->containerizer->usage(containerID);
+//  ResourceStatistics resourceStatistics = resourceStatisticsFuture.get();
+//
+//  std::cout << "########### ResourceUsage ##########" << std::endl;
+//  std::cout << resourceUsage.DebugString() << std::endl;
+//  std::cout << "########### ContainerStatus ##########" << std::endl;
+//  std::cout << containerStatus.DebugString() << std::endl;
+//  std::cout << "########### ContainerID ##########" << std::endl;
+//  std::cout << containerID.DebugString() << std::endl;
+//  std::cout << "########### ResourceStatistics ##########" << std::endl;
+//  std::cout << resourceStatistics.DebugString() << std::endl;
 
 //  foreach (const ResourceUsage::Executor& executor,
 //           future.get().executors()) {
@@ -635,7 +661,7 @@ Future<Response> Slave::Http::containers(const Request& request) const
 //    }
 //  }
 
-  return http::OK(result, request.url.query.get("jsonp"));
+//  return http::OK(result, request.url.query.get("jsonp"));
 }
 
 } // namespace slave {

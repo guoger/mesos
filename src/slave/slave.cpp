@@ -5104,6 +5104,58 @@ Future<ResourceUsage> Slave::usage()
 }
 
 
+Future<process::http::Response> Slave::containers(
+    const process::http::Request& request)
+{
+  return usage()
+    .then(defer(self(), [this, request](ResourceUsage resourceUsage)
+        -> Future<process::http::Response> {
+        return _containers(resourceUsage, request);
+  }));
+}
+
+
+Future<process::http::Response> Slave::_containers(
+      const Future<ResourceUsage>& future,
+      const process::http::Request& request) const
+{
+  if (!future.isReady()) {
+    LOG(WARNING) << "Could not collect resource usage: "
+                 << (future.isFailed() ? future.failure() : "discarded");
+
+    return http::InternalServerError();
+  }
+
+  JSON::Array result;
+
+  foreach (const ResourceUsage::Executor& executor,
+           future.get().executors()) {
+    if (executor.has_statistics()) {
+      const ExecutorInfo info = executor.executor_info();
+
+      JSON::Object entry;
+      entry.values["framework_id"] = info.framework_id().value();
+      entry.values["executor_id"] = info.executor_id().value();
+      entry.values["executor_name"] = info.name();
+      entry.values["source"] = info.source();
+      entry.values["statistics"] = JSON::protobuf(executor.statistics());
+      result.values.push_back(entry);
+    }
+  }
+
+  foreachvalue (const Framework* framework, frameworks) {
+    foreachvalue (const Executor* executor, framework->executors) {
+      std::cout << "#### container ID: " << executor->containerId.value() << std::endl;
+      Future<ContainerStatus> containerStatus = containerizer->status(executor->containerId);
+//      std::cout << "#### container status: " << containerStatus.DebugString() << std::endl;
+      std::cout << containerStatus.get().DebugString() << std::endl;
+    }
+  }
+
+  return http::OK(result, request.url.query.get("jsonp"));
+}
+
+
 // TODO(dhamon): Move these to their own metrics.hpp|cpp.
 double Slave::_tasks_staging()
 {

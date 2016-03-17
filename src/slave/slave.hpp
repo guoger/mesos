@@ -398,6 +398,13 @@ public:
   // Returns the resource usage information for all executors.
   process::Future<ResourceUsage> usage();
 
+  process::Future<process::http::Response> containers(
+      const process::http::Request& request);
+
+  process::Future<process::http::Response> _containers(
+      const Future<ResourceUsage>& future,
+      const process::http::Request& request) const;
+
 private:
   void _authenticate();
   void authenticationTimeout(process::Future<bool> future);
@@ -461,6 +468,10 @@ private:
 
   private:
     Slave* slave;
+
+    process::Future<process::http::Response> _containers(
+        const Future<ResourceUsage>& future,
+        const process::http::Request& request) const;
   };
 
   friend struct Framework;
