@@ -602,6 +602,22 @@ string Slave::Http::CONTAINERS_HELP()
 Future<Response> Slave::Http::containers(const Request& request) const
 {
   JSON::Array result;
+  Future<ResourceUsage> resourceUsageFuture = slave->usage();
+  ResourceUsage resourceUsage = resourceUsageFuture.get();
+  ContainerID containerID = resourceUsage.executors().Get(0).container_id();
+  Future<ContainerStatus> containerStatusFuture = slave->containerizer->status(containerID);
+  ContainerStatus containerStatus = containerStatusFuture.get();
+  Future<ResourceStatistics> resourceStatisticsFuture = slave->containerizer->usage(containerID);
+  ResourceStatistics resourceStatistics = resourceStatisticsFuture.get();
+
+  std::cout << "########### ResourceUsage ##########" << std::endl;
+  std::cout << resourceUsage.DebugString() << std::endl;
+  std::cout << "########### ContainerStatus ##########" << std::endl;
+  std::cout << containerStatus.DebugString() << std::endl;
+  std::cout << "########### ContainerID ##########" << std::endl;
+  std::cout << containerID.DebugString() << std::endl;
+  std::cout << "########### ResourceStatistics ##########" << std::endl;
+  std::cout << resourceStatistics.DebugString() << std::endl;
 
 //  foreach (const ResourceUsage::Executor& executor,
 //           future.get().executors()) {
