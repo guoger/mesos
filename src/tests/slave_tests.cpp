@@ -1585,7 +1585,6 @@ TEST_F(SlaveTest, ContainersEndpoint)
   cgroupInfoNetCls->set_classid(42);
 
   CgroupInfo* cgroupInfo = new CgroupInfo();
-//  cgroupInfo.mutable_net_cls()
   cgroupInfo->set_allocated_net_cls(cgroupInfoNetCls);
 
   ContainerStatus containerStatus;
@@ -1649,7 +1648,6 @@ TEST_F(SlaveTest, ContainersEndpoint)
 
   Try<JSON::Array> parse = JSON::parse<JSON::Array>(response.get().body);
   ASSERT_SOME(parse);
-  std::cout << parse.get() << std::endl;
 
   // Assert /containers response body here
 

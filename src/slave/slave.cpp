@@ -5143,14 +5143,8 @@ Future<process::http::Response> Slave::_containers(
     }
   }
 
-  foreachvalue (const Framework* framework, frameworks) {
-    foreachvalue (const Executor* executor, framework->executors) {
-      std::cout << "#### container ID: " << executor->containerId.value() << std::endl;
-      Future<ContainerStatus> containerStatus = containerizer->status(executor->containerId);
-//      std::cout << "#### container status: " << containerStatus.DebugString() << std::endl;
-      std::cout << containerStatus.get().DebugString() << std::endl;
-    }
-  }
+  // Retrieve ContainerStatus using containerId in ResourceUsage here
+  // and assemble response using both ResourceUsage and ContainerStatus
 
   return http::OK(result, request.url.query.get("jsonp"));
 }
