@@ -54,6 +54,7 @@ public:
   Duration registry_store_timeout;
   bool log_auto_initialize;
   Duration slave_reregister_timeout;
+  Duration agent_reregister_timeout;
   std::string recovery_slave_removal_limit;
   Option<std::string> slave_removal_rate_limit;
   std::string webui_dir;
@@ -83,9 +84,22 @@ public:
   size_t max_completed_frameworks;
   size_t max_completed_tasks_per_framework;
 
+  Try<Nothing> load(const std::string& prefix);
+  Try<Nothing> load(
+      const Option<std::string>& prefix,
+      int argc,
+      const char* const* argv,
+      bool unknowns = false,
+      bool duplicates = false);
+
+  using FlagsBase::load;
+
 #ifdef WITH_NETWORK_ISOLATOR
   Option<size_t> max_executors_per_slave;
 #endif  // WITH_NETWORK_ISOLATOR
+
+private:
+  void duplicateFlags();
 };
 
 } // namespace master {

@@ -1846,6 +1846,7 @@ mesos_tests_SOURCES =						\
   tests/fetcher_tests.cpp					\
   tests/files_tests.cpp						\
   tests/flags.cpp						\
+  tests/flags_tests.cpp						\
   tests/gc_tests.cpp						\
   tests/hdfs_tests.cpp						\
   tests/health_check_tests.cpp					\

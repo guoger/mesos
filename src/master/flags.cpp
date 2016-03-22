@@ -120,6 +120,16 @@ mesos::internal::master::Flags::Flags()
         stringify(MIN_SLAVE_REREGISTER_TIMEOUT) + ".",
       MIN_SLAVE_REREGISTER_TIMEOUT);
 
+  add(&Flags::agent_reregister_timeout,
+      "agent_reregister_timeout",
+      "The timeout within which all agents are expected to re-register\n"
+      "when a new master is elected as the leader. Agents that do not\n"
+      "re-register within the timeout will be removed from the registry\n"
+      "and will be shutdown if they attempt to communicate with master.\n"
+      "NOTE: This value has to be at least " +
+        stringify(MIN_SLAVE_REREGISTER_TIMEOUT) + ".",
+      MIN_SLAVE_REREGISTER_TIMEOUT);
+
   // TODO(bmahler): Add a `Percentage` abstraction for flags.
   // TODO(bmahler): Add a `--production` flag for production defaults.
   add(&Flags::recovery_slave_removal_limit,
@@ -477,4 +487,35 @@ mesos::internal::master::Flags::Flags()
       "max_completed_tasks_per_framework",
       "Maximum number of completed tasks per framework to store in memory.",
       DEFAULT_MAX_COMPLETED_TASKS_PER_FRAMEWORK);
+}
+
+
+Try<Nothing> mesos::internal::master::Flags::load(const std::string& prefix)
+{
+  Try<Nothing> load = FlagsBase::load(prefix);
+  duplicateFlags();
+
+  return load;
+}
+
+
+Try<Nothing> mesos::internal::master::Flags::load(
+    const Option<std::string>& prefix,
+    int argc,
+    const char* const* argv,
+    bool unknowns,
+    bool duplicates)
+{
+  Try<Nothing> load = FlagsBase::load(prefix, argc, argv);
+  duplicateFlags();
+
+  return load;
+}
+
+
+void mesos::internal::master::Flags::duplicateFlags()
+{
+  if(agent_reregister_timeout != MIN_SLAVE_REREGISTER_TIMEOUT) {
+    slave_reregister_timeout = agent_reregister_timeout;
+  }
 }
