@@ -35,15 +35,16 @@ class FlagsTest : public MesosTest {};
 
 // This checks that master loads agent-related flags into Master::Flags
 // and also propagate them to slave-related members, see MESOS-3781
-// TODO: Change this test case when slave-related flags are removed
+// TODO(guoger): Change this test case when flags with keyword slave
+// are removed
 TEST(FlagsTest, AgentFlags)
 {
   setenv("MESOS_AGENT_REREGISTER_TIMEOUT", "15mins", 1);
-  setenv("MESOS_RECOVERY_AGENT_REMOVAL_LIMIT", "fake-removal-limit", 1);
-  setenv("MESOS_AGENT_REMOVAL_RATE_LIMIT", "fake-rate-limit", 1);
+  setenv("MESOS_RECOVERY_AGENT_REMOVAL_LIMIT", "50%", 1);
+  setenv("MESOS_AGENT_REMOVAL_RATE_LIMIT", "1/20mins", 1);
   setenv("MESOS_AUTHENTICATE_AGENTS", "true", 1);
-  setenv("MESOS_AGENT_PING_TIMEOUT", "10mins", 1);
-  setenv("MESOS_MAX_AGENT_PING_TIMEOUTS", "100mins", 1);
+  setenv("MESOS_AGENT_PING_TIMEOUT", "10secs", 1);
+  setenv("MESOS_MAX_AGENT_PING_TIMEOUTS", "10", 1);
   setenv("MESOS_MAX_EXECUTORS_PER_AGENT", "10", 1);
 
   master::Flags flags;
@@ -51,9 +52,17 @@ TEST(FlagsTest, AgentFlags)
   Try<Nothing> load = flags.load("MESOS_");
   EXPECT_EQ(load.isError(), false);
 
-  cout << flags.agent_reregister_timeout << endl;
-
   EXPECT_EQ(flags.slave_reregister_timeout, Minutes(15));
+  EXPECT_EQ(flags.recovery_slave_removal_limit, "50%");
+  CHECK_SOME(flags.slave_removal_rate_limit);
+  EXPECT_EQ(flags.slave_removal_rate_limit, Option<std::string>("1/20mins"));
+  EXPECT_EQ(flags.authenticate_slaves, true);
+  EXPECT_EQ(flags.slave_ping_timeout, Seconds(10));
+  EXPECT_EQ(flags.max_slave_ping_timeouts, 10);
+#ifdef WITH_NETWORK_ISOLATOR
+  CHECK_SOME(flags.max_executors_per_slave);
+  EXPECT_EQ(flags.max_executors_per_slave, Option<size_t>(10));
+#endif // WITH_NETWORK_ISOLATOR
 
   unsetenv("MESOS_AGENT_REREGISTER_TIMEOUT");
   unsetenv("MESOS_RECOVERY_AGENT_REMOVAL_LIMIT");

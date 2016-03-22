@@ -148,6 +148,22 @@ mesos::internal::master::Flags::Flags()
       "Values: [0%-100%]",
       stringify(RECOVERY_SLAVE_REMOVAL_PERCENT_LIMIT * 100.0) + "%");
 
+  add(&Flags::recovery_agent_removal_limit,
+      "recovery_agent_removal_limit",
+      "For failovers, limit on the percentage of agents that can be removed\n"
+      "from the registry *and* shutdown after the re-registration timeout\n"
+      "elapses. If the limit is exceeded, the master will fail over rather\n"
+      "than remove the agents.\n"
+      "This can be used to provide safety guarantees for production\n"
+      "environments. Production environments may expect that across master\n"
+      "failovers, at most a certain percentage of agents will fail\n"
+      "permanently (e.g. due to rack-level failures).\n"
+      "Setting this limit would ensure that a human needs to get\n"
+      "involved should an unexpected widespread failure of agents occur\n"
+      "in the cluster.\n"
+      "Values: [0%-100%]",
+      stringify(RECOVERY_SLAVE_REMOVAL_PERCENT_LIMIT * 100.0) + "%");
+
   // TODO(vinod): Add a `Rate` abstraction in stout and the
   // corresponding parser for flags.
   add(&Flags::slave_removal_rate_limit,
@@ -156,6 +172,13 @@ mesos::internal::master::Flags::Flags()
       "will be removed from the master when they fail health checks.\n"
       "By default, slaves will be removed as soon as they fail the health\n"
       "checks. The value is of the form `(Number of slaves)/(Duration)`.");
+
+  add(&Flags::agent_removal_rate_limit,
+        "agent_removal_rate_limit",
+        "The maximum rate (e.g., `1/10mins`, `2/3hrs`, etc) at which agents\n"
+        "will be removed from the master when they fail health checks.\n"
+        "By default, agents will be removed as soon as they fail the health\n"
+        "checks. The value is of the form `(Number of agents)/(Duration)`.");
 
   add(&Flags::webui_dir,
       "webui_dir",
@@ -220,6 +243,12 @@ mesos::internal::master::Flags::Flags()
       "authenticate_slaves",
       "If `true`, only authenticated slaves are allowed to register.\n"
       "If `false`, unauthenticated slaves are also allowed to register.",
+      false);
+
+  add(&Flags::authenticate_agents,
+      "authenticate_agents",
+      "If `true`, only authenticated agents are allowed to register.\n"
+      "If `false`, unauthenticated agents are also allowed to register.",
       false);
 
   add(&Flags::authenticate_http,
@@ -346,6 +375,13 @@ mesos::internal::master::Flags::Flags()
       "monitoring/isolation technique imposes an implicit resource\n"
       "acquisition on each executor (# ephemeral ports), as a result\n"
       "one can only run a certain number of executors on each slave.");
+
+  add(&Flags::max_executors_per_agent,
+      "max_executors_per_agent",
+      "Maximum number of executors allowed per agent. The network\n"
+      "monitoring/isolation technique imposes an implicit resource\n"
+      "acquisition on each executor (# ephemeral ports), as a result\n"
+      "one can only run a certain number of executors on each agent.");
 #endif // WITH_NETWORK_ISOLATOR
 
   // TODO(karya): When we have optimistic offers, this will only
@@ -441,6 +477,24 @@ mesos::internal::master::Flags::Flags()
         return None();
       });
 
+  add(&Flags::agent_ping_timeout,
+      "agent_ping_timeout",
+      "The timeout within which each agent is expected to respond to a\n"
+      "ping from the master. Agents that do not respond within\n"
+      "max_agent_ping_timeouts ping retries will be asked to shutdown.\n"
+      "NOTE: The total ping timeout (`agent_ping_timeout` multiplied by\n"
+      "`max_agent_ping_timeouts`) should be greater than the ZooKeeper\n"
+      "session timeout to prevent useless re-registration attempts.\n",
+      DEFAULT_SLAVE_PING_TIMEOUT,
+      [](const Duration& value) -> Option<Error> {
+        if (value < Seconds(1) || value > Minutes(15)) {
+          return Error("Expected `--agent_ping_timeout` to be between " +
+                       stringify(Seconds(1)) + " and " +
+                       stringify(Minutes(15)));
+        }
+        return None();
+      });
+
   add(&Flags::max_slave_ping_timeouts,
       "max_slave_ping_timeouts",
       "The number of times a slave can fail to respond to a\n"
@@ -450,6 +504,19 @@ mesos::internal::master::Flags::Flags()
       [](size_t value) -> Option<Error> {
         if (value < 1) {
           return Error("Expected `--max_slave_ping_timeouts` to be at least 1");
+        }
+        return None();
+      });
+
+  add(&Flags::max_agent_ping_timeouts,
+      "max_agent_ping_timeouts",
+      "The number of times a agent can fail to respond to a\n"
+      "ping from the master. Agents that do not respond within\n"
+      "`max_agent_ping_timeouts` ping retries will be asked to shutdown.\n",
+      DEFAULT_MAX_SLAVE_PING_TIMEOUTS,
+      [](size_t value) -> Option<Error> {
+        if (value < 1) {
+          return Error("Expected `--max_agent_ping_timeouts` to be at least 1");
         }
         return None();
       });
@@ -513,9 +580,39 @@ Try<Nothing> mesos::internal::master::Flags::load(
 }
 
 
+// This is to duplicate flags with keyword 'slave', in order to gracefully
+// deprecate works 'slave' with word 'agent'
+// TODO(guoger): remove this when 'slave' flags are removed
 void mesos::internal::master::Flags::duplicateFlags()
 {
   if(agent_reregister_timeout != MIN_SLAVE_REREGISTER_TIMEOUT) {
     slave_reregister_timeout = agent_reregister_timeout;
   }
+
+  if(recovery_agent_removal_limit !=
+      stringify(RECOVERY_SLAVE_REMOVAL_PERCENT_LIMIT * 100.0) + "%") {
+        recovery_slave_removal_limit = recovery_agent_removal_limit;
+  }
+
+  if(agent_removal_rate_limit.isSome()) {
+    slave_removal_rate_limit = agent_removal_rate_limit;
+  }
+
+  if(authenticate_agents) {
+    authenticate_slaves = authenticate_agents;
+  }
+
+  if(agent_ping_timeout != DEFAULT_SLAVE_PING_TIMEOUT) {
+    slave_ping_timeout = agent_ping_timeout;
+  }
+
+  if(max_agent_ping_timeouts != DEFAULT_MAX_SLAVE_PING_TIMEOUTS) {
+    max_slave_ping_timeouts = max_agent_ping_timeouts;
+  }
+
+#ifdef WITH_NETWORK_ISOLATOR
+  if(max_executors_per_agent.isSome()) {
+    max_executors_per_slave = max_executors_per_agent;
+  }
+#endif // WITH_NETWORK_ISOLATOR
 }
