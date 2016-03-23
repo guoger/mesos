@@ -34,10 +34,11 @@ class FlagsTest : public MesosTest {};
 
 
 // This checks that master loads agent-related flags into Master::Flags
-// and also propagate them to slave-related members, see MESOS-3781
+// from environment variables and also propagate them to slave-related members,
+// see MESOS-3781.
 // TODO(guoger): Change this test case when flags with keyword slave
 // are removed
-TEST(FlagsTest, AgentFlags)
+TEST(FlagsTest, AgentFlagsFromEnv)
 {
   setenv("MESOS_AGENT_REREGISTER_TIMEOUT", "15mins", 1);
   setenv("MESOS_RECOVERY_AGENT_REMOVAL_LIMIT", "50%", 1);
@@ -50,7 +51,7 @@ TEST(FlagsTest, AgentFlags)
   master::Flags flags;
 
   Try<Nothing> load = flags.load("MESOS_");
-  EXPECT_EQ(load.isError(), false);
+  CHECK_SOME(load);
 
   EXPECT_EQ(flags.slave_reregister_timeout, Minutes(15));
   EXPECT_EQ(flags.recovery_slave_removal_limit, "50%");
@@ -71,6 +72,58 @@ TEST(FlagsTest, AgentFlags)
   unsetenv("MESOS_AGENT_PING_TIMEOUT");
   unsetenv("MESOS_MAX_AGENT_PING_TIMEOUTS");
   unsetenv("MESOS_MAX_EXECUTORS_PER_AGENT");
+}
+
+
+// This checks that master loads agent-related flags into Master::Flags
+// from command line arguments and also propagate them to slave-related
+// members, see MESOS-3781.
+// TODO(guoger): Change this test case when flags with keyword slave
+// are removed
+TEST(FlagsTest, AgentFlagsFromCmdArgs)
+{
+#ifdef WITH_NETWORK_ISOLATOR
+  int argc = 8;
+  const char* const argv[] = {
+      "mesos-executable",
+      "--agent_reregister_timeout=15mins",
+      "--recovery_agent_removal_limit=50%",
+      "--agent_removal_rate_limit=1/20mins",
+      "--authenticate_agents=true",
+      "--agent_ping_timeout=10secs",
+      "--max_agent_ping_timeouts=10",
+      "--max_executors_per_agent=10"
+  };
+#else
+  int argc = 7;
+  const char* const argv[] = {
+      "mesos-executable",
+      "--agent_reregister_timeout=15mins",
+      "--recovery_agent_removal_limit=50%",
+      "--agent_removal_rate_limit=1/20mins",
+      "--authenticate_agents=true",
+      "--agent_ping_timeout=10secs",
+      "--max_agent_ping_timeouts=10"
+  };
+#endif
+
+  master::Flags flags;
+
+  Try<Nothing> load = flags.load("MESOS_", argc, argv);
+  CHECK_SOME(load);
+
+  EXPECT_EQ(flags.slave_reregister_timeout, Minutes(15));
+  EXPECT_EQ(flags.recovery_slave_removal_limit, "50%");
+  CHECK_SOME(flags.slave_removal_rate_limit);
+  EXPECT_EQ(flags.slave_removal_rate_limit, Option<std::string>("1/20mins"));
+  EXPECT_EQ(flags.authenticate_slaves, true);
+  EXPECT_EQ(flags.slave_ping_timeout, Seconds(10));
+  EXPECT_EQ(flags.max_slave_ping_timeouts, 10);
+
+#ifdef WITH_NETWORK_ISOLATOR
+  CHECK_SOME(flags.max_executors_per_slave);
+  EXPECT_EQ(flags.max_executors_per_slave, Option<size_t>(10));
+#endif // WITH_NETWORK_ISOLATOR
 }
 
 } // namespace tests {
