@@ -88,6 +88,20 @@ public:
 
   virtual ~ResourceMonitorProcess() {}
 
+  Future<http::Response> containers(
+      const lambda::function<process
+        ::Future<ContainerStatus>(list<ContainerID>)>& status,
+      const http::Request& request)
+  {
+    return usage()
+      .then(defer(
+          self(),
+          &Self::_containers,
+          lambda::_1,
+          status,
+          request));
+  }
+
 protected:
   virtual void initialize()
   {
@@ -148,6 +162,44 @@ private:
     return http::OK(result, request.url.query.get("jsonp"));
   }
 
+  Future<http::Response> _containers(
+      const Future<ResourceUsage>& future,
+      const lambda::function<process
+        ::Future<ContainerStatus>(list<ContainerID>)>& status,
+      const http::Request& request)
+  {
+    if (!future.isReady()) {
+      LOG(WARNING) << "Could not collect resource usage: "
+                   << (future.isFailed() ? future.failure() : "discarded");
+
+      return http::InternalServerError();
+    }
+
+    JSON::Array result;
+
+    foreach (const ResourceUsage::Executor& executor,
+             future.get().executors()) {
+      if (executor.has_statistics()) {
+        const ExecutorInfo info = executor.executor_info();
+
+        JSON::Object entry;
+        entry.values["framework_id"] = info.framework_id().value();
+        entry.values["executor_id"] = info.executor_id().value();
+        entry.values["executor_name"] = info.name();
+        entry.values["source"] = info.source();
+        entry.values["statistics"] = JSON::protobuf(executor.statistics());
+        entry.values["container_id"] = executor.container_id().value();
+
+        result.values.push_back(entry);
+      }
+    }
+
+    // Retrieve ContainerStatus using containerId in ResourceUsage here
+    // and assemble response using both ResourceUsage and ContainerStatus
+
+    return http::OK(result, request.url.query.get("jsonp"));
+  }
+
   // Callback used to retrieve resource usage information from slave.
   const lambda::function<Future<ResourceUsage>()> usage;
 
@@ -168,6 +220,19 @@ ResourceMonitor::~ResourceMonitor()
 {
   terminate(process.get());
   wait(process.get());
+}
+
+
+process::Future<process::http::Response> ResourceMonitor::containers(
+    const lambda::function<process
+      ::Future<ContainerStatus>(list<ContainerID>)>& status,
+    const process::http::Request& request)
+{
+  return dispatch(
+      process.get(),
+      &ResourceMonitorProcess::containers,
+      status,
+      request);
 }
 
 } // namespace slave {

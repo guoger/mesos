@@ -1528,7 +1528,7 @@ TEST_F(SlaveTest, ContainersEndpointNoExecutors)
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
-  slave::Flags flags = this->CreateSlaveFlags();
+  slave::Flags flags = CreateSlaveFlags();
 
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
   TestContainerizer containerizer(&exec);
@@ -1554,7 +1554,7 @@ TEST_F(SlaveTest, ContainersEndpoint)
   Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
-  slave::Flags flags = this->CreateSlaveFlags();
+  slave::Flags flags = CreateSlaveFlags();
 
   flags.hostname = "localhost";
   flags.resources = "cpus:4;mem:2048;disk:512;ports:[33000-34000]";

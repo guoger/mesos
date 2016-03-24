@@ -15,6 +15,7 @@
 // limitations under the License.
 
 #include <limits>
+#include <list>
 #include <vector>
 
 #include <gmock/gmock.h>
@@ -25,7 +26,6 @@
 #include <process/future.hpp>
 #include <process/gmock.hpp>
 #include <process/gtest.hpp>
-#include <process/http.hpp>
 #include <process/owned.hpp>
 #include <process/pid.hpp>
 #include <process/process.hpp>
@@ -47,6 +47,7 @@ using mesos::internal::slave::ResourceMonitor;
 using mesos::internal::slave::Slave;
 
 using std::numeric_limits;
+using std::list;
 using std::vector;
 
 namespace mesos {
@@ -167,6 +168,109 @@ TEST(MonitorTest, MissingStatistics)
   AWAIT_EXPECT_RESPONSE_STATUS_EQ(http::OK().status, response);
   AWAIT_EXPECT_RESPONSE_HEADER_EQ(APPLICATION_JSON, "Content-Type", response);
   AWAIT_EXPECT_RESPONSE_BODY_EQ("[]", response);
+}
+
+
+// This test checks the correct returned value of monitor.containers
+// when there is no container running.
+TEST(MonitorTest, NoContainer)
+{
+  ResourceMonitor monitor([]() -> Future<ResourceUsage> {
+    return ResourceUsage();
+  });
+
+  const http::Request request = createRequest(http::URL(), "GET");
+
+  Future<http::Response> response = monitor.containers(
+      [](list<ContainerID> containerIds) -> Future<ContainerStatus> {
+        return ContainerStatus();
+      },
+      request);
+
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(http::OK().status, response);
+  AWAIT_EXPECT_RESPONSE_HEADER_EQ(APPLICATION_JSON, "Content-Type", response);
+  AWAIT_EXPECT_RESPONSE_BODY_EQ("[]", response);
+}
+
+
+TEST(MonitorTest, ContainerStatus)
+{
+  FrameworkID frameworkId;
+  frameworkId.set_value("framework");
+
+  ExecutorID executorId;
+  executorId.set_value("executor");
+
+  ExecutorInfo executorInfo;
+  executorInfo.mutable_executor_id()->CopyFrom(executorId);
+  executorInfo.mutable_framework_id()->CopyFrom(frameworkId);
+  executorInfo.set_name("name");
+  executorInfo.set_source("source");
+
+  ContainerID containerId;
+  containerId.set_value("fake-container-id");
+
+  ResourceStatistics statistics;
+  statistics.set_cpus_nr_periods(100);
+  statistics.set_cpus_nr_throttled(2);
+  statistics.set_cpus_user_time_secs(4);
+  statistics.set_cpus_system_time_secs(1);
+  statistics.set_cpus_throttled_time_secs(0.5);
+  statistics.set_cpus_limit(1.0);
+  statistics.set_mem_file_bytes(0);
+  statistics.set_mem_anon_bytes(0);
+  statistics.set_mem_mapped_file_bytes(0);
+  statistics.set_mem_rss_bytes(1024);
+  statistics.set_mem_limit_bytes(2048);
+  statistics.set_timestamp(0);
+
+  ResourceMonitor monitor([=]() -> Future<ResourceUsage> {
+    Resources resources = Resources::parse("cpus:1;mem:2").get();
+
+    ResourceUsage usage;
+    ResourceUsage::Executor* executor = usage.add_executors();
+    executor->mutable_executor_info()->CopyFrom(executorInfo);
+    executor->mutable_allocated()->CopyFrom(resources);
+    executor->mutable_statistics()->CopyFrom(statistics);
+    executor->mutable_container_id()->CopyFrom(containerId);
+
+    return usage;
+  });
+
+//  CgroupInfo_NetCls cgroupInfoNetCls;
+//  cgroupInfoNetCls.set_classid(42);
+//
+//  CgroupInfo cgroupInfo;
+//  cgroupInfo.set_allocated_net_cls(&cgroupInfoNetCls);
+//
+//  ContainerStatus containerStatus;
+//  containerStatus.set_allocated_cgroup_info(&cgroupInfo);
+
+  const http::Request request = createRequest(http::URL(), "GET");
+
+  Future<http::Response> response = monitor.containers(
+      [](list<ContainerID>)
+      -> Future<ContainerStatus> {
+        return ContainerStatus();
+      },
+      request);
+
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(http::OK().status, response);
+  AWAIT_EXPECT_RESPONSE_HEADER_EQ(APPLICATION_JSON, "Content-Type", response);
+
+  JSON::Array expected;
+  JSON::Object usage;
+  usage.values["executor_id"] = "executor";
+  usage.values["executor_name"] = "name";
+  usage.values["framework_id"] = "framework";
+  usage.values["source"] = "source";
+  usage.values["statistics"] = JSON::protobuf(statistics);
+  usage.values["container_id"] = "fake-container-id";
+  expected.values.push_back(usage);
+
+  Try<JSON::Array> result = JSON::parse<JSON::Array>(response.get().body);
+  ASSERT_SOME(result);
+  ASSERT_EQ(expected, result.get());
 }
 
 
