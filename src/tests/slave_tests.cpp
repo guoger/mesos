@@ -1539,7 +1539,8 @@ TEST_F(SlaveTest, ContainersEndpointNoExecutors)
     StartSlave(detector.get(), &containerizer, flags);
   ASSERT_SOME(slave);
 
-  Future<Response> response = process::http::get(slave.get()->pid, "containers");
+  Future<Response> response =
+    process::http::get(slave.get()->pid, "containers");
 
   AWAIT_EXPECT_RESPONSE_STATUS_EQ(http::OK().status, response);
   AWAIT_EXPECT_RESPONSE_HEADER_EQ(APPLICATION_JSON, "Content-Type", response);
@@ -1641,7 +1642,8 @@ TEST_F(SlaveTest, ContainersEndpoint)
   AWAIT_READY(status);
   EXPECT_EQ(TASK_RUNNING, status.get().state());
 
-  Future<Response> response = process::http::get(slave.get()->pid, "containers");
+  Future<Response> response =
+    process::http::get(slave.get()->pid, "containers");
 
   AWAIT_EXPECT_RESPONSE_STATUS_EQ(http::OK().status, response);
   AWAIT_EXPECT_RESPONSE_HEADER_EQ(APPLICATION_JSON, "Content-Type", response);

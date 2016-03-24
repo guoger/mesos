@@ -5123,7 +5123,7 @@ Future<process::http::Response> Slave::_containers(
     LOG(WARNING) << "Could not collect resource usage: "
                  << (future.isFailed() ? future.failure() : "discarded");
 
-    return http::InternalServerError();
+    return process::http::InternalServerError();
   }
 
   JSON::Array result;
@@ -5146,7 +5146,7 @@ Future<process::http::Response> Slave::_containers(
   // Retrieve ContainerStatus using containerId in ResourceUsage here
   // and assemble response using both ResourceUsage and ContainerStatus
 
-  return http::OK(result, request.url.query.get("jsonp"));
+  return process::http::OK(result, request.url.query.get("jsonp"));
 }
 
 

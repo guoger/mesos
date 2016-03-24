@@ -401,13 +401,13 @@ public:
   process::Future<process::http::Response> containers(
       const process::http::Request& request);
 
-  process::Future<process::http::Response> _containers(
-      const Future<ResourceUsage>& future,
-      const process::http::Request& request) const;
-
 private:
   void _authenticate();
   void authenticationTimeout(process::Future<bool> future);
+
+  process::Future<process::http::Response> _containers(
+      const Future<ResourceUsage>& future,
+      const process::http::Request& request) const;
 
   // Shut down an executor. This is a two phase process. First, an
   // executor receives a shut down message (shut down phase), then
@@ -456,10 +456,6 @@ private:
     process::Future<process::http::Response> containers(
         const process::http::Request& request) const;
 
-    // /slave/containers
-    process::Future<process::http::Response> containers(
-        const process::http::Request& request) const;
-
     static std::string EXECUTOR_HELP();
     static std::string FLAGS_HELP();
     static std::string HEALTH_HELP();
@@ -468,10 +464,6 @@ private:
 
   private:
     Slave* slave;
-
-    process::Future<process::http::Response> _containers(
-        const Future<ResourceUsage>& future,
-        const process::http::Request& request) const;
   };
 
   friend struct Framework;
