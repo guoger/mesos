@@ -20,13 +20,15 @@
 #include <list>
 #include <vector>
 
-#include <mesos/slave/container_logger.hpp>
-#include <mesos/slave/isolator.hpp>
+#include <process/sequence.hpp>
 
 #include <process/metrics/counter.hpp>
 
 #include <stout/hashmap.hpp>
 #include <stout/multihashmap.hpp>
+
+#include <mesos/slave/container_logger.hpp>
+#include <mesos/slave/isolator.hpp>
 
 #include "slave/state.hpp"
 
@@ -96,6 +98,9 @@ public:
   virtual process::Future<ResourceStatistics> usage(
       const ContainerID& containerId);
 
+  virtual process::Future<ContainerStatus> status(
+      const ContainerID& containerId);
+
   virtual process::Future<containerizer::Termination> wait(
       const ContainerID& containerId);
 
@@ -150,6 +155,9 @@ public:
   virtual process::Future<ResourceStatistics> usage(
       const ContainerID& containerId);
 
+  virtual process::Future<ContainerStatus> status(
+      const ContainerID& containerId);
+
   virtual process::Future<containerizer::Termination> wait(
       const ContainerID& containerId);
 
@@ -183,8 +191,9 @@ private:
       const std::list<mesos::slave::ContainerState>& recovered,
       const hashset<ContainerID>& orphans);
 
-  process::Future<std::list<Option<mesos::slave::ContainerPrepareInfo>>>
+  process::Future<std::list<Option<mesos::slave::ContainerLaunchInfo>>>
     prepare(const ContainerID& containerId,
+            const Option<TaskInfo>& taskInfo,
             const ExecutorInfo& executorInfo,
             const std::string& directory,
             const Option<std::string>& user,
@@ -199,6 +208,7 @@ private:
 
   process::Future<bool> _launch(
       const ContainerID& containerId,
+      const Option<TaskInfo>& taskInfo,
       const ExecutorInfo& executorInfo,
       const std::string& directory,
       const Option<std::string>& user,
@@ -215,7 +225,7 @@ private:
       const SlaveID& slaveId,
       const process::PID<Slave>& slavePid,
       bool checkpoint,
-      const std::list<Option<mesos::slave::ContainerPrepareInfo>>& scripts);
+      const std::list<Option<mesos::slave::ContainerLaunchInfo>>& launchInfos);
 
   process::Future<bool> isolate(
       const ContainerID& containerId,
@@ -275,6 +285,7 @@ private:
 
   enum State
   {
+    PROVISIONING,
     PREPARING,
     ISOLATING,
     FETCHING,
@@ -292,11 +303,16 @@ private:
     // the executor exits.
     process::Future<Option<int>> status;
 
+    // We keep track of the future that is waiting for the provisioner's
+    // `ProvisionInfo`, so that destroy will only start calling
+    // provisioner->destroy after provisioner->provision has finished.
+    std::list<process::Future<ProvisionInfo>> provisionInfos;
+
     // We keep track of the future that is waiting for all the
     // isolators' prepare futures, so that destroy will only start
     // calling cleanup after all isolators has finished preparing.
-    process::Future<std::list<Option<mesos::slave::ContainerPrepareInfo>>>
-      prepareInfos;
+    process::Future<std::list<Option<mesos::slave::ContainerLaunchInfo>>>
+      launchInfos;
 
     // We keep track of the future that is waiting for all the
     // isolators' isolate futures, so that destroy will only start
@@ -315,6 +331,11 @@ private:
     std::string directory;
 
     State state;
+
+    // Used when `status` needs to be collected from isolators
+    // associated with this container. `Sequence` allows us to
+    // maintain the order of `status` requests for a given container.
+    process::Sequence sequence;
   };
 
   hashmap<ContainerID, process::Owned<Container>> containers_;

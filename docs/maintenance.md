@@ -1,4 +1,5 @@
 ---
+title: Apache Mesos - Maintenance Primitives
 layout: documentation
 ---
 
@@ -134,6 +135,7 @@ machine's configuration, the operator should use the `--hostname` and `--ip`
 options when starting agents.
 
 The master checks that a maintenance schedule has the following properties:
+
 * Each maintenance window in the schedule must have at least one machine
   and a specified unavailability interval.
 * Each machine must only appear in the schedule once.
@@ -155,8 +157,8 @@ To cancel a maintenance schedule, the operator should post an empty schedule.
 
 As soon as a schedule is posted to the Mesos master, the following things occur:
 
-* The schedule is stored in the replicated log.  This means
-  the schedule is persisted in case of master failover.
+* The schedule is stored in the [replicated log](replicated-log-internals.md).
+  This means the schedule is persisted in case of master failover.
 * All machines in the schedule are immediately transitioned into Draining
   mode.  The mode of each machine is also persisted in the replicated log.
 * All frameworks using resources on affected agents are immediately

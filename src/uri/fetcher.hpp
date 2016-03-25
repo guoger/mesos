@@ -25,6 +25,7 @@
 
 #include <mesos/uri/fetcher.hpp>
 
+#include "uri/fetchers/copy.hpp"
 #include "uri/fetchers/curl.hpp"
 #include "uri/fetchers/docker.hpp"
 #include "uri/fetchers/hadoop.hpp"
@@ -37,6 +38,7 @@ namespace fetcher {
  * The combined flags for all built-in plugins.
  */
 class Flags :
+  public CopyFetcherPlugin::Flags,
   public CurlFetcherPlugin::Flags,
   public HadoopFetcherPlugin::Flags,
   public DockerFetcherPlugin::Flags {};

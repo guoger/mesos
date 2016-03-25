@@ -21,6 +21,8 @@
 #include <stout/gtest.hpp>
 #include <stout/os.hpp>
 
+#include <stout/tests/utils.hpp>
+
 #include "encoder.hpp"
 
 namespace io = process::io;
@@ -29,7 +31,9 @@ using process::Future;
 
 using std::string;
 
-TEST(IOTest, Poll)
+class IOTest: public TemporaryDirectoryTest {};
+
+TEST_F(IOTest, Poll)
 {
   ASSERT_TRUE(GTEST_IS_THREADSAFE);
 
@@ -53,7 +57,7 @@ TEST(IOTest, Poll)
 }
 
 
-TEST(IOTest, Read)
+TEST_F(IOTest, Read)
 {
   ASSERT_TRUE(GTEST_IS_THREADSAFE);
 
@@ -121,7 +125,7 @@ TEST(IOTest, Read)
 }
 
 
-TEST(IOTest, BufferedRead)
+TEST_F(IOTest, BufferedRead)
 {
   // 128 Bytes.
   string data =
@@ -174,7 +178,7 @@ TEST(IOTest, BufferedRead)
 }
 
 
-TEST(IOTest, Write)
+TEST_F(IOTest, Write)
 {
   ASSERT_TRUE(GTEST_IS_THREADSAFE);
 
@@ -215,7 +219,7 @@ TEST(IOTest, Write)
 }
 
 
-TEST(IOTest, DISABLED_BlockingWrite)
+TEST_F(IOTest, DISABLED_BlockingWrite)
 {
   ASSERT_TRUE(GTEST_IS_THREADSAFE);
 
@@ -290,7 +294,7 @@ TEST(IOTest, DISABLED_BlockingWrite)
 }
 
 
-TEST(IOTest, Redirect)
+TEST_F(IOTest, Redirect)
 {
   ASSERT_TRUE(GTEST_IS_THREADSAFE);
 
@@ -361,7 +365,7 @@ TEST(IOTest, Redirect)
 }
 
 
-TEST(IOTest, Peek)
+TEST_F(IOTest, Peek)
 {
   ASSERT_TRUE(GTEST_IS_THREADSAFE);
 

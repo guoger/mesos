@@ -81,6 +81,8 @@ using namespace zookeeper;
 
 using mesos::Authorizer;
 using mesos::MasterInfo;
+using mesos::Parameter;
+using mesos::Parameters;
 
 using mesos::master::allocator::Allocator;
 
@@ -121,43 +123,50 @@ int main(int argc, char** argv)
   // have one instance of libprocess per execution, we only want to
   // advertise the IP and port option once, here).
   Option<string> ip;
-  flags.add(&ip, "ip", "IP address to listen on");
+  flags.add(&ip,
+            "ip",
+            "IP address to listen on. This cannot be used in conjunction\n"
+            "with `--ip_discovery_command`.");
 
   uint16_t port;
-  flags.add(&port, "port", "Port to listen on", MasterInfo().port());
+  flags.add(&port,
+            "port",
+            "Port to listen on.",
+            MasterInfo().port());
 
   Option<string> advertise_ip;
   flags.add(&advertise_ip,
             "advertise_ip",
-            "IP address advertised to reach mesos master.\n"
-            "Mesos master does not bind using this IP address.\n"
-            "However, this IP address may be used to access Mesos master.");
+            "IP address advertised to reach this Mesos master.\n"
+            "The master does not bind using this IP address.\n"
+            "However, this IP address may be used to access this master.");
 
   Option<string> advertise_port;
   flags.add(&advertise_port,
             "advertise_port",
-            "Port advertised to reach mesos master (alongwith advertise_ip).\n"
-            "Mesos master does not bind using this port.\n"
-            "However, this port (alongwith advertise_ip) may be used to\n"
-            "access Mesos master.");
+            "Port advertised to reach Mesos master (along with\n"
+            "`advertise_ip`). The master does not bind to this port.\n"
+            "However, this port (along with `advertise_ip`) may be used to\n"
+            "access this master.");
 
   Option<string> zk;
   flags.add(&zk,
             "zk",
             "ZooKeeper URL (used for leader election amongst masters)\n"
             "May be one of:\n"
-            "  zk://host1:port1,host2:port2,.../path\n"
-            "  zk://username:password@host1:port1,host2:port2,.../path\n"
-            "  file:///path/to/file (where file contains one of the above)");
+            "  `zk://host1:port1,host2:port2,.../path`\n"
+            "  `zk://username:password@host1:port1,host2:port2,.../path`\n"
+            "  `file:///path/to/file` (where file contains one of the above)\n"
+            "NOTE: Not required if master is run in standalone mode (non-HA).");
 
   // Optional IP discover script that will set the Master IP.
   // If set, its output is expected to be a valid parseable IP string.
   Option<string> ip_discovery_command;
   flags.add(&ip_discovery_command,
-      "ip_discovery_command",
-      "Optional IP discovery binary: if set, it is expected to emit\n"
-      "the IP address which Master will try to bind to.\n"
-      "Cannot be used in conjunction with --ip.");
+            "ip_discovery_command",
+            "Optional IP discovery binary: if set, it is expected to emit\n"
+            "the IP address which the master will try to bind to.\n"
+            "Cannot be used in conjunction with `--ip`.");
 
   Try<Nothing> load = flags.load("MESOS_", argc, argv);
 
@@ -195,7 +204,7 @@ int main(int argc, char** argv)
 
   if (ip_discovery_command.isSome() && ip.isSome()) {
     EXIT(EXIT_FAILURE) << flags.usage(
-        "Only one of --ip or --ip_discovery_command should be specified");
+        "Only one of `--ip` or `--ip_discovery_command` should be specified");
   }
 
   if (ip_discovery_command.isSome()) {
@@ -240,7 +249,7 @@ int main(int argc, char** argv)
   }
 
   // Create an instance of allocator.
-  const std::string allocatorName = flags.allocator;
+  const string allocatorName = flags.allocator;
   Try<Allocator*> allocator = Allocator::create(allocatorName);
 
   if (allocator.isError()) {
@@ -339,7 +348,7 @@ int main(int argc, char** argv)
   }
   detector = detector_.get();
 
-  Option<Authorizer*> authorizer = None();
+  Option<Authorizer*> authorizer_ = None();
 
   auto authorizerNames = strings::split(flags.authorizers, ",");
   if (authorizerNames.empty()) {
@@ -348,46 +357,31 @@ int main(int argc, char** argv)
   if (authorizerNames.size() > 1) {
     EXIT(EXIT_FAILURE) << "Multiple authorizers not supported";
   }
-  std::string authorizerName = authorizerNames[0];
+  string authorizerName = authorizerNames[0];
 
   // NOTE: The flag --authorizers overrides the flag --acls, i.e. if
   // a non default authorizer is requested, it will be used and
   // the contents of --acls will be ignored.
-  // TODO(arojas): Add support for multiple authorizers.
-  if (authorizerName != master::DEFAULT_AUTHORIZER ||
-      flags.acls.isSome()) {
-    Try<Authorizer*> create = Authorizer::create(authorizerName);
+  // TODO(arojas): Consider adding support for multiple authorizers.
+  Result<Authorizer*> authorizer((None()));
+  if (authorizerName != master::DEFAULT_AUTHORIZER) {
+    LOG(INFO) << "Creating '" << authorizerName << "' authorizer";
 
-    if (create.isError()) {
-      EXIT(EXIT_FAILURE) << "Could not create '" << authorizerName
-                         << "' authorizer: " << create.error();
+    authorizer = Authorizer::create(authorizerName);
+  } else {
+    // `authorizerName` is `DEFAULT_AUTHORIZER` at this point.
+    if (flags.acls.isSome()) {
+      LOG(INFO) << "Creating default '" << authorizerName << "' authorizer";
+
+      authorizer = Authorizer::create(flags.acls.get());
     }
+  }
 
-    authorizer = create.get();
-
-    LOG(INFO) << "Using '" << authorizerName << "' authorizer";
-
-    // Only default authorizer requires initialization, see the comment
-    // for `initialize()` in "mesos/authorizer/authorizer.hpp".
-    if (authorizerName == master::DEFAULT_AUTHORIZER) {
-      Try<Nothing> initialize = authorizer.get()->initialize(flags.acls.get());
-
-      if (initialize.isError()) {
-        // Failing to initialize the authorizer leads to undefined
-        // behavior, therefore we default to skip authorization
-        // altogether.
-        LOG(WARNING) << "Authorization disabled: Failed to initialize '"
-                     << authorizerName << "' authorizer: "
-                     << initialize.error();
-
-        delete authorizer.get();
-        authorizer = None();
-      }
-    } else if (flags.acls.isSome()) {
-      LOG(WARNING) << "Ignoring contents of --acls flag, because '"
-                   << authorizerName << "' authorizer will be used instead "
-                   << " of the default.";
-    }
+  if (authorizer.isError()) {
+    EXIT(EXIT_FAILURE) << "Could not create '" << authorizerName
+                       << "' authorizer: " << authorizer.error();
+  } else if (authorizer.isSome()) {
+    authorizer_ = authorizer.get();
   }
 
   Option<shared_ptr<RateLimiter>> slaveRemovalLimiter = None();
@@ -471,7 +465,7 @@ int main(int argc, char** argv)
       &files,
       contender,
       detector,
-      authorizer,
+      authorizer_,
       slaveRemovalLimiter,
       flags);
 
@@ -496,8 +490,8 @@ int main(int argc, char** argv)
   delete contender;
   delete detector;
 
-  if (authorizer.isSome()) {
-    delete authorizer.get();
+  if (authorizer_.isSome()) {
+    delete authorizer_.get();
   }
 
   return EXIT_SUCCESS;

@@ -14,7 +14,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <list>
+#include <string>
 #include <vector>
 
 #include <glog/logging.h>
@@ -26,19 +26,21 @@
 #include <process/collect.hpp>
 #include <process/defer.hpp>
 #include <process/dispatch.hpp>
-#include <process/subprocess.hpp>
 
-#include "common/status_utils.hpp"
+#include <mesos/docker/spec.hpp>
 
 #include "slave/containerizer/mesos/provisioner/docker/metadata_manager.hpp"
 #include "slave/containerizer/mesos/provisioner/docker/store.hpp"
 #include "slave/containerizer/mesos/provisioner/docker/paths.hpp"
 #include "slave/containerizer/mesos/provisioner/docker/puller.hpp"
 
+#include "uri/fetcher.hpp"
+
 using namespace process;
 
+namespace spec = docker::spec;
+
 using std::list;
-using std::pair;
 using std::string;
 using std::vector;
 
@@ -65,29 +67,38 @@ public:
   Future<ImageInfo> get(const mesos::Image& image);
 
 private:
-  Future<Image> _get(const Image::Name& name, const Option<Image>& image);
+  Future<Image> _get(
+      const spec::ImageReference& reference,
+      const Option<Image>& image);
+
   Future<ImageInfo> __get(const Image& image);
 
   Future<vector<string>> moveLayers(
-      const std::list<pair<string, string>>& layerPaths);
-
-  Future<Image> storeImage(
-      const Image::Name& name,
-      const std::vector<std::string>& layerIds);
+      const string& staging,
+      const vector<string>& layerIds);
 
   Future<Nothing> moveLayer(
-      const pair<string, string>& layerPath);
+      const string& staging,
+      const string& layerId);
 
   const Flags flags;
+
   Owned<MetadataManager> metadataManager;
   Owned<Puller> puller;
-  hashmap<std::string, Owned<Promise<Image>>> pulling;
+  hashmap<string, Owned<Promise<Image>>> pulling;
 };
 
 
 Try<Owned<slave::Store>> Store::create(const Flags& flags)
 {
-  Try<Owned<Puller>> puller = Puller::create(flags);
+  // TODO(jieyu): We should inject URI fetcher from top level, instead
+  // of creating it here.
+  Try<Owned<uri::Fetcher>> fetcher = uri::fetcher::create();
+  if (fetcher.isError()) {
+    return Error("Failed to create the URI fetcher: " + fetcher.error());
+  }
+
+  Try<Owned<Puller>> puller = Puller::create(flags, fetcher->share());
   if (puller.isError()) {
     return Error("Failed to create Docker puller: " + puller.error());
   }
@@ -129,7 +140,7 @@ Try<Owned<slave::Store>> Store::create(
 }
 
 
-Store::Store(const Owned<StoreProcess>& _process) : process(_process)
+Store::Store(Owned<StoreProcess> _process) : process(_process)
 {
   spawn(CHECK_NOTNULL(process.get()));
 }
@@ -154,24 +165,42 @@ Future<ImageInfo> Store::get(const mesos::Image& image)
 }
 
 
+Future<Nothing> StoreProcess::recover()
+{
+  return metadataManager->recover();
+}
+
+
 Future<ImageInfo> StoreProcess::get(const mesos::Image& image)
 {
   if (image.type() != mesos::Image::DOCKER) {
     return Failure("Docker provisioner store only supports Docker images");
   }
 
-  Image::Name imageName = parseImageName(image.docker().name());
+  Try<spec::ImageReference> reference =
+    spec::parseImageReference(image.docker().name());
 
-  return metadataManager->get(imageName)
-    .then(defer(self(), &Self::_get, imageName, lambda::_1))
+  if (reference.isError()) {
+    return Failure("Failed to parse docker image '" + image.docker().name() +
+                   "': " + reference.error());
+  }
+
+  return metadataManager->get(reference.get())
+    .then(defer(self(), &Self::_get, reference.get(), lambda::_1))
     .then(defer(self(), &Self::__get, lambda::_1));
 }
 
 
 Future<Image> StoreProcess::_get(
-    const Image::Name& name,
+    const spec::ImageReference& reference,
     const Option<Image>& image)
 {
+  // NOTE: Here, we assume that image layers are not removed without
+  // first removing the metadata in the metadata manager first.
+  // Otherwise, the image we return here might miss some layers. At
+  // the time we introduce cache eviction, we also want to avoid the
+  // situation where a layer was returned to the provisioner but is
+  // later evicted.
   if (image.isSome()) {
     return image.get();
   }
@@ -180,124 +209,124 @@ Future<Image> StoreProcess::_get(
     os::mkdtemp(paths::getStagingTempDir(flags.docker_store_dir));
 
   if (staging.isError()) {
-    return Failure("Failed to create a staging directory");
+    return Failure("Failed to create a staging directory: " + staging.error());
   }
 
-  const string imageName = stringify(name);
+  // If there is already an pulling going on for the given 'name', we
+  // will skip the additional pulling.
+  const string name = stringify(reference);
 
-  if (!pulling.contains(imageName)) {
+  if (!pulling.contains(name)) {
     Owned<Promise<Image>> promise(new Promise<Image>());
 
-    Future<Image> future = puller->pull(name, Path(staging.get()))
-      .then(defer(self(), &Self::moveLayers, lambda::_1))
-      .then(defer(self(), &Self::storeImage, name, lambda::_1))
-      .onAny(defer(self(), [this, imageName](const Future<Image>&) {
-        pulling.erase(imageName);
+    Future<Image> future = puller->pull(reference, staging.get())
+      .then(defer(self(), &Self::moveLayers, staging.get(), lambda::_1))
+      .then(defer(self(), [=](const vector<string>& layerIds) {
+        return metadataManager->put(reference, layerIds);
       }))
-      .onAny([staging, imageName]() {
+      .onAny(defer(self(), [=](const Future<Image>&) {
+        pulling.erase(name);
+
         Try<Nothing> rmdir = os::rmdir(staging.get());
         if (rmdir.isError()) {
           LOG(WARNING) << "Failed to remove staging directory: "
                        << rmdir.error();
         }
-      });
+      }));
 
     promise->associate(future);
-    pulling[imageName] = promise;
+    pulling[name] = promise;
 
     return promise->future();
   }
 
-  return pulling[imageName]->future();
+  return pulling[name]->future();
 }
 
 
 Future<ImageInfo> StoreProcess::__get(const Image& image)
 {
-  vector<string> layerDirectories;
-  foreach (const string& layer, image.layer_ids()) {
-    layerDirectories.push_back(
-        paths::getImageLayerRootfsPath(
-            flags.docker_store_dir, layer));
+  CHECK_LT(0, image.layer_ids_size());
+
+  vector<string> layerPaths;
+  foreach (const string& layerId, image.layer_ids()) {
+    layerPaths.push_back(
+        paths::getImageLayerRootfsPath(flags.docker_store_dir, layerId));
   }
 
-  // TODO(gilbert): We should be able to support storing all image
-  // spec locally, and simply grab neccessary runtime config from
-  // local manifest.
-  Option<RuntimeConfig> runtimeConfig = None();
+  // Read the manifest from the last layer because all runtime config
+  // are merged at the leaf already.
+  Try<string> manifest = os::read(
+      paths::getImageLayerManifestPath(
+          flags.docker_store_dir,
+          image.layer_ids(image.layer_ids_size() - 1)));
 
-  return ImageInfo{layerDirectories, runtimeConfig};
-}
+  if (manifest.isError()) {
+    return Failure("Failed to read manifest: " + manifest.error());
+  }
 
+  Try<::docker::spec::v1::ImageManifest> v1 =
+    ::docker::spec::v1::parse(manifest.get());
 
-Future<Nothing> StoreProcess::recover()
-{
-  return metadataManager->recover();
+  if (v1.isError()) {
+    return Failure("Failed to parse docker v1 manifest: " + v1.error());
+  }
+
+  return ImageInfo{layerPaths, v1.get()};
 }
 
 
 Future<vector<string>> StoreProcess::moveLayers(
-    const list<pair<string, string>>& layerPaths)
+    const string& staging,
+    const vector<string>& layerIds)
 {
   list<Future<Nothing>> futures;
-  foreach (const auto& layerPath, layerPaths) {
-    futures.push_back(moveLayer(layerPath));
+  foreach (const string& layerId, layerIds) {
+    futures.push_back(moveLayer(staging, layerId));
   }
 
   return collect(futures)
-    .then([layerPaths]() {
-      vector<string> layerIds;
-      foreach (const auto& layerPath, layerPaths) {
-        layerIds.push_back(layerPath.first);
-      }
-
-      return layerIds;
-    });
-}
-
-
-Future<Image> StoreProcess::storeImage(
-    const Image::Name& name,
-    const vector<string>& layerIds)
-{
-  return metadataManager->put(name, layerIds);
+    .then([layerIds]() -> vector<string> { return layerIds; });
 }
 
 
 Future<Nothing> StoreProcess::moveLayer(
-    const pair<string, string>& layerPath)
+    const string& staging,
+    const string& layerId)
 {
-  if (!os::exists(layerPath.second)) {
-    return Failure("Unable to find layer '" + layerPath.first + "' in '" +
-                   layerPath.second + "'");
+  const string source = path::join(staging, layerId);
+
+  // This is the case where the puller skips the pulling of the layer
+  // because the layer already exists in the store.
+  //
+  // TODO(jieyu): Verify that the layer is actually in the store.
+  if (!os::exists(source)) {
+    return Nothing();
   }
 
-  const string imageLayerPath =
-    paths::getImageLayerPath(flags.docker_store_dir, layerPath.first);
+  const string target = paths::getImageLayerPath(
+      flags.docker_store_dir,
+      layerId);
 
-  // If image layer path exists, we should remove it and make an empty
-  // directory, because os::rename can only have empty or non-existed
-  // directory as destination.
-  if (os::exists(imageLayerPath)) {
-    Try<Nothing> rmdir = os::rmdir(imageLayerPath);
-    if (rmdir.isError()) {
-      return Failure("Failed to remove existing layer: " + rmdir.error());
-    }
+  // NOTE: Since the layer id is supposed to be unique. If the layer
+  // already exists in the store, we'll skip the moving since they are
+  // expected to be the same.
+  if (os::exists(target)) {
+    return Nothing();
   }
 
-  Try<Nothing> mkdir = os::mkdir(imageLayerPath);
+  Try<Nothing> mkdir = os::mkdir(target);
   if (mkdir.isError()) {
-    return Failure("Failed to create layer path in store for id '" +
-                   layerPath.first + "': " + mkdir.error());
+    return Failure(
+        "Failed to create directory in store for layer '" +
+        layerId + "': " + mkdir.error());
   }
 
-  Try<Nothing> status = os::rename(
-      layerPath.second,
-      imageLayerPath);
-
-  if (status.isError()) {
-    return Failure("Failed to move layer '" + layerPath.first +
-                   "' to store directory: " + status.error());
+  Try<Nothing> rename = os::rename(source, target);
+  if (rename.isError()) {
+    return Failure(
+        "Failed to move layer from '" + source +
+        "' to '" + target + "': " + rename.error());
   }
 
   return Nothing();

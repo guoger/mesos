@@ -18,6 +18,7 @@
 
 #include <glog/logging.h>
 
+#include <process/collect.hpp>
 #include <process/defer.hpp>
 #include <process/dispatch.hpp>
 
@@ -26,123 +27,35 @@
 #include <stout/os.hpp>
 #include <stout/path.hpp>
 
+#include <mesos/appc/spec.hpp>
+
+#include "slave/containerizer/mesos/provisioner/appc/cache.hpp"
+#include "slave/containerizer/mesos/provisioner/appc/fetcher.hpp"
 #include "slave/containerizer/mesos/provisioner/appc/paths.hpp"
-#include "slave/containerizer/mesos/provisioner/appc/spec.hpp"
 #include "slave/containerizer/mesos/provisioner/appc/store.hpp"
 
 using namespace process;
 
+namespace spec = appc::spec;
+
 using std::list;
 using std::string;
 using std::vector;
+
+using process::Owned;
 
 namespace mesos {
 namespace internal {
 namespace slave {
 namespace appc {
 
-// Defines a locally cached image (which has passed validation).
-struct CachedImage
-{
-  static Try<CachedImage> create(const string& imagePath);
-
-  CachedImage(
-      const AppcImageManifest& _manifest,
-      const string& _id,
-      const string& _path)
-    : manifest(_manifest), id(_id), path(_path) {}
-
-  string rootfs() const
-  {
-    return path::join(path, "rootfs");
-  }
-
-  const AppcImageManifest manifest;
-
-  // Image ID of the format "sha512-value" where "value" is the hex
-  // encoded string of the sha512 digest of the uncompressed tar file
-  // of the image.
-  const string id;
-
-  // Absolute path to the extracted image.
-  const string path;
-};
-
-
-Try<CachedImage> CachedImage::create(const string& imagePath)
-{
-  Option<Error> error = spec::validateLayout(imagePath);
-  if (error.isSome()) {
-    return Error("Invalid image layout: " + error.get().message);
-  }
-
-  string imageId = Path(imagePath).basename();
-
-  error = spec::validateImageID(imageId);
-  if (error.isSome()) {
-    return Error("Invalid image ID: " + error.get().message);
-  }
-
-  Try<string> read = os::read(paths::getImageManifestPath(imagePath));
-  if (read.isError()) {
-    return Error("Failed to read manifest: " + read.error());
-  }
-
-  Try<AppcImageManifest> manifest = spec::parse(read.get());
-  if (manifest.isError()) {
-    return Error("Failed to parse manifest: " + manifest.error());
-  }
-
-  return CachedImage(manifest.get(), imageId, imagePath);
-}
-
-
-// Helper that implements this:
-// https://github.com/appc/spec/blob/master/spec/aci.md#dependency-matching
-static bool matches(Image::Appc requirements, const CachedImage& candidate)
-{
-  // The name must match.
-  if (candidate.manifest.name() != requirements.name()) {
-    return false;
-  }
-
-  // If an id is specified the candidate must match.
-  if (requirements.has_id() && (candidate.id != requirements.id())) {
-    return false;
-  }
-
-  // Extract labels for easier comparison, this also weeds out duplicates.
-  // TODO(xujyan): Detect duplicate labels in image manifest validation
-  // and Image::Appc validation.
-  hashmap<string, string> requiredLabels;
-  foreach (const Label& label, requirements.labels().labels()) {
-    requiredLabels[label.key()] = label.value();
-  }
-
-  hashmap<string, string> candidateLabels;
-  foreach (const AppcImageManifest::Label& label,
-           candidate.manifest.labels()) {
-    candidateLabels[label.name()] = label.value();
-  }
-
-  // Any label specified must be present and match in the candidate.
-  foreachpair (const string& name,
-               const string& value,
-               requiredLabels) {
-    if (!candidateLabels.contains(name) ||
-        candidateLabels.get(name).get() != value) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
-
 class StoreProcess : public Process<StoreProcess>
 {
 public:
-  StoreProcess(const string& rootDir);
+  StoreProcess(
+      const string& rootDir,
+      Owned<Cache> cache,
+      Owned<Fetcher> fetcher);
 
   ~StoreProcess() {}
 
@@ -151,12 +64,20 @@ public:
   Future<ImageInfo> get(const Image& image);
 
 private:
+  Future<vector<string>> fetchImage(const Image::Appc& appc);
+
+  Future<vector<string>> fetchDependencies(const string& imageId);
+
+  Future<string> _fetchImage(const Image::Appc& appc);
+
+  Future<vector<string>> __fetchImage(const string& imageId);
+
   // Absolute path to the root directory of the store as defined by
   // --appc_store_dir.
   const string rootDir;
 
-  // Mappings: name -> id -> image.
-  hashmap<string, hashmap<string, CachedImage>> images;
+  Owned<Cache> cache;
+  Owned<Fetcher> fetcher;
 };
 
 
@@ -171,17 +92,38 @@ Try<Owned<slave::Store>> Store::create(const Flags& flags)
   // from it are canonical too.
   Result<string> rootDir = os::realpath(flags.appc_store_dir);
   if (!rootDir.isSome()) {
-    // The above mkdir call recursively creates the store directory
-    // if necessary so it cannot be None here.
-    CHECK_ERROR(rootDir);
-
     return Error(
         "Failed to get the realpath of the store root directory: " +
-        rootDir.error());
+        (rootDir.isError() ? rootDir.error() : "not found"));
   }
 
-  return Owned<slave::Store>(new Store(
-      Owned<StoreProcess>(new StoreProcess(rootDir.get()))));
+  Try<Owned<Cache>> cache = Cache::create(Path(rootDir.get()));
+  if (cache.isError()) {
+    return Error("Failed to create image cache: " + cache.error());
+  }
+
+  Try<Nothing> recover = cache.get()->recover();
+  if (recover.isError()) {
+    return Error("Failed to load image cache: " + recover.error());
+  }
+
+  // TODO(jojy): Uri fetcher has 'shared' semantics for the
+  // provisioner. It's a shared pointer which needs to be injected
+  // from top level into the store (instead of being created here).
+  Try<Owned<uri::Fetcher>> uriFetcher = uri::fetcher::create();
+  if (uriFetcher.isError()) {
+    return Error("Failed to create uri fetcher: " + uriFetcher.error());
+  }
+
+  Try<Owned<Fetcher>> fetcher = Fetcher::create(flags, uriFetcher->share());
+  if (fetcher.isError()) {
+    return Error("Failed to create image fetcher: " + fetcher.error());
+  }
+
+  return Owned<slave::Store>(new Store(Owned<StoreProcess>(new StoreProcess(
+      rootDir.get(),
+      cache.get(),
+      fetcher.get()))));
 }
 
 
@@ -211,36 +153,20 @@ Future<ImageInfo> Store::get(const Image& image)
 }
 
 
-StoreProcess::StoreProcess(const string& _rootDir) : rootDir(_rootDir) {}
+StoreProcess::StoreProcess(
+    const string& _rootDir,
+    Owned<Cache> _cache,
+    Owned<Fetcher> _fetcher)
+  : rootDir(_rootDir),
+    cache(_cache),
+    fetcher(_fetcher) {}
 
 
 Future<Nothing> StoreProcess::recover()
 {
-  // Recover everything in the store.
-  Try<list<string>> imageIds = os::ls(paths::getImagesDir(rootDir));
-  if (imageIds.isError()) {
-    return Failure(
-        "Failed to list images under '" +
-        paths::getImagesDir(rootDir) + "': " +
-        imageIds.error());
-  }
-
-  foreach (const string& imageId, imageIds.get()) {
-    string path = paths::getImagePath(rootDir, imageId);
-    if (!os::stat::isdir(path)) {
-      LOG(WARNING) << "Unexpected entry in storage: " << imageId;
-      continue;
-    }
-
-    Try<CachedImage> image = CachedImage::create(path);
-    if (image.isError()) {
-      LOG(WARNING) << "Unexpected entry in storage: " << image.error();
-      continue;
-    }
-
-    LOG(INFO) << "Restored image '" << image.get().manifest.name() << "'";
-
-    images[image.get().manifest.name()].put(image.get().id, image.get());
+  Try<Nothing> recover = cache->recover();
+  if (recover.isError()) {
+    return Failure("Failed to recover cache: " + recover.error());
   }
 
   return Nothing();
@@ -255,33 +181,178 @@ Future<ImageInfo> StoreProcess::get(const Image& image)
 
   const Image::Appc& appc = image.appc();
 
-  if (!images.contains(appc.name())) {
-    return Failure("No Appc image named '" + appc.name() + "' can be found");
+  const Path stagingDir(paths::getStagingDir(rootDir));
+
+  Try<Nothing> staging = os::mkdir(stagingDir);
+  if (staging.isError()) {
+    return Failure("Failed to create staging directory: " + staging.error());
   }
 
-  // Get local candidates.
-  vector<CachedImage> candidates;
-  foreach (const CachedImage& candidate, images[appc.name()].values()) {
-    // The first match is returned.
-    // TODO(xujyan): Some tie-breaking rules are necessary.
-    if (matches(appc, candidate)) {
-      LOG(INFO) << "Found match for Appc image '" << appc.name()
-                << "' in the store";
+  return fetchImage(appc)
+    .then(defer(self(), [=](const vector<string>& imageIds) -> ImageInfo {
+      vector<string> rootfses;
 
-      // TODO(gilbert): Get Appc runtime config from manifest.
+      // TODO(jojy): Print a warning if there are duplicated image ids
+      // in the list. The semantics is weird when there are duplicated
+      // image ids in the list. Appc spec does not discuss this
+      // situation.
+      foreach (const string& imageId, imageIds) {
+        rootfses.emplace_back(paths::getImageRootfsPath(rootDir, imageId));
+      }
 
-      // The Appc store current doesn't support dependencies and this
-      // is enforced by manifest validation: if the image's manifest
-      // contains dependencies it would fail the validation and
-      // wouldn't be stored in the store.
-      return ImageInfo{
-          vector<string>({candidate.rootfs()}),
-          None()};
+      return ImageInfo{rootfses, None()};
+    }));
+}
+
+
+// Fetches the image into the 'staging' directory, and recursively
+// fetches the image's dependencies in a depth first order.
+Future<vector<string>> StoreProcess::fetchImage(const Image::Appc& appc)
+{
+  Option<string> imageId = appc.has_id() ? appc.id() : cache->find(appc);
+  if (imageId.isSome()) {
+    if (os::exists(paths::getImagePath(rootDir, imageId.get()))) {
+      VLOG(1) << "Image '" << appc.name() << "' is found in cache with "
+              << "image id '" << imageId.get() << "'";
+
+      return __fetchImage(imageId.get());
     }
   }
 
-  return Failure("No Appc image named '" + appc.name() +
-                 "' can match the requirements");
+  return _fetchImage(appc)
+    .then(defer(self(), &Self::__fetchImage, lambda::_1));
+}
+
+
+Future<string> StoreProcess::_fetchImage(const Image::Appc& appc)
+{
+  VLOG(1) << "Fetching image '" << appc.name() << "'";
+
+  Try<string> _tmpFetchDir = os::mkdtemp(
+      path::join(paths::getStagingDir(rootDir), "XXXXXX"));
+
+  if (_tmpFetchDir.isError()) {
+    return Failure(
+        "Failed to create temporary fetch directory for image '" +
+        appc.name() + "': " + _tmpFetchDir.error());
+  }
+
+  const string tmpFetchDir = _tmpFetchDir.get();
+
+  return fetcher->fetch(appc, Path(tmpFetchDir))
+    .then(defer(self(), [=]() -> Future<string> {
+      Try<list<string>> imageIds = os::ls(tmpFetchDir);
+      if (imageIds.isError()) {
+        return Failure(
+            "Failed to list images under '" + tmpFetchDir +
+            "': " + imageIds.error());
+      }
+
+      if (imageIds->size() != 1) {
+        return Failure(
+            "Unexpected number of images under '" + tmpFetchDir +
+            "': " + stringify(imageIds->size()));
+      }
+
+      const string& imageId = imageIds->front();
+      const string source = path::join(tmpFetchDir, imageId);
+      const string target = paths::getImagePath(rootDir, imageId);
+
+      if (os::exists(target)) {
+        LOG(WARNING) << "Image id '" << imageId
+                     << "' already exists in the store";
+      } else {
+        Try<Nothing> rename = os::rename(source, target);
+        if (rename.isError()) {
+          return Failure(
+              "Failed to rename directory '" + source +
+              "' to '" + target + "': " + rename.error());
+        }
+      }
+
+      Try<Nothing> addCache = cache->add(imageId);
+      if (addCache.isError()) {
+        return Failure(
+            "Failed to add image '" + appc.name() + "' with image id '" +
+            imageId + "' to the cache: " + addCache.error());
+      }
+
+      Try<Nothing> rmdir = os::rmdir(tmpFetchDir);
+      if (rmdir.isError()) {
+        return Failure(
+            "Failed to remove temporary fetch directory '" +
+            tmpFetchDir + "' for image '" + appc.name() + "': " +
+            rmdir.error());
+      }
+
+      return imageId;
+    }));
+}
+
+
+Future<vector<string>> StoreProcess::__fetchImage(const string& imageId)
+{
+  return fetchDependencies(imageId)
+    .then([imageId](vector<string> imageIds) -> vector<string> {
+      imageIds.emplace_back(imageId);
+
+      return imageIds;
+    });
+}
+
+
+Future<vector<string>> StoreProcess::fetchDependencies(const string& imageId)
+{
+  const string imagePath = paths::getImagePath(rootDir, imageId);
+
+  Try<spec::ImageManifest> manifest = spec::getManifest(imagePath);
+  if (manifest.isError()) {
+    return Failure(
+        "Failed to get dependencies for image id '" + imageId +
+        "': " + manifest.error());
+  }
+
+  vector<Image::Appc> dependencies;
+  foreach (const spec::ImageManifest::Dependency& dependency,
+           manifest->dependencies()) {
+    Image::Appc appc;
+    appc.set_name(dependency.imagename());
+    if (dependency.has_imageid()) {
+      appc.set_id(dependency.imageid());
+    }
+
+    // TODO(jojy): Make Image::Appc use appc::spec::Label instead of
+    // mesos::Label so that we can avoid this loop here.
+    foreach (const spec::ImageManifest::Label& label, dependency.labels()) {
+      mesos::Label appcLabel;
+      appcLabel.set_key(label.name());
+      appcLabel.set_value(label.value());
+
+      appc.mutable_labels()->add_labels()->CopyFrom(appcLabel);
+    }
+
+    dependencies.emplace_back(appc);
+  }
+
+  if (dependencies.size() == 0) {
+    return vector<string>();
+  }
+
+  // Do a depth first search.
+  list<Future<vector<string>>> futures;
+  foreach (const Image::Appc& appc, dependencies) {
+    futures.emplace_back(fetchImage(appc));
+  }
+
+  return collect(futures)
+    .then(defer(self(), [=](const list<vector<string>>& imageIdsList) {
+      vector<string> result;
+      foreach (const vector<string>& imageIds, imageIdsList) {
+        result.insert(result.end(), imageIds.begin(), imageIds.end());
+      }
+
+      return result;
+    }));
 }
 
 } // namespace appc {

@@ -1,4 +1,5 @@
 ---
+title: Apache Mesos - Mesos Containerizer
 layout: documentation
 ---
 
@@ -76,9 +77,155 @@ specify `--enforce_container_disk_quota` when starting the slave.
 
 The Posix Disk isolator reports disk usage for each sandbox by
 periodically running the `du` command. The disk usage can be retrieved
-from the resource statistics endpoint (`/monitor/statistics.json`).
+from the resource statistics endpoint ([/monitor/statistics](endpoints/monitor/statistics.md)).
 
 The interval between two `du`s can be controlled by the slave flag
 `--container_disk_watch_interval`. For example,
 `--container_disk_watch_interval=1mins` sets the interval to be 1
 minute. The default interval is 15 seconds.
+
+
+### Docker Runtime Isolator
+
+The Docker Runtime isolator is used for supporting runtime
+configurations from the docker image (e.g., Entrypoint/Cmd, Env,
+etc.). This isolator is tied with `--image_providers=docker`. If
+`--image_providers` contains `docker`, this isolator must be used.
+Otherwise, slave will refuse to start.
+
+To enable the Docker Runtime isolator, append `docker/runtime` to the
+`--isolation` flag when starting the slave.
+
+Currently, docker image default `Entrypoint`, `Cmd`, `Env` and
+`WorkingDir` are supported with docker runtime isolator. Users can
+specify `CommandInfo` to override the default `Entrypoint` and `Cmd`
+in the image (see below for details). The `CommandInfo` should be
+inside of either `TaskInfo` or `ExecutorInfo` (depending on running
+command task or custom executor respectively).
+
+#### Determine the Launch Command
+
+If user specifies a command in `CommandInfo`, that will override the
+default Entrypoint/Cmd in the docker image. Otherwise, we will use the
+default Entrypoint/Cmd and append arguments specified in `CommandInfo`
+accordingly. The details are explained in the following table.
+
+Users can specify `CommandInfo` including `shell`, `value` and
+`arguments`, which are represented in the first column of the table
+below. `0` represents `not specified`, while `1` represents
+`specified`. The first row is how `Entrypoint` and `Cmd` defined in
+the docker image. All cells in the table, except the first column and
+row, as well as cells labeled as `Error`, have the first element
+(i.e., `/Entrypt[0]`) as executable, and the rest as appending
+arguments.
+
+<table class="table table-striped">
+  <tr>
+    <th></th>
+    <th>Entrypoint=0<br>Cmd=0</th>
+    <th>Entrypoint=0<br>Cmd=1</th>
+    <th>Entrypoint=1<br>Cmd=0</th>
+    <th>Entrypoint=1<br>Cmd=1</th>
+  </tr>
+  <tr>
+    <td>sh=0<br>value=0<br>argv=0</td>
+    <td>Error</td>
+    <td>/Cmd[0]<br>Cmd[1]..</td>
+    <td>/Entrypt[0]<br>Entrypy[1]..</td>
+    <td>/Entrypy[0]<br>Entrypy[1]..<br>Cmd..</td>
+  </tr>
+  <tr>
+    <td>sh=0<br>value=0<br>argv=1</td>
+    <td>Error</td>
+    <td>/Cmd[0]<br>argv</td>
+    <td>/Entrypt[0]<br>Entrypy[1]..<br>argv</td>
+    <td>/Entrypy[0]<br>Entrypy[1]..<br>argv</td>
+  </tr>
+  <tr>
+    <td>sh=0<br>value=1<br>argv=0</td>
+    <td>/value</td>
+    <td>/value</td>
+    <td>/value</td>
+    <td>/value</td>
+  </tr>
+  <tr>
+    <td>sh=0<br>value=1<br>argv=1</td>
+    <td>/value<br>argv</td>
+    <td>/value<br>argv</td>
+    <td>/value<br>argv</td>
+    <td>/value<br>argv</td>
+  </tr>
+  <tr>
+    <td>sh=1<br>value=0<br>argv=0</td>
+    <td>Error</td>
+    <td>Error</td>
+    <td>Error</td>
+    <td>Error</td>
+  </tr>
+  <tr>
+    <td>sh=1<br>value=0<br>argv=1</td>
+    <td>Error</td>
+    <td>Error</td>
+    <td>Error</td>
+    <td>Error</td>
+  </tr>
+  <tr>
+    <td>sh=1<br>value=1<br>argv=0</td>
+    <td>/bin/sh -c<br>value</td>
+    <td>/bin/sh -c<br>value</td>
+    <td>/bin/sh -c<br>value</td>
+    <td>/bin/sh -c<br>value</td>
+  </tr>
+  <tr>
+    <td>sh=1<br>value=1<br>argv=1</td>
+    <td>/bin/sh -c<br>value</td>
+    <td>/bin/sh -c<br>value</td>
+    <td>/bin/sh -c<br>value</td>
+    <td>/bin/sh -c<br>value</td>
+  </tr>
+</table>
+
+
+### The `cgroups/net_cls` Isolator
+
+The cgroups/net_cls isolator allows operators to provide network
+performance isolation and network segmentation for containers within
+a Mesos cluster. To enable the cgroups/net_cls isolator, append
+`cgroups/net_cls` to the `--isolation` flag when starting the slave.
+
+As the name suggests, the isolator enables the net_cls subsystem for
+Linux cgroups and assigns a net_cls cgroup to each container launched
+by the `MesosContainerizer`.  The objective of the net_cls subsystem
+is to allow the kernel to tag packets originating from a container
+with a 32-bit handle. These handles can be used by kernel modules such
+as `qdisc` (for traffic engineering) and `net-filter` (for
+firewall) to enforce network performance and security policies
+specified by the operators.  The policies, based on the net_cls
+handles, can be specified by the operators through user-space tools
+such as
+[tc](http://tldp.org/HOWTO/Traffic-Control-HOWTO/software.html#s-iproute2-tc)
+and [iptables](http://linux.die.net/man/8/iptables).
+
+The 32-bit handle associated with a net_cls cgroup can be specified by
+writing the handle to the `net_cls.classid` file, present within the
+net_cls cgroup. The 32-bit handle is of the form `0xAAAABBBB`, and
+consists of a 16-bit primary handle 0xAAAA and a 16-bit secondary
+handle 0xBBBB. You can read more about the use cases for the primary
+and secondary handles in the [Linux kernel documentation for
+net_cls](https://www.kernel.org/doc/Documentation/cgroup-v1/net_cls.txt).
+
+By default the cgroups/net_cls isolator does not manage the net_cls
+handles, and assumes the operator is going to manage/assign these
+handles. To enable the management of net_cls handles by the
+cgroups/net_cls isolator you need to specify a 16-bit primary handle,
+of the form 0xAAAA, using the `--cgroups_net_cls_primary_handle` flag at
+slave startup.
+
+Once a primary handle has been specified for a slave, for each
+container the cgroups/net_cls isolator allocates a 16-bit secondary
+handle. It then assigns the 32-bit combination of the primary and
+secondary handle to the net_cls cgroup associated with the container
+by writing to `net_cls.classid`. The cgroups/net_cls isolator exposes
+the assigned net_cls handle to operators by exposing the handle as
+part of the `ContainerStatus` &mdash;associated with any task running within
+the container&mdash; in the slave's `state` endpoint.

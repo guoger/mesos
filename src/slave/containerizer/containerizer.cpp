@@ -154,6 +154,11 @@ Try<Resources> Containerizer::resources(const Flags& flags)
         flags.default_role).get();
   }
 
+  Option<Error> error = Resources::validate(resources);
+  if (error.isSome()) {
+    return error.get();
+  }
+
   return resources;
 }
 
@@ -322,10 +327,27 @@ map<string, string> executorEnvironment(
   environment["MESOS_DIRECTORY"] = directory;
   environment["MESOS_SLAVE_ID"] = slaveId.value();
   environment["MESOS_SLAVE_PID"] = stringify(slavePid);
+  environment["MESOS_AGENT_ENDPOINT"] = stringify(slavePid.address);
   environment["MESOS_CHECKPOINT"] = checkpoint ? "1" : "0";
+
+  // Set executor's shutdown grace period. If set, the customized value
+  // from `ExecutorInfo` overrides the default from agent flags.
+  Duration executorShutdownGracePeriod = flags.executor_shutdown_grace_period;
+  if (executorInfo.has_shutdown_grace_period()) {
+    executorShutdownGracePeriod =
+      Nanoseconds(executorInfo.shutdown_grace_period().nanoseconds());
+  }
+
+  environment["MESOS_EXECUTOR_SHUTDOWN_GRACE_PERIOD"] =
+    stringify(executorShutdownGracePeriod);
 
   if (checkpoint) {
     environment["MESOS_RECOVERY_TIMEOUT"] = stringify(flags.recovery_timeout);
+
+    // The maximum backoff duration to be used by an executor between two
+    // retries when disconnected.
+    environment["MESOS_SUBSCRIPTION_BACKOFF_MAX"] =
+      stringify(EXECUTOR_REREGISTER_TIMEOUT);
   }
 
   if (HookManager::hooksAvailable()) {
@@ -349,7 +371,6 @@ map<string, string> executorEnvironment(
 
   return environment;
 }
-
 
 } // namespace slave {
 } // namespace internal {

@@ -14,7 +14,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <string>
 #include <vector>
 
 #include <gmock/gmock.h>
@@ -30,6 +29,7 @@
 #include <process/gmock.hpp>
 #include <process/gtest.hpp>
 #include <process/http.hpp>
+#include <process/owned.hpp>
 #include <process/pid.hpp>
 
 #include <process/metrics/metrics.hpp>
@@ -55,13 +55,13 @@ using mesos::internal::slave::Slave;
 
 using process::Clock;
 using process::Future;
+using process::Owned;
 using process::PID;
 
 using process::http::OK;
 
 using process::metrics::internal::MetricsProcess;
 
-using std::string;
 using std::vector;
 
 using testing::_;
@@ -78,12 +78,12 @@ class MesosSchedulerDriverTest : public MesosTest {};
 
 TEST_F(MesosSchedulerDriverTest, MetricsEndpoint)
 {
-  Try<PID<Master>> master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
   Future<Nothing> registered;
   EXPECT_CALL(sched, registered(&driver, _, _))
@@ -110,8 +110,6 @@ TEST_F(MesosSchedulerDriverTest, MetricsEndpoint)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
@@ -127,17 +125,19 @@ ACTION(StopAndAbort)
 // abort(), no pending acknowledgements are sent.
 TEST_F(MesosSchedulerDriverTest, DropAckIfStopCalledBeforeAbort)
 {
-  Try<PID<Master>> master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
   TestContainerizer containerizer(&exec);
-  Try<PID<Slave>> slave = StartSlave(&containerizer);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
   ASSERT_SOME(slave);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(&driver, _, _));
 
@@ -157,7 +157,7 @@ TEST_F(MesosSchedulerDriverTest, DropAckIfStopCalledBeforeAbort)
       mesos::scheduler::Call(),
       mesos::scheduler::Call::ACKNOWLEDGE,
       _ ,
-      master.get());
+      master.get()->pid);
 
   EXPECT_CALL(exec, registered(_, _, _, _));
 
@@ -179,8 +179,6 @@ TEST_F(MesosSchedulerDriverTest, DropAckIfStopCalledBeforeAbort)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
@@ -189,17 +187,24 @@ TEST_F(MesosSchedulerDriverTest, DropAckIfStopCalledBeforeAbort)
 // the call to 'acknowledgeStatusUpdate' sends the ack to the master.
 TEST_F(MesosSchedulerDriverTest, ExplicitAcknowledgements)
 {
-  Try<PID<Master>> master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
   TestContainerizer containerizer(&exec);
-  Try<PID<Slave>> slave = StartSlave(&containerizer);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
   ASSERT_SOME(slave);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), false, DEFAULT_CREDENTIAL);
+      &sched,
+      DEFAULT_FRAMEWORK_INFO,
+      master.get()->pid,
+      false,
+      DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(&driver, _, _));
 
@@ -217,7 +222,7 @@ TEST_F(MesosSchedulerDriverTest, ExplicitAcknowledgements)
       mesos::scheduler::Call(),
       mesos::scheduler::Call::ACKNOWLEDGE,
       _ ,
-      master.get());
+      master.get()->pid);
 
   EXPECT_CALL(exec, registered(_, _, _, _));
 
@@ -242,7 +247,7 @@ TEST_F(MesosSchedulerDriverTest, ExplicitAcknowledgements)
       mesos::scheduler::Call(),
       mesos::scheduler::Call::ACKNOWLEDGE,
       _,
-      master.get());
+      master.get()->pid);
 
   driver.acknowledgeStatusUpdate(status.get());
 
@@ -250,8 +255,6 @@ TEST_F(MesosSchedulerDriverTest, ExplicitAcknowledgements)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
@@ -261,15 +264,20 @@ TEST_F(MesosSchedulerDriverTest, ExplicitAcknowledgements)
 // resources.
 TEST_F(MesosSchedulerDriverTest, ExplicitAcknowledgementsMasterGeneratedUpdate)
 {
-  Try<PID<Master>> master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
-  Try<PID<Slave>> slave = StartSlave();
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
   ASSERT_SOME(slave);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), false, DEFAULT_CREDENTIAL);
+      &sched,
+      DEFAULT_FRAMEWORK_INFO,
+      master.get()->pid,
+      false,
+      DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(&driver, _, _));
 
@@ -283,7 +291,7 @@ TEST_F(MesosSchedulerDriverTest, ExplicitAcknowledgementsMasterGeneratedUpdate)
       mesos::scheduler::Call(),
       mesos::scheduler::Call::ACKNOWLEDGE,
       _ ,
-      master.get());
+      master.get()->pid);
 
   driver.start();
 
@@ -321,8 +329,6 @@ TEST_F(MesosSchedulerDriverTest, ExplicitAcknowledgementsMasterGeneratedUpdate)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
@@ -332,12 +338,16 @@ TEST_F(MesosSchedulerDriverTest, ExplicitAcknowledgementsMasterGeneratedUpdate)
 // generate a status with no slave id by performing reconciliation.
 TEST_F(MesosSchedulerDriverTest, ExplicitAcknowledgementsUnsetSlaveID)
 {
-  Try<PID<Master>> master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), false, DEFAULT_CREDENTIAL);
+      &sched,
+      DEFAULT_FRAMEWORK_INFO,
+      master.get()->pid,
+      false,
+      DEFAULT_CREDENTIAL);
 
   Future<Nothing> registered;
   EXPECT_CALL(sched, registered(&driver, _, _))
@@ -348,7 +358,7 @@ TEST_F(MesosSchedulerDriverTest, ExplicitAcknowledgementsUnsetSlaveID)
       mesos::scheduler::Call(),
       mesos::scheduler::Call::ACKNOWLEDGE,
       _ ,
-      master.get());
+      master.get()->pid);
 
   driver.start();
 
@@ -385,8 +395,6 @@ TEST_F(MesosSchedulerDriverTest, ExplicitAcknowledgementsUnsetSlaveID)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 } // namespace tests {

@@ -503,10 +503,12 @@ void FlagsBase::add(
 inline void FlagsBase::add(const Flag& flag)
 {
   if (flags_.count(flag.name) > 0) {
-    EXIT(1) << "Attempted to add duplicate flag '" << flag.name << "'";
+    EXIT(EXIT_FAILURE)
+      << "Attempted to add duplicate flag '" << flag.name << "'";
   } else if (flag.name.find("no-") == 0) {
-    EXIT(1) << "Attempted to add flag '" << flag.name
-            << "' that starts with the reserved 'no-' prefix";
+    EXIT(EXIT_FAILURE)
+      << "Attempted to add flag '" << flag.name
+      << "' that starts with the reserved 'no-' prefix";
   }
 
   flags_[flag.name] = flag;
@@ -621,7 +623,7 @@ inline Try<Nothing> FlagsBase::load(
   }
 
   // Grab the program name from argv, without removing it.
-  programName_ = argc > 0 ? Path(*(argv[0])).basename() : "";
+  programName_ = *argc > 0 ? Path(*(argv[0])).basename() : "";
 
   // Keep the arguments that are not being processed as flags.
   std::vector<char*> args;

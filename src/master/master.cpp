@@ -38,6 +38,8 @@
 #include <mesos/module/authenticator.hpp>
 #include <mesos/module/http_authenticator.hpp>
 
+#include <mesos/scheduler/scheduler.hpp>
+
 #include <process/check.hpp>
 #include <process/collect.hpp>
 #include <process/defer.hpp>
@@ -69,7 +71,6 @@
 #include "authentication/cram_md5/authenticator.hpp"
 
 #include "common/build.hpp"
-#include "common/date_utils.hpp"
 #include "common/protobuf_utils.hpp"
 #include "common/status_utils.hpp"
 
@@ -82,6 +83,7 @@
 
 #include "master/flags.hpp"
 #include "master/master.hpp"
+#include "master/weights.hpp"
 
 #include "module/manager.hpp"
 
@@ -387,16 +389,18 @@ void Master::initialize()
   // NOTE: We enforce a minimum slave re-register timeout because the
   // slave bounds its (re-)registration retries based on the minimum.
   if (flags.slave_reregister_timeout < MIN_SLAVE_REREGISTER_TIMEOUT) {
-    EXIT(1) << "Invalid value '" << flags.slave_reregister_timeout << "' "
-            << "for --slave_reregister_timeout: "
-            << "Must be at least " << MIN_SLAVE_REREGISTER_TIMEOUT;
+    EXIT(EXIT_FAILURE)
+      << "Invalid value '" << flags.slave_reregister_timeout << "'"
+      << " for --slave_reregister_timeout:"
+      << " Must be at least " << MIN_SLAVE_REREGISTER_TIMEOUT;
   }
 
   // Parse the percentage for the slave removal limit.
   // TODO(bmahler): Add a 'Percentage' abstraction.
   if (!strings::endsWith(flags.recovery_slave_removal_limit, "%")) {
-    EXIT(1) << "Invalid value '" << flags.recovery_slave_removal_limit << "' "
-            << "for --recovery_slave_removal_percent_limit: " << "missing '%'";
+    EXIT(EXIT_FAILURE)
+      << "Invalid value '" << flags.recovery_slave_removal_limit << "'"
+      << " for --recovery_slave_removal_percent_limit: " << "missing '%'";
   }
 
   Try<double> limit = numify<double>(
@@ -406,14 +410,16 @@ void Master::initialize()
           strings::SUFFIX));
 
   if (limit.isError()) {
-    EXIT(1) << "Invalid value '" << flags.recovery_slave_removal_limit << "' "
-            << "for --recovery_slave_removal_percent_limit: " << limit.error();
+    EXIT(EXIT_FAILURE)
+      << "Invalid value '" << flags.recovery_slave_removal_limit << "'"
+      << " for --recovery_slave_removal_percent_limit: " << limit.error();
   }
 
   if (limit.get() < 0.0 || limit.get() > 100.0) {
-    EXIT(1) << "Invalid value '" << flags.recovery_slave_removal_limit << "' "
-            << "for --recovery_slave_removal_percent_limit: "
-            << "Must be within [0%-100%]";
+    EXIT(EXIT_FAILURE)
+      << "Invalid value '" << flags.recovery_slave_removal_limit << "'"
+      << " for --recovery_slave_removal_percent_limit:"
+      << " Must be within [0%-100%]";
   }
 
   // Log authentication state.
@@ -434,10 +440,11 @@ void Master::initialize()
     Result<Credentials> _credentials =
       credentials::read(flags.credentials.get());
     if (_credentials.isError()) {
-      EXIT(1) << _credentials.error() << " (see --credentials flag)";
+      EXIT(EXIT_FAILURE) << _credentials.error() << " (see --credentials flag)";
     } else if (_credentials.isNone()) {
-      EXIT(1) << "Credentials file must contain at least one credential"
-              << " (see --credentials flag)";
+      EXIT(EXIT_FAILURE)
+        << "Credentials file must contain at least one credential"
+        << " (see --credentials flag)";
     }
     // Store credentials in master to use them in routes.
     credentials = _credentials.get();
@@ -446,18 +453,19 @@ void Master::initialize()
   // Extract authenticator names and validate them.
   authenticatorNames = strings::split(flags.authenticators, ",");
   if (authenticatorNames.empty()) {
-    EXIT(1) << "No authenticator specified";
+    EXIT(EXIT_FAILURE) << "No authenticator specified";
   }
   if (authenticatorNames.size() > 1) {
-    EXIT(1) << "Multiple authenticators not supported";
+    EXIT(EXIT_FAILURE) << "Multiple authenticators not supported";
   }
   if (authenticatorNames[0] != DEFAULT_AUTHENTICATOR &&
       !modules::ModuleManager::contains<Authenticator>(
           authenticatorNames[0])) {
-    EXIT(1) << "Authenticator '" << authenticatorNames[0] << "' not found. "
-            << "Check the spelling (compare to '" << DEFAULT_AUTHENTICATOR
-            << "'') or verify that the authenticator was loaded successfully "
-            << "(see --modules)";
+    EXIT(EXIT_FAILURE)
+      << "Authenticator '" << authenticatorNames[0] << "' not found."
+      << " Check the spelling (compare to '" << DEFAULT_AUTHENTICATOR << "')"
+      << " or verify that the authenticator was loaded successfully"
+      << " (see --modules)";
   }
 
   // TODO(tillt): Allow multiple authenticators to be loaded and enable
@@ -470,8 +478,9 @@ void Master::initialize()
     Try<Authenticator*> module =
       modules::ModuleManager::create<Authenticator>(authenticatorNames[0]);
     if (module.isError()) {
-      EXIT(1) << "Could not create authenticator module '"
-              << authenticatorNames[0] << "': " << module.error();
+      EXIT(EXIT_FAILURE)
+        << "Could not create authenticator module '"
+        << authenticatorNames[0] << "': " << module.error();
     }
     LOG(INFO) << "Using '" << authenticatorNames[0] << "' authenticator";
     authenticator = module.get();
@@ -485,8 +494,8 @@ void Master::initialize()
       "Failed to initialize authenticator '" + authenticatorNames[0] +
       "': " + initialize.error();
     if (flags.authenticate_frameworks || flags.authenticate_slaves) {
-      EXIT(1) << "Failed to start master with authentication enabled: "
-              << error;
+      EXIT(EXIT_FAILURE)
+        << "Failed to start master with authentication enabled: " << error;
     } else {
       // A failure to initialize the authenticator does lead to
       // unusable authentication but still allows non authenticating
@@ -508,18 +517,19 @@ void Master::initialize()
   // Passing an empty string into the `http_authenticators`
   // flag is considered an error.
   if (httpAuthenticatorNames.empty()) {
-    EXIT(1) << "No HTTP authenticator specified";
+    EXIT(EXIT_FAILURE) << "No HTTP authenticator specified";
   }
   if (httpAuthenticatorNames.size() > 1) {
-    EXIT(1) << "Multiple HTTP authenticators not supported";
+    EXIT(EXIT_FAILURE) << "Multiple HTTP authenticators not supported";
   }
   if (httpAuthenticatorNames[0] != DEFAULT_HTTP_AUTHENTICATOR &&
-      !modules::ModuleManager::contains<Authenticator>(
+      !modules::ModuleManager::contains<authentication::Authenticator>(
           httpAuthenticatorNames[0])) {
-    EXIT(1) << "HTTP authenticator '" << httpAuthenticatorNames[0] << "' not "
-            << "found. Check the spelling (compare to '"
-            << DEFAULT_HTTP_AUTHENTICATOR << "'') or verify that the "
-            << "authenticator was loaded successfully (see --modules)";
+    EXIT(EXIT_FAILURE)
+      << "HTTP authenticator '" << httpAuthenticatorNames[0] << "' not"
+      << " found. Check the spelling (compare to '"
+      << DEFAULT_HTTP_AUTHENTICATOR << "') or verify that the"
+      << " authenticator was loaded successfully (see --modules)";
   }
 
   Option<authentication::Authenticator*> httpAuthenticator;
@@ -527,19 +537,22 @@ void Master::initialize()
   if (flags.authenticate_http) {
     if (httpAuthenticatorNames[0] == DEFAULT_HTTP_AUTHENTICATOR) {
       if (credentials.isNone()) {
-        EXIT(1) << "No credentials provided for the default '"
-                << DEFAULT_HTTP_AUTHENTICATOR
-                << "' HTTP authenticator";
+        EXIT(EXIT_FAILURE)
+          << "No credentials provided for the default '"
+          << DEFAULT_HTTP_AUTHENTICATOR << "' HTTP authenticator";
       }
 
       LOG(INFO) << "Using default '" << DEFAULT_HTTP_AUTHENTICATOR
                 << "' HTTP authenticator";
 
       Try<authentication::Authenticator*> authenticator =
-        BasicAuthenticatorFactory::create(credentials.get());
+        BasicAuthenticatorFactory::create(
+            DEFAULT_HTTP_AUTHENTICATION_REALM,
+            credentials.get());
       if (authenticator.isError()) {
-        EXIT(1) << "Could not create HTTP authenticator module '"
-                << httpAuthenticatorNames[0] << "': " << authenticator.error();
+        EXIT(EXIT_FAILURE)
+          << "Could not create HTTP authenticator module '"
+          << httpAuthenticatorNames[0] << "': " << authenticator.error();
       }
 
       httpAuthenticator = authenticator.get();
@@ -548,8 +561,9 @@ void Master::initialize()
         modules::ModuleManager::create<authentication::Authenticator>(
             httpAuthenticatorNames[0]);
       if (module.isError()) {
-        EXIT(1) << "Could not create HTTP authenticator module '"
-                << httpAuthenticatorNames[0] << "': " << module.error();
+        EXIT(EXIT_FAILURE)
+          << "Could not create HTTP authenticator module '"
+          << httpAuthenticatorNames[0] << "': " << module.error();
       }
       LOG(INFO) << "Using '" << httpAuthenticatorNames[0]
                 << "' HTTP authenticator";
@@ -573,13 +587,15 @@ void Master::initialize()
     // Add framework rate limiters.
     foreach (const RateLimit& limit_, flags.rate_limits.get().limits()) {
       if (frameworks.limiters.contains(limit_.principal())) {
-        EXIT(1) << "Duplicate principal " << limit_.principal()
-                << " found in RateLimits configuration";
+        EXIT(EXIT_FAILURE)
+          << "Duplicate principal " << limit_.principal()
+          << " found in RateLimits configuration";
       }
 
       if (limit_.has_qps() && limit_.qps() <= 0) {
-        EXIT(1) << "Invalid qps: " << limit_.qps()
-                << ". It must be a positive number";
+        EXIT(EXIT_FAILURE)
+          << "Invalid qps: " << limit_.qps()
+          << ". It must be a positive number";
       }
 
       if (limit_.has_qps()) {
@@ -598,9 +614,10 @@ void Master::initialize()
 
     if (flags.rate_limits.get().has_aggregate_default_qps() &&
         flags.rate_limits.get().aggregate_default_qps() <= 0) {
-      EXIT(1) << "Invalid aggregate_default_qps: "
-              << flags.rate_limits.get().aggregate_default_qps()
-              << ". It must be a positive number";
+      EXIT(EXIT_FAILURE)
+        << "Invalid aggregate_default_qps: "
+        << flags.rate_limits.get().aggregate_default_qps()
+        << ". It must be a positive number";
     }
 
     if (flags.rate_limits.get().has_aggregate_default_qps()) {
@@ -632,11 +649,11 @@ void Master::initialize()
 
     Try<vector<string>> roles = roles::parse(flags.roles.get());
     if (roles.isError()) {
-      EXIT(1) << "Failed to parse roles: " << roles.error();
+      EXIT(EXIT_FAILURE) << "Failed to parse roles: " << roles.error();
     }
 
     roleWhitelist = hashset<string>();
-    foreach (const std::string& role, roles.get()) {
+    foreach (const string& role, roles.get()) {
       roleWhitelist.get().insert(role);
     }
 
@@ -652,20 +669,22 @@ void Master::initialize()
   if (flags.weights.isSome()) {
     vector<string> tokens = strings::tokenize(flags.weights.get(), ",");
 
-    foreach (const std::string& token, tokens) {
+    foreach (const string& token, tokens) {
       vector<string> pair = strings::tokenize(token, "=");
       if (pair.size() != 2) {
-        EXIT(1) << "Invalid weight: '" << token << "'. --weights should"
-          "be of the form 'role=weight,role=weight'\n";
+        EXIT(EXIT_FAILURE)
+          << "Invalid weight: '" << token << "'. --weights should"
+          << " be of the form 'role=weight,role=weight'";
       } else if (!isWhitelistedRole(pair[0])) {
-        EXIT(1) << "Invalid weight: '" << token << "'. " << pair[0]
-                << " is not a valid role.";
+        EXIT(EXIT_FAILURE)
+          << "Invalid weight: '" << token << "'. " << pair[0]
+          << " is not a valid role";
       }
 
       double weight = atof(pair[1].c_str());
       if (weight <= 0) {
-        EXIT(1) << "Invalid weight: '" << token
-                << "'. Weights must be positive.";
+        EXIT(EXIT_FAILURE)
+          << "Invalid weight: '" << token << "'. Weights must be positive";
       }
 
       weights[pair[0]] = weight;
@@ -675,8 +694,9 @@ void Master::initialize()
   // Verify the timeout is greater than zero.
   if (flags.offer_timeout.isSome() &&
       flags.offer_timeout.get() <= Duration::zero()) {
-    EXIT(1) << "Invalid value '" << flags.offer_timeout.get() << "' "
-            << "for --offer_timeout: Must be greater than zero.";
+    EXIT(EXIT_FAILURE)
+      << "Invalid value '" << flags.offer_timeout.get() << "'"
+      << " for --offer_timeout: Must be greater than zero";
   }
 
   // Initialize the allocator.
@@ -843,16 +863,20 @@ void Master::initialize()
           return http.destroyVolumes(request, principal);
         });
   route("/frameworks",
-        Http::FRAMEWORKS(),
-        [this](const process::http::Request& request) {
+        DEFAULT_HTTP_AUTHENTICATION_REALM,
+        Http::FRAMEWORKS_HELP(),
+        [this](const process::http::Request& request,
+               const Option<string>& principal) {
           Http::log(request);
-          return http.frameworks(request);
+          return http.frameworks(request, principal);
         });
   route("/flags",
+        DEFAULT_HTTP_AUTHENTICATION_REALM,
         Http::FLAGS_HELP(),
-        [this](const process::http::Request& request) {
+        [this](const process::http::Request& request,
+               const Option<string>& principal) {
           Http::log(request);
-          return http.flags(request);
+          return http.flags(request, principal);
         });
   route("/health",
         Http::HEALTH_HELP(),
@@ -860,10 +884,12 @@ void Master::initialize()
           return http.health(request);
         });
   route("/observe",
+        DEFAULT_HTTP_AUTHENTICATION_REALM,
         Http::OBSERVE_HELP(),
-        [this](const process::http::Request& request) {
+        [this](const process::http::Request& request,
+               const Option<string>& principal) {
           Http::log(request);
-          return http.observe(request);
+          return http.observe(request, principal);
         });
   route("/redirect",
         Http::REDIRECT_HELP(),
@@ -881,16 +907,20 @@ void Master::initialize()
   // TODO(ijimenez): Remove this endpoint at the end of the
   // deprecation cycle on 0.26.
   route("/roles.json",
+        DEFAULT_HTTP_AUTHENTICATION_REALM,
         Http::ROLES_HELP(),
-        [this](const process::http::Request& request) {
+        [this](const process::http::Request& request,
+               const Option<string>& principal) {
           Http::log(request);
-          return http.roles(request);
+          return http.roles(request, principal);
         });
   route("/roles",
+        DEFAULT_HTTP_AUTHENTICATION_REALM,
         Http::ROLES_HELP(),
-        [this](const process::http::Request& request) {
+        [this](const process::http::Request& request,
+               const Option<string>& principal) {
           Http::log(request);
-          return http.roles(request);
+          return http.roles(request, principal);
         });
   route("/teardown",
         DEFAULT_HTTP_AUTHENTICATION_REALM,
@@ -901,68 +931,88 @@ void Master::initialize()
           return http.teardown(request, principal);
         });
   route("/slaves",
+        DEFAULT_HTTP_AUTHENTICATION_REALM,
         Http::SLAVES_HELP(),
-        [this](const process::http::Request& request) {
+        [this](const process::http::Request& request,
+               const Option<string>& principal) {
           Http::log(request);
-          return http.slaves(request);
+          return http.slaves(request, principal);
         });
   // TODO(ijimenez): Remove this endpoint at the end of the
   // deprecation cycle on 0.26.
   route("/state.json",
+        DEFAULT_HTTP_AUTHENTICATION_REALM,
         Http::STATE_HELP(),
-        [this](const process::http::Request& request) {
+        [this](const process::http::Request& request,
+               const Option<string>& principal) {
           Http::log(request);
-          return http.state(request);
+          return http.state(request, principal);
         });
   route("/state",
+        DEFAULT_HTTP_AUTHENTICATION_REALM,
         Http::STATE_HELP(),
-        [this](const process::http::Request& request) {
+        [this](const process::http::Request& request,
+               const Option<string>& principal) {
           Http::log(request);
-          return http.state(request);
+          return http.state(request, principal);
         });
   route("/state-summary",
+        DEFAULT_HTTP_AUTHENTICATION_REALM,
         Http::STATESUMMARY_HELP(),
-        [this](const process::http::Request& request) {
+        [this](const process::http::Request& request,
+               const Option<string>& principal) {
           Http::log(request);
-          return http.stateSummary(request);
+          return http.stateSummary(request, principal);
         });
   // TODO(ijimenez): Remove this endpoint at the end of the
   // deprecation cycle.
   route("/tasks.json",
+        DEFAULT_HTTP_AUTHENTICATION_REALM,
         Http::TASKS_HELP(),
-        [this](const process::http::Request& request) {
+        [this](const process::http::Request& request,
+               const Option<string>& principal) {
           Http::log(request);
-          return http.tasks(request);
+          return http.tasks(request, principal);
         });
   route("/tasks",
+        DEFAULT_HTTP_AUTHENTICATION_REALM,
         Http::TASKS_HELP(),
-        [this](const process::http::Request& request) {
+        [this](const process::http::Request& request,
+               const Option<string>& principal) {
           Http::log(request);
-          return http.tasks(request);
+          return http.tasks(request, principal);
         });
   route("/maintenance/schedule",
+        DEFAULT_HTTP_AUTHENTICATION_REALM,
         Http::MAINTENANCE_SCHEDULE_HELP(),
-        [this](const process::http::Request& request) {
+        [this](const process::http::Request& request,
+               const Option<string>& principal) {
           Http::log(request);
-          return http.maintenanceSchedule(request);
+          return http.maintenanceSchedule(request, principal);
         });
   route("/maintenance/status",
+        DEFAULT_HTTP_AUTHENTICATION_REALM,
         Http::MAINTENANCE_STATUS_HELP(),
-        [this](const process::http::Request& request) {
+        [this](const process::http::Request& request,
+               const Option<string>& principal) {
           Http::log(request);
-          return http.maintenanceStatus(request);
+          return http.maintenanceStatus(request, principal);
         });
   route("/machine/down",
+        DEFAULT_HTTP_AUTHENTICATION_REALM,
         Http::MACHINE_DOWN_HELP(),
-        [this](const process::http::Request& request) {
+        [this](const process::http::Request& request,
+               const Option<string>& principal) {
           Http::log(request);
-          return http.machineDown(request);
+          return http.machineDown(request, principal);
         });
   route("/machine/up",
+        DEFAULT_HTTP_AUTHENTICATION_REALM,
         Http::MACHINE_UP_HELP(),
-        [this](const process::http::Request& request) {
+        [this](const process::http::Request& request,
+               const Option<string>& principal) {
           Http::log(request);
-          return http.machineUp(request);
+          return http.machineUp(request, principal);
         });
   route("/unreserve",
         DEFAULT_HTTP_AUTHENTICATION_REALM,
@@ -979,6 +1029,14 @@ void Master::initialize()
                const Option<string>& principal) {
           Http::log(request);
           return http.quota(request, principal);
+        });
+  route("/weights",
+        DEFAULT_HTTP_AUTHENTICATION_REALM,
+        Http::WEIGHTS_HELP(),
+        [this](const process::http::Request& request,
+               const Option<string>& principal) {
+          Http::log(request);
+          return http.weights(request, principal);
         });
 
   // Provide HTTP assets from a "webui" directory. This is either
@@ -1178,7 +1236,7 @@ void Master::exited(const UPID& pid)
       // follows for each framework running on that slave:
       // 1) If the framework is checkpointing: No immediate action is taken.
       //    The slave is given a chance to reconnect until the slave
-      //    observer times out (75s) and removes the slave (Case 1).
+      //    observer times out (75s) and removes the slave.
       // 2) If the framework is not-checkpointing: The slave is not removed
       //    but the framework is removed from the slave's structs,
       //    its tasks transitioned to LOST and resources recovered.
@@ -1227,7 +1285,7 @@ void Master::_exited(Framework* framework)
   if (failoverTimeout_.isSome()) {
     failoverTimeout = failoverTimeout_.get();
   } else {
-    LOG(WARNING) << "Using the default value for 'failover_timeout' because"
+    LOG(WARNING) << "Using the default value for 'failover_timeout' because "
                  << "the input value is invalid: "
                  << failoverTimeout_.error();
   }
@@ -1382,7 +1440,7 @@ void Master::visit(const ExitedEvent& event)
 
 void Master::throttled(
     const MessageEvent& event,
-    const Option<std::string>& principal)
+    const Option<string>& principal)
 {
   // We already know a RateLimiter is used to throttle this event so
   // here we only need to determine which.
@@ -1516,6 +1574,62 @@ Future<Nothing> Master::_recover(const Registry& registry)
   // satisfiable given all recovering agents reregister. We may want
   // to notify operators early if total quota cannot be met.
 
+  if (registry.weights_size() != 0) {
+    vector<WeightInfo> weightInfos;
+    hashmap<std::string, double> registry_weights;
+
+    // Save the weights.
+    foreach (const Registry::Weight& weight, registry.weights()) {
+      registry_weights[weight.info().role()] = weight.info().weight();
+      WeightInfo weightInfo;
+      weightInfo.set_role(weight.info().role());
+      weightInfo.set_weight(weight.info().weight());
+      weightInfos.push_back(weightInfo);
+    }
+
+    // TODO(Yongqiao Wang): After the Mesos master quorum is achieved,
+    // operator can send an update weights request to do a batch configuration
+    // for weights, so the `--weights` flag can be deprecated and this check
+    // can eventually be removed.
+    if (!weights.empty()) {
+      LOG(WARNING) << "Ignoring the --weights flag '" << flags.weights.get()
+                   << "', and recovering the weights from registry.";
+
+      // Before recovering weights from the registry, the allocator was already
+      // initialized with `--weights`, so here we need to reset (to 1.0)
+      // weights in the allocator that are not overridden by the registry.
+      foreachkey (const std::string& role, weights) {
+        if (!registry_weights.contains(role)) {
+          WeightInfo weightInfo;
+          weightInfo.set_role(role);
+          weightInfo.set_weight(1.0);
+          weightInfos.push_back(weightInfo);
+        }
+      }
+      // Clear weights specified by `--weights` flag.
+      weights.clear();
+    }
+
+    // Recover `weights` with `registry_weights`.
+    weights = registry_weights;
+
+    // Update allocator.
+    allocator->updateWeights(weightInfos);
+  } else if (!weights.empty()) {
+    // The allocator was already updated with the `--weights` flag values
+    // on startup.
+    // Initialize the registry with `--weights` flag when bootstrapping
+    // the cluster.
+    vector<WeightInfo> weightInfos;
+    foreachpair (const std::string& role, double weight, weights) {
+      WeightInfo weightInfo;
+      weightInfo.set_role(role);
+      weightInfo.set_weight(weight);
+      weightInfos.push_back(weightInfo);
+    }
+    registrar->apply(Owned<Operation>(new weights::UpdateWeights(weightInfos)));
+  }
+
   // Recovery is now complete!
   LOG(INFO) << "Recovered " << registry.slaves().slaves().size() << " slaves"
             << " from the Registry (" << Bytes(registry.ByteSize()) << ")"
@@ -1548,14 +1662,15 @@ void Master::recoveredSlavesTimeout(const Registry& registry)
     (1.0 * registry.slaves().slaves().size());
 
   if (removalPercentage > limit) {
-    EXIT(1) << "Post-recovery slave removal limit exceeded! After "
-            << flags.slave_reregister_timeout
-            << " there were " << slaves.recovered.size()
-            << " (" << removalPercentage * 100 << "%) slaves recovered from the"
-            << " registry that did not re-register: \n"
-            << stringify(slaves.recovered) << "\n "
-            << " The configured removal limit is " << limit * 100 << "%. Please"
-            << " investigate or increase this limit to proceed further";
+    EXIT(EXIT_FAILURE)
+      << "Post-recovery slave removal limit exceeded! After "
+      << flags.slave_reregister_timeout
+      << " there were " << slaves.recovered.size()
+      << " (" << removalPercentage * 100 << "%) slaves recovered from the"
+      << " registry that did not re-register: \n"
+      << stringify(slaves.recovered) << "\n "
+      << " The configured removal limit is " << limit * 100 << "%. Please"
+      << " investigate or increase this limit to proceed further";
   }
 
   // Remove the slaves in a rate limited manner, similar to how the
@@ -1668,7 +1783,7 @@ void Master::contended(const Future<Future<Nothing>>& candidacy)
   CHECK(!candidacy.isDiscarded());
 
   if (candidacy.isFailed()) {
-    EXIT(1) << "Failed to contend: " << candidacy.failure();
+    EXIT(EXIT_FAILURE) << "Failed to contend: " << candidacy.failure();
   }
 
   // Watch for candidacy change.
@@ -1682,11 +1797,11 @@ void Master::lostCandidacy(const Future<Nothing>& lost)
   CHECK(!lost.isDiscarded());
 
   if (lost.isFailed()) {
-    EXIT(1) << "Failed to watch for candidacy: " << lost.failure();
+    EXIT(EXIT_FAILURE) << "Failed to watch for candidacy: " << lost.failure();
   }
 
   if (elected()) {
-    EXIT(1) << "Lost leadership... committing suicide!";
+    EXIT(EXIT_FAILURE) << "Lost leadership... committing suicide!";
   }
 
   LOG(INFO) << "Lost candidacy as a follower... Contend again";
@@ -1700,8 +1815,9 @@ void Master::detected(const Future<Option<MasterInfo>>& _leader)
   CHECK(!_leader.isDiscarded());
 
   if (_leader.isFailed()) {
-    EXIT(1) << "Failed to detect the leading master: " << _leader.failure()
-            << "; committing suicide!";
+    EXIT(EXIT_FAILURE)
+      << "Failed to detect the leading master: " << _leader.failure()
+      << "; committing suicide!";
   }
 
   bool wasElected = elected();
@@ -1713,7 +1829,7 @@ void Master::detected(const Future<Option<MasterInfo>>& _leader)
                 : "None");
 
   if (wasElected && !elected()) {
-    EXIT(1) << "Lost leadership... committing suicide!";
+    EXIT(EXIT_FAILURE) << "Lost leadership... committing suicide!";
   }
 
   if (elected()) {
@@ -1749,16 +1865,16 @@ Future<bool> Master::authorizeFramework(
   LOG(INFO) << "Authorizing framework principal '" << frameworkInfo.principal()
             << "' to receive offers for role '" << frameworkInfo.role() << "'";
 
-  mesos::ACL::RegisterFramework request;
-  if (frameworkInfo.has_principal()) {
-    request.mutable_principals()->add_values(frameworkInfo.principal());
-  } else {
-    // Framework doesn't have a principal set.
-    request.mutable_principals()->set_type(mesos::ACL::Entity::ANY);
-  }
-  request.mutable_roles()->add_values(frameworkInfo.role());
+  authorization::Request request;
+  request.set_action(authorization::REGISTER_FRAMEWORK_WITH_ROLE);
 
-  return authorizer.get()->authorize(request);
+  if (frameworkInfo.has_principal()) {
+    request.mutable_subject()->set_value(frameworkInfo.principal());
+  }
+
+  request.mutable_object()->set_value(frameworkInfo.role());
+
+  return authorizer.get()->authorized(request);
 }
 
 
@@ -2090,35 +2206,12 @@ void Master::_subscribe(
   CHECK(!frameworkInfo.id().value().empty());
 
   if (frameworks.registered.contains(frameworkInfo.id())) {
-    // Using the "force" field of the scheduler allows us to keep a
-    // scheduler that got partitioned but didn't die (in ZooKeeper
-    // speak this means didn't lose their session) and then
-    // eventually tried to connect to this master even though
-    // another instance of their scheduler has reconnected.
-
     Framework* framework =
       CHECK_NOTNULL(frameworks.registered[frameworkInfo.id()]);
 
-    // Note that if the scheduler is retrying we expect it
-    // to close its old connection. But, the master may not
-    // realize that the connection is closed before the retry
-    // occurs so we may kick off a scheduler unnecessarily.
-    if (framework->connected && !subscribe.force()) {
-      LOG(ERROR) << "Disallowing subscription attempt"
-                 << " of framework " << *framework
-                 << " because it is already connected";
-
-      FrameworkErrorMessage message;
-      message.set_message("Framework is already connected");
-
-      http.send(message);
-      http.close();
-      return;
-    }
-
     // It is now safe to update the framework fields since the request is now
     // guaranteed to be successful. We use the fields passed in during
-    // re-registration.
+    // subscription.
     LOG(INFO) << "Updating info for framework " << framework->id();
 
     framework->updateFrameworkInfo(frameworkInfo);
@@ -2126,33 +2219,8 @@ void Master::_subscribe(
 
     framework->reregisteredTime = Clock::now();
 
-    if (subscribe.force()) {
-      LOG(INFO) << "Framework " << *framework << " failed over";
-      failoverFramework(framework, http);
-    } else {
-      LOG(INFO) << "Allowing framework " << *framework
-                << " to subscribe with an already used id";
-
-      framework->connected = true;
-      framework->updateConnection(http);
-
-      http.closed()
-        .onAny(defer(self(), &Self::exited, framework->id(), http));
-
-      // Reactivate the framework.
-      if (!framework->active) {
-        framework->active = true;
-        allocator->activateFramework(framework->id());
-      }
-
-      FrameworkReregisteredMessage message;
-      message.mutable_framework_id()->MergeFrom(framework->id());
-      message.mutable_master_info()->MergeFrom(info_);
-      framework->send(message);
-
-      // Start the heartbeat after sending SUBSCRIBED event.
-      framework->heartbeat();
-    }
+    // Always failover the old framework connection. See MESOS-4712 for details.
+    failoverFramework(framework, http);
   } else {
     // We don't have a framework with this ID, so we must be a newly
     // elected Mesos master to which either an existing scheduler or a
@@ -2824,16 +2892,16 @@ Future<bool> Master::authorizeTask(
     << "Authorizing framework principal '" << framework->info.principal()
     << "' to launch task " << task.task_id() << " as user '" << user << "'";
 
-  mesos::ACL::RunTask request;
-  if (framework->info.has_principal()) {
-    request.mutable_principals()->add_values(framework->info.principal());
-  } else {
-    // Framework doesn't have a principal set.
-    request.mutable_principals()->set_type(mesos::ACL::Entity::ANY);
-  }
-  request.mutable_users()->add_values(user);
+  authorization::Request request;
+  request.set_action(authorization::RUN_TASK_WITH_USER);
 
-  return authorizer.get()->authorize(request);
+  if (framework->info.has_principal()) {
+    request.mutable_subject()->set_value(framework->info.principal());
+  }
+
+  request.mutable_object()->set_value(user);
+
+  return authorizer.get()->authorized(request);
 }
 
 
@@ -2845,23 +2913,51 @@ Future<bool> Master::authorizeReserveResources(
     return true; // Authorization is disabled.
   }
 
-  mesos::ACL::ReserveResources request;
+  authorization::Request request;
+  request.set_action(authorization::RESERVE_RESOURCES_WITH_ROLE);
 
   if (principal.isSome()) {
-    request.mutable_principals()->add_values(principal.get());
-  } else {
-    request.mutable_principals()->set_type(ACL::Entity::ANY);
+    request.mutable_subject()->set_value(principal.get());
   }
 
-  // TODO(mpark): Determine what kinds of constraints we may want to
-  // enforce on resources. Currently, we simply use ANY.
-  request.mutable_resources()->set_type(ACL::Entity::ANY);
+  // The operation will be authorized if the principal is allowed to make
+  // reservations for all roles included in `reserve.resources`.
+  // Add an element to `request.roles` for each unique role in the resources.
+  hashset<string> roles;
+  list<Future<bool>> authorizations;
+  foreach (const Resource& resource, reserve.resources()) {
+    if (!roles.contains(resource.role())) {
+      roles.insert(resource.role());
+
+      request.mutable_object()->set_value(resource.role());
+      authorizations.push_back(authorizer.get()->authorized(request));
+    }
+  }
 
   LOG(INFO) << "Authorizing principal '"
             << (principal.isSome() ? principal.get() : "ANY")
             << "' to reserve resources '" << reserve.resources() << "'";
 
-  return authorizer.get()->authorize(request);
+  // NOTE: Empty authorizations are not valid and are checked by a validator.
+  // However under certain circumstances, this method can be called before
+  // the validation occur and the case must be considered non erroneous.
+  // TODO(arojas): Consider ensuring that `validate()` is called before
+  // `authorizeReserveResources` so a `CHECK(!roles.empty())` can be added.
+  if (authorizations.empty()) {
+    return authorizer.get()->authorized(request);
+  }
+
+  return await(authorizations)
+      .then([](const std::list<Future<bool>>& authorizations)
+            -> Future<bool> {
+        // Compute a disjunction.
+        for (const Future<bool>& authorization : authorizations) {
+          if (!authorization.get()) {
+            return false;
+          }
+        }
+        return true;
+      });
 }
 
 
@@ -2873,22 +2969,25 @@ Future<bool> Master::authorizeUnreserveResources(
     return true; // Authorization is disabled.
   }
 
-  mesos::ACL::UnreserveResources request;
+  authorization::Request request;
+  request.set_action(authorization::UNRESERVE_RESOURCES_WITH_PRINCIPAL);
 
   if (principal.isSome()) {
-    request.mutable_principals()->add_values(principal.get());
-  } else {
-    request.mutable_principals()->set_type(ACL::Entity::ANY);
+    request.mutable_subject()->set_value(principal.get());
   }
 
+  list<Future<bool>> authorizations;
   foreach (const Resource& resource, unreserve.resources()) {
     // NOTE: Since validation of this operation is performed after
     // authorization, we must check here that this resource is
     // dynamically reserved. If it isn't, the error will be caught
     // during validation.
-    if (Resources::isDynamicallyReserved(resource)) {
-      request.mutable_reserver_principals()->add_values(
+    if (Resources::isDynamicallyReserved(resource) &&
+        resource.reservation().has_principal()) {
+      request.mutable_object()->set_value(
           resource.reservation().principal());
+
+      authorizations.push_back(authorizer.get()->authorized(request));
     }
   }
 
@@ -2897,7 +2996,21 @@ Future<bool> Master::authorizeUnreserveResources(
     << (principal.isSome() ? principal.get() : "ANY")
     << "' to unreserve resources '" << unreserve.resources() << "'";
 
-  return authorizer.get()->authorize(request);
+  if (authorizations.empty()) {
+    return authorizer.get()->authorized(request);
+  }
+
+  return await(authorizations)
+      .then([](const std::list<Future<bool>>& authorizations)
+            -> Future<bool> {
+        // Compute a disjunction.
+        for (const Future<bool>& authorization : authorizations) {
+          if (!authorization.get()) {
+            return false;
+          }
+        }
+        return true;
+      });
 }
 
 
@@ -2909,24 +3022,47 @@ Future<bool> Master::authorizeCreateVolume(
     return true; // Authorization is disabled.
   }
 
-  mesos::ACL::CreateVolume request;
+  authorization::Request request;
+  request.set_action(authorization::CREATE_VOLUME_WITH_ROLE);
 
   if (principal.isSome()) {
-    request.mutable_principals()->add_values(principal.get());
-  } else {
-    request.mutable_principals()->set_type(ACL::Entity::ANY);
+    request.mutable_subject()->set_value(principal.get());
   }
 
-  // TODO(greggomann): Determine what `volume_types` we may want to
-  // allow/prevent creation of. Currently, we simply use ANY.
-  request.mutable_volume_types()->set_type(ACL::Entity::ANY);
+  // The operation will be authorized if the principal is allowed to create
+  // volumes for all roles included in `create.volumes`.
+  // Add an element to `request.roles` for each unique role in the volumes.
+  hashset<string> roles;
+  list<Future<bool>> authorizations;
+  foreach (const Resource& volume, create.volumes()) {
+    if (!roles.contains(volume.role())) {
+      roles.insert(volume.role());
+
+      request.mutable_object()->set_value(volume.role());
+      authorizations.push_back(authorizer.get()->authorized(request));
+    }
+  }
 
   LOG(INFO)
     << "Authorizing principal '"
     << (principal.isSome() ? principal.get() : "ANY")
     << "' to create volumes";
 
-  return authorizer.get()->authorize(request);
+  if (authorizations.empty()) {
+    return authorizer.get()->authorized(request);
+  }
+
+  return await(authorizations)
+      .then([](const std::list<Future<bool>>& authorizations)
+            -> Future<bool> {
+        // Compute a disjunction.
+        for (const Future<bool>& authorization : authorizations) {
+          if (!authorization.get()) {
+            return false;
+          }
+        }
+        return true;
+      });
 }
 
 
@@ -2938,21 +3074,23 @@ Future<bool> Master::authorizeDestroyVolume(
     return true; // Authorization is disabled.
   }
 
-  mesos::ACL::DestroyVolume request;
+  authorization::Request request;
+  request.set_action(authorization::DESTROY_VOLUME_WITH_PRINCIPAL);
 
   if (principal.isSome()) {
-    request.mutable_principals()->add_values(principal.get());
-  } else {
-    request.mutable_principals()->set_type(ACL::Entity::ANY);
+    request.mutable_subject()->set_value(principal.get());
   }
 
+  list<Future<bool>> authorizations;
   foreach (const Resource& volume, destroy.volumes()) {
     // NOTE: Since validation of this operation may be performed after
     // authorization, we must check here that this resource is a persistent
     // volume. If it isn't, the error will be caught during validation.
     if (Resources::isPersistentVolume(volume)) {
-      request.mutable_creator_principals()->add_values(
+      request.mutable_object()->set_value(
           volume.disk().persistence().principal());
+
+      authorizations.push_back(authorizer.get()->authorized(request));
     }
   }
 
@@ -2962,7 +3100,21 @@ Future<bool> Master::authorizeDestroyVolume(
     << "' to destroy volumes '"
     << stringify(destroy.volumes()) << "'";
 
-  return authorizer.get()->authorize(request);
+  if (authorizations.empty()) {
+    return authorizer.get()->authorized(request);
+  }
+
+  return await(authorizations)
+      .then([](const std::list<Future<bool>>& authorizations)
+            -> Future<bool> {
+        // Compute a disjunction.
+        for (const Future<bool>& authorization : authorizations) {
+          if (!authorization.get()) {
+            return false;
+          }
+        }
+        return true;
+      });
 }
 
 
@@ -3344,7 +3496,7 @@ void Master::_accept(
 
         // Make sure this reserve operation is valid.
         Option<Error> error = validation::operation::validate(
-            operation.reserve(), framework->info.role(), principal);
+            operation.reserve(), principal);
 
         if (error.isSome()) {
           drop(framework, operation, error.get().message);
@@ -3396,7 +3548,7 @@ void Master::_accept(
 
         // Make sure this unreserve operation is valid.
         Option<Error> error = validation::operation::validate(
-            operation.unreserve(), framework->info.has_principal());
+            operation.unreserve());
 
         if (error.isSome()) {
           drop(framework, operation, error.get().message);
@@ -3849,8 +4001,11 @@ void Master::kill(Framework* framework, const scheduler::Call::Kill& kill)
   // doesn't know it yet.
   slave->killedTasks.put(framework->id(), taskId);
 
-  // NOTE: This task will be properly reconciled when the
-  // disconnected slave re-registers with the master.
+  // NOTE: This task will be properly reconciled when the disconnected slave
+  // re-registers with the master.
+  // We send the KillTaskMessage even if we have already sent one, just in case
+  // the previous one was dropped by the network but it didn't trigger a slave
+  // re-registration (and hence reconciliation).
   if (slave->connected) {
     LOG(INFO) << "Telling slave " << *slave
               << " to kill task " << taskId
@@ -4423,6 +4578,9 @@ void Master::reregisterSlave(
     slave->pid = from;
     link(slave->pid);
 
+    // Update slave's version after re-registering successfully.
+    slave->version = version;
+
     // Reconcile tasks between master and the slave.
     // NOTE: This sends the re-registered message, including tasks
     // that need to be reconciled by the slave.
@@ -4990,7 +5148,7 @@ void Master::reconcile(
 void Master::reconcileTasks(
     const UPID& from,
     const FrameworkID& frameworkId,
-    const std::vector<TaskStatus>& statuses)
+    const vector<TaskStatus>& statuses)
 {
   Framework* framework = getFramework(frameworkId);
   if (framework == NULL) {
@@ -5792,8 +5950,9 @@ void Master::addFramework(Framework* framework)
 void Master::failoverFramework(Framework* framework, const HttpConnection& http)
 {
   // Notify the old connected framework that it has failed over.
-  // Note that this may be a retry in which case we'll shut down
-  // the scheduler unnecessarily.
+  // This is safe to do even if it is a retry because the framework is expected
+  // to close the old connection (and hence not receive any more responses)
+  // before sending subscription request on a new connection.
   if (framework->connected) {
     FrameworkErrorMessage message;
     message.set_message("Framework failed over");
@@ -5819,6 +5978,7 @@ void Master::failoverFramework(Framework* framework, const HttpConnection& http)
   }
 
   framework->updateConnection(http);
+
   http.closed()
     .onAny(defer(self(), &Self::exited, framework->id(), http));
 
@@ -6026,7 +6186,10 @@ void Master::removeFramework(Framework* framework)
 
   // TODO(benh): unlink(framework->pid);
 
-  // TODO(anand): For http frameworks, close the connection.
+  // For http frameworks, close the connection.
+  if (framework->http.isSome()) {
+    framework->http->close();
+  }
 
   framework->unregisteredTime = Clock::now();
 
@@ -6903,6 +7066,25 @@ double Master::_tasks_running()
     foreachvalue (const TaskMap& tasks, slave->tasks) {
       foreachvalue (const Task* task, tasks) {
         if (task->state() == TASK_RUNNING) {
+          count++;
+        }
+      }
+    }
+  }
+
+  return count;
+}
+
+
+double Master::_tasks_killing()
+{
+  double count = 0.0;
+
+  foreachvalue (Slave* slave, slaves.registered) {
+    typedef hashmap<TaskID, Task*> TaskMap;
+    foreachvalue (const TaskMap& tasks, slave->tasks) {
+      foreachvalue (const Task* task, tasks) {
+        if (task->state() == TASK_KILLING) {
           count++;
         }
       }

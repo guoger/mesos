@@ -18,7 +18,7 @@
 # Process this file with autoconf to produce a configure script.
 
 AC_PREREQ([2.61])
-AC_INIT([mesos], [0.27.0])
+AC_INIT([mesos], [0.29.0])
 
 # Have autoconf setup some variables related to the system.
 AC_CANONICAL_HOST
@@ -241,6 +241,12 @@ AC_ARG_ENABLE([python-dependency-install],
                               downloaded or installed]),
               [without_python_deps=yes], [])
 
+AC_ARG_ENABLE([tests-install],
+              AS_HELP_STRING([--enable-tests-install],
+                             [build and install tests and their helper tools
+                              default: no]),
+              [], [enable_tests_install=no])
+
 AC_ARG_WITH([network-isolator],
             AS_HELP_STRING([--with-network-isolator],
                            [builds the network isolator]),
@@ -316,6 +322,8 @@ AM_CONDITIONAL([OS_FREEBSD], [test "x$OS_NAME" = "xfreebsd"])
 AC_PROG_CXX([g++])
 AC_PROG_CC([gcc])
 
+AC_PROG_LN_S
+
 AX_COMPILER_VERSION
 AX_COMPILER_VENDOR
 
@@ -324,6 +332,9 @@ AX_COMPILER_VENDOR
 AM_CONDITIONAL([DEBUG], [test x"$enable_debug" = "xyes"])
 AM_CONDITIONAL([OPTIMIZE], [test x"$enable_optimize" = "xyes"])
 
+AM_CONDITIONAL([INSTALL_TESTS], [test x"$enable_tests_install" = "xyes"])
+AS_IF([test x"$enable_tests_install" = "xyes"],
+      [AC_DEFINE([MESOS_INSTALL_TESTS], [1])])
 
 debug_flags="-g1"
 if test "x$enable_debug" = "xyes"; then
@@ -558,9 +569,9 @@ AS_CASE($ax_cv_cxx_compiler_vendor,
   ]
 )
 
-# Ensure we can build the C++11 features we expect, and set the --std=
-# flag and CXXFLAG environment variable as appropriate.
-AX_CXX_COMPILE_STDCXX_11([noext], [mandatory])
+# Ensure that CXX supports C++11 (with "strict" conformance), and set
+# "--std=" flag and CXXFLAGS environment variable as appropriate.
+AX_CXX_COMPILE_STDCXX([11], [noext], [mandatory])
 
 # Blacklist known incompatible C++ standard libraries to reduce chance
 # of users accidentally using them.
@@ -855,7 +866,7 @@ Network isolator is only supported on Linux!
 We need libnl-3 for building network isolator!
 
 Please install libnl3 (version 3.2.26 or higher):
-http://www.infradead.org/~tgr/libnl/
+https://github.com/thom311/libnl/releases
 -------------------------------------------------------------------
   ])])
 
@@ -866,7 +877,7 @@ http://www.infradead.org/~tgr/libnl/
 We need libnl-3 headers for building network isolator!
 
 Please install libnl3 (version 3.2.26 or higher):
-http://www.infradead.org/~tgr/libnl/
+https://github.com/thom311/libnl/releases
 -------------------------------------------------------------------
   ])])
 
@@ -877,7 +888,7 @@ http://www.infradead.org/~tgr/libnl/
 We need libnl-route-3 for building network isolator!
 
 Please install libnl3 (version 3.2.26 or higher):
-http://www.infradead.org/~tgr/libnl/
+https://github.com/thom311/libnl/releases
 -------------------------------------------------------------------
   ])])
 
@@ -888,7 +899,7 @@ http://www.infradead.org/~tgr/libnl/
 We need libnl-route-3 headers for building network isolator!
 
 Please install libnl3 (version 3.2.26 or higher):
-http://www.infradead.org/~tgr/libnl/
+https://github.com/thom311/libnl/releases
 -------------------------------------------------------------------
   ])])
 
@@ -899,7 +910,7 @@ http://www.infradead.org/~tgr/libnl/
 We need libnl-idiag-3 for building network isolator!
 
 Please install libnl3 (version 3.2.26 or higher):
-http://www.infradead.org/~tgr/libnl/
+https://github.com/thom311/libnl/releases
 -------------------------------------------------------------------
   ])])
 
@@ -1155,7 +1166,7 @@ set to an older version of Python.
   # Render code that imports from the standard C++ library.
   cat <<__EOF__ >testlib.cpp [
 #include <string>
-std::string test(void)
+std::string test()
 {
   return std::string("42");
 }]
@@ -1171,8 +1182,8 @@ __EOF__
 #include <Python.h>
 #include <string>
 
-std::string test(void);
-PyMODINIT_FUNC initminimal(void);
+std::string test();
+PyMODINIT_FUNC initminimal();
 
 static PyObject *minimal_test(PyObject *self, PyObject* args)
 {
@@ -1184,7 +1195,7 @@ static PyMethodDef minimal_methods[] = {
   { NULL, NULL }
 };
 
-PyMODINIT_FUNC initminimal(void)
+PyMODINIT_FUNC initminimal()
 {
   PyImport_AddModule("minimal");
   Py_InitModule("minimal", minimal_methods);
@@ -1304,8 +1315,13 @@ There are two possible workarounds for this issue:
   AC_CONFIG_FILES([src/python/setup.py])
   AC_CONFIG_FILES([src/python/cli/setup.py])
   AC_CONFIG_FILES([src/python/interface/setup.py])
-  AC_CONFIG_FILES([src/python/native/ext_modules.py])
+  AC_CONFIG_FILES([src/python/native_common/ext_modules.py])
+  AC_CONFIG_FILES([src/python/executor/setup.py])
   AC_CONFIG_FILES([src/python/native/setup.py])
+  AC_CONFIG_FILES([src/python/scheduler/setup.py])
+
+  AC_CONFIG_LINKS([src/python/executor/ext_modules.py:src/python/native_common/ext_modules.py])
+  AC_CONFIG_LINKS([src/python/scheduler/ext_modules.py:src/python/native_common/ext_modules.py])
 
   # When clang is being used, make sure that the distutils python-
   # config cflags extraction does not cause build errors (MESOS-1079).

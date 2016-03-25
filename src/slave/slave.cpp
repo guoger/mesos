@@ -30,7 +30,10 @@
 
 #include <mesos/type_utils.hpp>
 
+#include <mesos/authentication/http/basic_authenticator_factory.hpp>
+
 #include <mesos/module/authenticatee.hpp>
+#include <mesos/module/http_authenticator.hpp>
 
 #include <process/async.hpp>
 #include <process/check.hpp>
@@ -40,6 +43,7 @@
 #include <process/dispatch.hpp>
 #include <process/http.hpp>
 #include <process/id.hpp>
+#include <process/reap.hpp>
 #include <process/time.hpp>
 
 #include <stout/bytes.hpp>
@@ -64,6 +68,7 @@
 
 #ifdef __linux__
 #include "linux/cgroups.hpp"
+#include "linux/fs.hpp"
 #endif // __linux__
 
 #include "authentication/cram_md5/authenticatee.hpp"
@@ -114,8 +119,12 @@ namespace slave {
 
 using namespace state;
 
+namespace authentication = process::http::authentication;
 
-Slave::Slave(const slave::Flags& _flags,
+using mesos::http::authentication::BasicAuthenticatorFactory;
+
+Slave::Slave(const std::string& id,
+             const slave::Flags& _flags,
              MasterDetector* _detector,
              Containerizer* _containerizer,
              Files* _files,
@@ -123,7 +132,7 @@ Slave::Slave(const slave::Flags& _flags,
              StatusUpdateManager* _statusUpdateManager,
              ResourceEstimator* _resourceEstimator,
              QoSController* _qosController)
-  : ProcessBase(process::ID::generate("slave")),
+  : ProcessBase(id),
     state(RECOVERING),
     flags(_flags),
     completedFrameworks(MAX_COMPLETED_FRAMEWORKS),
@@ -220,9 +229,9 @@ void Slave::initialize()
           flags.cgroups_root);
 
       if (hierarchy.isError()) {
-        EXIT(1) << "Failed to prepare cgroup " << flags.cgroups_root
-                << " for subsystem " << subsystem
-                << ": " << hierarchy.error();
+        EXIT(EXIT_FAILURE)
+          << "Failed to prepare cgroup " << flags.cgroups_root
+          << " for subsystem " << subsystem << ": " << hierarchy.error();
       }
 
       // Create a cgroup for the slave.
@@ -230,19 +239,21 @@ void Slave::initialize()
 
       Try<bool> exists = cgroups::exists(hierarchy.get(), cgroup);
       if (exists.isError()) {
-        EXIT(1) << "Failed to find cgroup " << cgroup
-                << " for subsystem " << subsystem
-                << " under hierarchy " << hierarchy.get()
-                << " for slave: " << exists.error();
+        EXIT(EXIT_FAILURE)
+          << "Failed to find cgroup " << cgroup
+          << " for subsystem " << subsystem
+          << " under hierarchy " << hierarchy.get()
+          << " for slave: " << exists.error();
       }
 
       if (!exists.get()) {
         Try<Nothing> create = cgroups::create(hierarchy.get(), cgroup);
         if (create.isError()) {
-          EXIT(1) << "Failed to create cgroup " << cgroup
-                  << " for subsystem " << subsystem
-                  << " under hierarchy " << hierarchy.get()
-                  << " for slave: " << create.error();
+          EXIT(EXIT_FAILURE)
+            << "Failed to create cgroup " << cgroup
+            << " for subsystem " << subsystem
+            << " under hierarchy " << hierarchy.get()
+            << " for slave: " << create.error();
         }
       }
 
@@ -250,10 +261,11 @@ void Slave::initialize()
       // indicates a prior slave (or child process) is still running.
       Try<set<pid_t>> processes = cgroups::processes(hierarchy.get(), cgroup);
       if (processes.isError()) {
-        EXIT(1) << "Failed to check for existing threads in cgroup " << cgroup
-                << " for subsystem " << subsystem
-                << " under hierarchy " << hierarchy.get()
-                << " for slave: " << processes.error();
+        EXIT(EXIT_FAILURE)
+          << "Failed to check for existing threads in cgroup " << cgroup
+          << " for subsystem " << subsystem
+          << " under hierarchy " << hierarchy.get()
+          << " for slave: " << processes.error();
       }
 
       // Log if there are any processes in the slave's cgroup. They
@@ -292,31 +304,35 @@ void Slave::initialize()
       // Move all of our threads into the cgroup.
       Try<Nothing> assign = cgroups::assign(hierarchy.get(), cgroup, getpid());
       if (assign.isError()) {
-        EXIT(1) << "Failed to move slave into cgroup " << cgroup
-                << " for subsystem " << subsystem
-                << " under hierarchy " << hierarchy.get()
-                << " for slave: " << assign.error();
+        EXIT(EXIT_FAILURE)
+          << "Failed to move slave into cgroup " << cgroup
+          << " for subsystem " << subsystem
+          << " under hierarchy " << hierarchy.get()
+          << " for slave: " << assign.error();
       }
     }
   }
 #endif // __linux__
 
   if (flags.registration_backoff_factor > REGISTER_RETRY_INTERVAL_MAX) {
-    EXIT(1) << "Invalid value '" << flags.registration_backoff_factor << "' "
-            << "for --registration_backoff_factor: "
-            << "Must be less than " << REGISTER_RETRY_INTERVAL_MAX;
+    EXIT(EXIT_FAILURE)
+      << "Invalid value '" << flags.registration_backoff_factor << "'"
+      << " for --registration_backoff_factor:"
+      << " Must be less than " << REGISTER_RETRY_INTERVAL_MAX;
   }
 
   authenticateeName = flags.authenticatee;
 
+  // Load credential for agent authentication with the master.
   if (flags.credential.isSome()) {
     Result<Credential> _credential =
       credentials::readCredential(flags.credential.get());
     if (_credential.isError()) {
-      EXIT(1) << _credential.error() << " (see --credential flag)";
+      EXIT(EXIT_FAILURE) << _credential.error() << " (see --credential flag)";
     } else if (_credential.isNone()) {
-      EXIT(1) << "Empty credential file '" << flags.credential.get()
-              << "' (see --credential flag)";
+      EXIT(EXIT_FAILURE)
+        << "Empty credential file '" << flags.credential.get() << "'"
+        << " (see --credential flag)";
     } else {
       credential = _credential.get();
       LOG(INFO) << "Slave using credential for: "
@@ -324,24 +340,130 @@ void Slave::initialize()
     }
   }
 
+  vector<string> httpAuthenticatorNames =
+    strings::split(flags.http_authenticators, ",");
+
+  // If the `http_authenticators` flag is not specified, the default value will
+  // be filled in. Passing an empty string into the `http_authenticators` flag
+  // is considered an error.
+  if (httpAuthenticatorNames.empty()) {
+    EXIT(EXIT_FAILURE) << "No HTTP authenticator specified";
+  }
+  if (httpAuthenticatorNames.size() > 1) {
+    EXIT(EXIT_FAILURE) << "Multiple HTTP authenticators not supported";
+  }
+  if (httpAuthenticatorNames[0] != DEFAULT_HTTP_AUTHENTICATOR &&
+      !modules::ModuleManager::contains<authentication::Authenticator>(
+          httpAuthenticatorNames[0])) {
+    EXIT(EXIT_FAILURE)
+      << "HTTP authenticator '" << httpAuthenticatorNames[0] << "'"
+      << " not found. Check the spelling (compare to '"
+      << DEFAULT_HTTP_AUTHENTICATOR << "') or verify that the"
+      << " authenticator was loaded successfully (see --modules)";
+  }
+
+  if (flags.authenticate_http) {
+    authentication::Authenticator* httpAuthenticator = NULL;
+
+    if (httpAuthenticatorNames[0] == DEFAULT_HTTP_AUTHENTICATOR) {
+      // Load credentials for HTTP authentication.
+      Credentials httpCredentials;
+      if (flags.http_credentials.isSome()) {
+        Result<Credentials> credentials =
+          credentials::read(flags.http_credentials.get());
+        if (credentials.isError()) {
+          EXIT(EXIT_FAILURE)
+            << credentials.error() << " (see --http_credentials flag)";
+        } else if (credentials.isNone()) {
+          EXIT(EXIT_FAILURE)
+            << "Credentials file must contain at least one credential"
+            << " (see --http_credentials flag)";
+        }
+
+        httpCredentials = credentials.get();
+      } else {
+        EXIT(EXIT_FAILURE)
+          << "No credentials provided for the default '"
+          << DEFAULT_HTTP_AUTHENTICATOR << "' HTTP authenticator";
+      }
+
+      LOG(INFO) << "Using default '" << DEFAULT_HTTP_AUTHENTICATOR
+                << "' HTTP authenticator";
+
+      Try<authentication::Authenticator*> authenticator =
+        BasicAuthenticatorFactory::create(
+            DEFAULT_HTTP_AUTHENTICATION_REALM,
+            httpCredentials);
+      if (authenticator.isError()) {
+        EXIT(EXIT_FAILURE)
+          << "Could not create HTTP authenticator module '"
+          << httpAuthenticatorNames[0] << "': " << authenticator.error();
+      }
+
+      httpAuthenticator = authenticator.get();
+    } else {
+      if (flags.http_credentials.isSome()) {
+        EXIT(EXIT_FAILURE)
+          << "The '--http_credentials' flag is only used by the default"
+          << " basic HTTP authenticator, but a custom authenticator"
+          << " module was specified via '--http_authenticators'";
+      }
+
+      Try<authentication::Authenticator*> module =
+        modules::ModuleManager::create<authentication::Authenticator>(
+            httpAuthenticatorNames[0]);
+      if (module.isError()) {
+        EXIT(EXIT_FAILURE)
+          << "Could not create HTTP authenticator module '"
+          << httpAuthenticatorNames[0] << "': " << module.error();
+      }
+
+      LOG(INFO) << "Using '" << httpAuthenticatorNames[0]
+                << "' HTTP authenticator";
+
+      httpAuthenticator = module.get();
+    }
+
+    if (httpAuthenticator == NULL) {
+      EXIT(EXIT_FAILURE)
+        << "An error occurred while initializing the '"
+        << httpAuthenticatorNames[0] << "' HTTP authenticator";
+    }
+
+    // Ownership of the `httpAuthenticator` is passed to libprocess.
+    process::http::authentication::setAuthenticator(
+        DEFAULT_HTTP_AUTHENTICATION_REALM,
+        Owned<authentication::Authenticator>(httpAuthenticator));
+  } else if (flags.http_credentials.isSome()) {
+    EXIT(EXIT_FAILURE)
+      << "The '--http_credentials' flag was provided, but HTTP"
+      << " authentication was not enabled via '--authenticate_http'";
+  } else if (httpAuthenticatorNames[0] != DEFAULT_HTTP_AUTHENTICATOR) {
+    EXIT(EXIT_FAILURE)
+      << "A custom HTTP authenticator was specified with the"
+      << " '--http_authenticators' flag, but HTTP authentication was not"
+      << " enabled via '--authenticate_http'";
+  }
+
   if ((flags.gc_disk_headroom < 0) || (flags.gc_disk_headroom > 1)) {
-    EXIT(1) << "Invalid value '" << flags.gc_disk_headroom
-            << "' for --gc_disk_headroom. Must be between 0.0 and 1.0.";
+    EXIT(EXIT_FAILURE)
+      << "Invalid value '" << flags.gc_disk_headroom << "'"
+      << " for --gc_disk_headroom. Must be between 0.0 and 1.0";
   }
 
   Try<Nothing> initialize =
     resourceEstimator->initialize(defer(self(), &Self::usage));
 
   if (initialize.isError()) {
-    EXIT(1) << "Failed to initialize the resource estimator: "
-            << initialize.error();
+    EXIT(EXIT_FAILURE)
+      << "Failed to initialize the resource estimator: " << initialize.error();
   }
 
   initialize = qosController->initialize(defer(self(), &Self::usage));
 
   if (initialize.isError()) {
-    EXIT(1) << "Failed to initialize the QoS Controller: "
-            << initialize.error();
+    EXIT(EXIT_FAILURE)
+      << "Failed to initialize the QoS Controller: " << initialize.error();
   }
 
   // Ensure slave work directory exists.
@@ -350,7 +472,82 @@ void Slave::initialize()
 
   Try<Resources> resources = Containerizer::resources(flags);
   if (resources.isError()) {
-    EXIT(1) << "Failed to determine slave resources: " << resources.error();
+    EXIT(EXIT_FAILURE)
+      << "Failed to determine slave resources: " << resources.error();
+  }
+
+  // Ensure disk `source`s are accessible.
+  foreach (
+      const Resource& resource,
+      resources->filter([](const Resource& resource) {
+        return resource.has_disk() && resource.disk().has_source();
+      })) {
+    // For `PATH` sources we create them if they do not exist.
+    const Resource::DiskInfo::Source& source = resource.disk().source();
+    if (source.type() == Resource::DiskInfo::Source::PATH) {
+      CHECK(source.has_path());
+
+      Try<Nothing> mkdir =
+        os::mkdir(source.path().root(), true);
+
+      if (mkdir.isError()) {
+        EXIT(EXIT_FAILURE)
+          << "Failed to create DiskInfo path directory '"
+          << source.path().root() << "': " << mkdir.error();
+      }
+    } else if (source.type() == Resource::DiskInfo::Source::MOUNT) {
+      CHECK(source.has_mount());
+
+      // For `MOUNT` sources we fail if they don't exist.
+      // On Linux we test the mount table for existence.
+#ifdef __linux__
+      // Get the `realpath` of the `root` to verify it against the
+      // mount table entries.
+      // TODO(jmlvanre): Consider enforcing allowing only real paths
+      // as opposed to symlinks. This would prevent the ability for
+      // an operator to change the underlying data while the slave
+      // checkpointed `root` had the same value. We could also check
+      // the UUID of the underlying block device to catch this case.
+      Result<string> realpath = os::realpath(source.mount().root());
+
+      if (!realpath.isSome()) {
+        EXIT(EXIT_FAILURE)
+          << "Failed to determine `realpath` for DiskInfo mount in resource '"
+          << resource << "' with path '" << source.mount().root() << "': "
+          << (realpath.isError() ? realpath.error() : "no such path");
+      }
+
+      // TODO(jmlvanre): Consider moving this out of the for loop.
+      Try<fs::MountTable> mountTable = fs::MountTable::read("/proc/mounts");
+      if (mountTable.isError()) {
+        EXIT(EXIT_FAILURE)
+          << "Failed to open mount table to verify mounts: "
+          << mountTable.error();
+      }
+
+      bool foundEntry = false;
+      foreach (const fs::MountTable::Entry& entry, mountTable.get().entries) {
+        if (entry.dir == realpath.get()) {
+          foundEntry = true;
+          break;
+        }
+      }
+
+      if (!foundEntry) {
+        EXIT(EXIT_FAILURE)
+          << "Failed to found mount '" << realpath.get() << "' in /proc/mounts";
+      }
+#else // __linux__
+      // On other platforms we test whether that provided `root` exists.
+      if (!os::exists(source.mount().root())) {
+        EXIT(EXIT_FAILURE)
+          << "Failed to find mount point '" << source.mount().root() << "'";
+      }
+#endif // __linux__
+    } else {
+      EXIT(EXIT_FAILURE)
+        << "Unsupported 'DiskInfo.Source.Type' in '" << resource << "'";
+    }
   }
 
   Attributes attributes;
@@ -515,22 +712,28 @@ void Slave::initialize()
   // TODO(ijimenez): Remove this endpoint at the end of the
   // deprecation cycle on 0.26.
   route("/state.json",
+        DEFAULT_HTTP_AUTHENTICATION_REALM,
         Http::STATE_HELP(),
-        [http](const process::http::Request& request) {
+        [http](const process::http::Request& request,
+               const Option<string>& principal) {
           Http::log(request);
-          return http.state(request);
+          return http.state(request, principal);
         });
   route("/state",
+        DEFAULT_HTTP_AUTHENTICATION_REALM,
         Http::STATE_HELP(),
-        [http](const process::http::Request& request) {
+        [http](const process::http::Request& request,
+               const Option<string>& principal) {
           Http::log(request);
-          return http.state(request);
+          return http.state(request, principal);
         });
   route("/flags",
+        DEFAULT_HTTP_AUTHENTICATION_REALM,
         Http::FLAGS_HELP(),
-        [http](const process::http::Request& request) {
+        [http](const process::http::Request& request,
+               const Option<string>& principal) {
           Http::log(request);
-          return http.flags(request);
+          return http.flags(request, principal);
         });
   route("/health",
         Http::HEALTH_HELP(),
@@ -560,8 +763,9 @@ void Slave::initialize()
 
   // Check that the recover flag is valid.
   if (flags.recover != "reconnect" && flags.recover != "cleanup") {
-    EXIT(1) << "Unknown option for 'recover' flag " << flags.recover
-            << ". Please run the slave with '--help' to see the valid options";
+    EXIT(EXIT_FAILURE)
+      << "Unknown option for 'recover' flag " << flags.recover << "."
+      << " Please run the slave with '--help' to see the valid options";
   }
 
   struct sigaction action;
@@ -580,7 +784,7 @@ void Slave::initialize()
   action.sa_sigaction = signalHandler;
 
   if (sigaction(SIGUSR1, &action, NULL) < 0) {
-    EXIT(1) << "Failed to set sigaction: " << os::strerror(errno);
+    EXIT(EXIT_FAILURE) << "Failed to set sigaction: " << os::strerror(errno);
   }
 
   // Do recovery.
@@ -704,7 +908,7 @@ void Slave::detected(const Future<Option<MasterInfo>>& _master)
   statusUpdateManager->pause();
 
   if (_master.isFailed()) {
-    EXIT(1) << "Failed to detect a master: " << _master.failure();
+    EXIT(EXIT_FAILURE) << "Failed to detect a master: " << _master.failure();
   }
 
   Option<MasterInfo> latest;
@@ -795,8 +999,9 @@ void Slave::authenticate()
     Try<Authenticatee*> module =
       modules::ModuleManager::create<Authenticatee>(authenticateeName);
     if (module.isError()) {
-      EXIT(1) << "Could not create authenticatee module '"
-              << authenticateeName << "': " << module.error();
+      EXIT(EXIT_FAILURE)
+        << "Could not create authenticatee module '"
+        << authenticateeName << "': " << module.error();
     }
     LOG(INFO) << "Using '" << authenticateeName << "' authenticatee";
     authenticatee = module.get();
@@ -849,7 +1054,8 @@ void Slave::_authenticate()
   if (!future.get()) {
     // For refused authentication, we exit instead of doing a shutdown
     // to keep possibly active executors running.
-    EXIT(1) << "Master " << master.get() << " refused authentication";
+    EXIT(EXIT_FAILURE)
+      << "Master " << master.get() << " refused authentication";
   }
 
   LOG(INFO) << "Successfully authenticated with master " << master.get();
@@ -938,8 +1144,9 @@ void Slave::registered(
     case RUNNING:
       // Already registered!
       if (!(info.id() == slaveId)) {
-       EXIT(1) << "Registered but got wrong id: " << slaveId
-               << "(expected: " << info.id() << "). Committing suicide";
+       EXIT(EXIT_FAILURE)
+         << "Registered but got wrong id: " << slaveId
+         << " (expected: " << info.id() << "). Committing suicide";
       }
       LOG(WARNING) << "Already registered with master " << master.get();
 
@@ -984,8 +1191,9 @@ void Slave::reregistered(
   CHECK_SOME(master);
 
   if (!(info.id() == slaveId)) {
-    EXIT(1) << "Re-registered but got wrong id: " << slaveId
-            << "(expected: " << info.id() << "). Committing suicide";
+    EXIT(EXIT_FAILURE)
+      << "Re-registered but got wrong id: " << slaveId
+      << " (expected: " << info.id() << "). Committing suicide";
   }
 
   if (connection.has_total_ping_timeout_seconds()) {
@@ -1090,7 +1298,7 @@ void Slave::reregistered(
         // updates for unknown frameworks.
         statusUpdateManager->update(update, info.id())
           .onAny(defer(self(),
-                       &Slave::__statusUpdate,
+                       &Slave::___statusUpdate,
                        lambda::_1,
                        update,
                        UPID()));
@@ -2109,7 +2317,7 @@ void Slave::schedulerMessage(
 
   Executor* executor = framework->getExecutor(executorId);
   if (executor == NULL) {
-    LOG(WARNING) << "Dropping message for executor " << *executor
+    LOG(WARNING) << "Dropping message for executor " << executorId
                  << " because executor does not exist";
     metrics.invalid_framework_messages++;
     return;
@@ -2253,10 +2461,7 @@ void Slave::checkpointResources(const vector<Resource>& _checkpointedResources)
     // This is validated in master.
     CHECK_NE(volume.role(), "*");
 
-    string path = paths::getPersistentVolumePath(
-        flags.work_dir,
-        volume.role(),
-        volume.disk().persistence().id());
+    string path = paths::getPersistentVolumePath(flags.work_dir, volume);
 
     if (!os::exists(path)) {
       CHECK_SOME(os::mkdir(path, true))
@@ -2406,8 +2611,9 @@ void Slave::subscribe(
 
   LOG(INFO) << "Received Subscribe request for HTTP executor " << *executor;
 
-  CHECK(state == DISCONNECTED || state == RUNNING ||
-        state == TERMINATING) << state;
+  CHECK(state == RECOVERING || state == DISCONNECTED ||
+        state == RUNNING || state == TERMINATING)
+    << state;
 
   if (state == TERMINATING) {
     LOG(WARNING) << "Shutting down executor " << *executor << " as the slave "
@@ -2920,7 +3126,7 @@ void Slave::reregisterExecutorTimeout()
 // This can be called in two ways:
 // 1) When a status update from the executor is received.
 // 2) When slave generates task updates (e.g LOST/KILLED/FAILED).
-// NOTE: We set the pid in 'Slave::__statusUpdate()' to 'pid' so that
+// NOTE: We set the pid in 'Slave::___statusUpdate()' to 'pid' so that
 // whoever sent this update will get an ACK. This is important because
 // we allow executors to send updates for tasks that belong to other
 // executors. Currently we allow this because we cannot guarantee
@@ -3005,22 +3211,6 @@ void Slave::statusUpdate(StatusUpdate update, const Option<UPID>& pid)
     }
   }
 
-  // Fill in the container IP address with the IP from the agent PID, if not
-  // already filled in.
-  // TODO(karya): Fill in the IP address by looking up the executor PID.
-  ContainerStatus* containerStatus =
-    update.mutable_status()->mutable_container_status();
-  if (containerStatus->network_infos().size() == 0) {
-    NetworkInfo* networkInfo = containerStatus->add_network_infos();
-
-    // TODO(CD): Deprecated -- Remove after 0.27.0.
-    networkInfo->set_ip_address(stringify(self().address.ip));
-
-    NetworkInfo::IPAddress* ipAddress =
-      networkInfo->add_ip_addresses();
-    ipAddress->set_ip_address(stringify(self().address.ip));
-  }
-
   const TaskStatus& status = update.status();
 
   Executor* executor = framework->getExecutor(status.task_id());
@@ -3041,8 +3231,14 @@ void Slave::statusUpdate(StatusUpdate update, const Option<UPID>& pid)
     // re-registered. In this case, the slave cannot find the executor
     // corresponding to this task because the task has been moved to
     // 'Executor::completedTasks'.
+    //
+    // NOTE: We do not set the `ContainerStatus` (including the
+    // `NetworkInfo` within the `ContainerStatus)  for this case,
+    // because the container is unknown. We cannot use the slave IP
+    // address here (for the `NetworkInfo`) since we do not know the
+    // type of network isolation used for this container.
     statusUpdateManager->update(update, info.id())
-      .onAny(defer(self(), &Slave::__statusUpdate, lambda::_1, update, pid));
+      .onAny(defer(self(), &Slave::___statusUpdate, lambda::_1, update, pid));
 
     return;
   }
@@ -3081,6 +3277,62 @@ void Slave::statusUpdate(StatusUpdate update, const Option<UPID>& pid)
 
   metrics.valid_status_updates++;
 
+  // Before sending update, we need to retrieve the container status.
+  containerizer->status(executor->containerId)
+    .onAny(defer(self(),
+                 &Slave::_statusUpdate,
+                 update,
+                 pid,
+                 executor->id,
+                 lambda::_1));
+}
+
+
+void Slave::_statusUpdate(
+    StatusUpdate update,
+    const Option<process::UPID>& pid,
+    const ExecutorID& executorId,
+    const Future<ContainerStatus>& future)
+{
+  ContainerStatus* containerStatus =
+    update.mutable_status()->mutable_container_status();
+
+  // There can be cases where a container is already removed from the
+  // containerizer before the `status` call is dispatched to the
+  // containerizer, leading to the failure of the returned `Future`.
+  // In such a case we should simply not update the `ContainerStatus`
+  // with the return `Future` but continue processing the
+  // `StatusUpdate`.
+  if (future.isReady()) {
+    containerStatus->MergeFrom(future.get());
+
+    // Fill in the container IP address with the IP from the agent
+    // PID, if not already filled in.
+    //
+    // TODO(karya): Fill in the IP address by looking up the executor PID.
+    if (containerStatus->network_infos().size() == 0) {
+      NetworkInfo* networkInfo = containerStatus->add_network_infos();
+
+      // TODO(CD): Deprecated -- Remove after 0.27.0.
+      networkInfo->set_ip_address(stringify(self().address.ip));
+
+      NetworkInfo::IPAddress* ipAddress =
+        networkInfo->add_ip_addresses();
+      ipAddress->set_ip_address(stringify(self().address.ip));
+    }
+  }
+
+
+  const TaskStatus& status = update.status();
+
+  Executor* executor = getExecutor(update.framework_id(), executorId);
+  if (executor == NULL) {
+    LOG(WARNING) << "Ignoring container status update for framework "
+                 << update.framework_id()
+                 << "for a non-existent executor";
+    return;
+  }
+
   // We set the latest state of the task here so that the slave can
   // inform the master about the latest state (via status update or
   // ReregisterSlaveMessage message) as soon as possible. Master can
@@ -3105,7 +3357,7 @@ void Slave::statusUpdate(StatusUpdate update, const Option<UPID>& pid)
     // sending the status update.
     containerizer->update(executor->containerId, executor->resources)
       .onAny(defer(self(),
-                   &Slave::_statusUpdate,
+                   &Slave::__statusUpdate,
                    lambda::_1,
                    update,
                    pid,
@@ -3114,7 +3366,7 @@ void Slave::statusUpdate(StatusUpdate update, const Option<UPID>& pid)
                    executor->checkpoint));
   } else {
     // Immediately send the status update.
-    _statusUpdate(None(),
+    __statusUpdate(None(),
                   update,
                   pid,
                   executor->id,
@@ -3124,7 +3376,7 @@ void Slave::statusUpdate(StatusUpdate update, const Option<UPID>& pid)
 }
 
 
-void Slave::_statusUpdate(
+void Slave::__statusUpdate(
     const Option<Future<Nothing>>& future,
     const StatusUpdate& update,
     const Option<UPID>& pid,
@@ -3159,16 +3411,16 @@ void Slave::_statusUpdate(
   if (checkpoint) {
     // Ask the status update manager to checkpoint and reliably send the update.
     statusUpdateManager->update(update, info.id(), executorId, containerId)
-      .onAny(defer(self(), &Slave::__statusUpdate, lambda::_1, update, pid));
+      .onAny(defer(self(), &Slave::___statusUpdate, lambda::_1, update, pid));
   } else {
     // Ask the status update manager to just retry the update.
     statusUpdateManager->update(update, info.id())
-      .onAny(defer(self(), &Slave::__statusUpdate, lambda::_1, update, pid));
+      .onAny(defer(self(), &Slave::___statusUpdate, lambda::_1, update, pid));
   }
 }
 
 
-void Slave::__statusUpdate(
+void Slave::___statusUpdate(
     const Future<Nothing>& future,
     const StatusUpdate& update,
     const Option<UPID>& pid)
@@ -3480,11 +3732,34 @@ ExecutorInfo Slave::getExecutorInfo(
       // `executor.container.mesos`.
       container->mutable_mesos()->clear_image();
 
+      // As we will chroot in the command executor into a new rootfs,
+      // we need to modify the volume mount points to be under the new rootfs
+      // so the container path that the task sees is correct.
+      // NOTE: We only need to modify volumes with absolute path since
+      // relative paths are mounted in the sandbox and will automatically be
+      // mounted into the rootfs.
+      for (int i = 0; i < container->volumes_size(); ++i) {
+        Volume* volume = container->mutable_volumes(i);
+        if (path::absolute(volume->container_path())) {
+          volume->set_container_path(path::join(
+              COMMAND_EXECUTOR_ROOTFS_CONTAINER_PATH,
+              volume->container_path()));
+        }
+      }
+
       container->set_type(ContainerInfo::MESOS);
       Volume* volume = container->add_volumes();
       volume->mutable_image()->CopyFrom(task.container().mesos().image());
       volume->set_container_path(COMMAND_EXECUTOR_ROOTFS_CONTAINER_PATH);
       volume->set_mode(Volume::RW);
+
+      size_t volumesSize = container->volumes_size();
+      if (volumesSize > 1) {
+        // Move the rootfs volume to the front as the other volumes
+        // will be mounting under the rootfs directory that's added last.
+        container->mutable_volumes()->SwapElements(0, volumesSize - 1);
+      }
+
       // We need to set the executor user as root as it needs to
       // perform chroot (even when switch_user is set to false).
       executor.mutable_command()->set_user("root");
@@ -3538,6 +3813,23 @@ ExecutorInfo Slave::getExecutorInfo(
           task.command().environment());
     }
 
+    // Adjust the executor shutdown grace period if the kill policy is
+    // set. We add a small buffer of time to avoid destroying the
+    // container before `TASK_KILLED` is sent by the executor.
+    //
+    // TODO(alexr): Remove `MAX_REAP_INTERVAL` once the reaper signals
+    // immediately after the watched process has exited.
+    if (task.has_kill_policy() &&
+        task.kill_policy().has_grace_period()) {
+      Duration gracePeriod =
+        Nanoseconds(task.kill_policy().grace_period().nanoseconds()) +
+        process::MAX_REAP_INTERVAL() +
+        Seconds(1);
+
+      executor.mutable_shutdown_grace_period()->set_nanoseconds(
+          gracePeriod.ns());
+    }
+
     // We skip setting the user for the command executor that has
     // a rootfs image since we need root permissions to chroot.
     // We assume command executor will change to the correct user
@@ -3561,6 +3853,7 @@ ExecutorInfo Slave::getExecutorInfo(
         executor.mutable_command()->add_arguments(
             "--sandbox_directory=" + flags.sandbox_directory);
 
+#ifndef __WINDOWS__
         // NOTE: if switch_user flag is false and the slave runs under
         // a non-root user, the task will be rejected by the Posix
         // filesystem isolator. Linux filesystem isolator requires slave
@@ -3578,6 +3871,7 @@ ExecutorInfo Slave::getExecutorInfo(
                 "--user=" + user.get());
           }
         }
+#endif // __WINDOWS__
       }
 
       executor.mutable_command()->set_value(path.get());
@@ -4070,8 +4364,16 @@ void Slave::_shutdownExecutor(Framework* framework, Executor* executor)
   // will be dropped to the floor!
   executor->send(ShutdownExecutorMessage());
 
+  // If the executor specifies shutdown grace period,
+  // pass it instead of the default.
+  Duration shutdownTimeout = flags.executor_shutdown_grace_period;
+  if (executor->info.has_shutdown_grace_period()) {
+    shutdownTimeout = Nanoseconds(
+        executor->info.shutdown_grace_period().nanoseconds());
+  }
+
   // Prepare for sending a kill if the executor doesn't comply.
-  delay(flags.executor_shutdown_grace_period,
+  delay(shutdownTimeout,
         self(),
         &Slave::shutdownExecutorTimeout,
         framework->id(),
@@ -4218,7 +4520,7 @@ void Slave::checkDiskUsage()
   // fs::usage() into async.
   // NOTE: We calculate disk usage of the file system on which the
   // slave work directory is mounted.
-  Future<double>(fs::usage(flags.work_dir))
+  Future<double>(::fs::usage(flags.work_dir))
     .onAny(defer(self(), &Slave::_checkDiskUsage, lambda::_1));
 }
 
@@ -4412,7 +4714,7 @@ Future<Nothing> Slave::_recover()
 void Slave::__recover(const Future<Nothing>& future)
 {
   if (!future.isReady()) {
-    EXIT(1)
+    EXIT(EXIT_FAILURE)
       << "Failed to perform recovery: "
       << (future.isFailed() ? future.failure() : "future discarded") << "\n"
       << "To remedy this do as follows:\n"
@@ -4905,6 +5207,22 @@ double Slave::_tasks_running()
 }
 
 
+double Slave::_tasks_killing()
+{
+  double count = 0.0;
+  foreachvalue (Framework* framework, frameworks) {
+    foreachvalue (Executor* executor, framework->executors) {
+      foreach (Task* task, executor->launchedTasks.values()) {
+        if (task->state() == TASK_KILLING) {
+          count++;
+        }
+      }
+    }
+  }
+  return count;
+}
+
+
 double Slave::_executors_registering()
 {
   double count = 0.0;
@@ -5168,6 +5486,7 @@ Executor* Framework::launchExecutor(
   containerId.set_value(UUID::random().toString());
 
   Option<string> user = None();
+#ifndef __WINDOWS__
   if (slave->flags.switch_user) {
     // The command (either in form of task or executor command) can
     // define a specific user to run as. If present, this precedes the
@@ -5183,6 +5502,7 @@ Executor* Framework::launchExecutor(
       user = executorInfo.command().user();
     }
   }
+#endif // __WINDOWS__
 
   // Create a directory for the executor.
   const string directory = paths::createExecutorDirectory(
@@ -5459,7 +5779,8 @@ Executor::Executor(
     containerId(_containerId),
     directory(_directory),
     checkpoint(_checkpoint),
-    pid(UPID()),
+    http(None()),
+    pid(None()),
     resources(_info.resources()),
     completedTasks(MAX_COMPLETED_TASKS_PER_EXECUTOR)
 {

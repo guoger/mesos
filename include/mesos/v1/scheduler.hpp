@@ -18,6 +18,7 @@
 #define __MESOS_V1_SCHEDULER_HPP__
 
 #include <functional>
+#include <memory>
 #include <queue>
 #include <string>
 
@@ -28,6 +29,12 @@
 #include <mesos/v1/scheduler/scheduler.hpp>
 
 namespace mesos {
+
+// Forward declaration.
+namespace internal {
+class MasterDetector;
+} // namespace internal {
+
 namespace v1 {
 namespace scheduler {
 
@@ -46,8 +53,8 @@ class Mesos
 public:
   Mesos(const std::string& master,
         ContentType contentType,
-        const std::function<void(void)>& connected,
-        const std::function<void(void)>& disconnected,
+        const std::function<void()>& connected,
+        const std::function<void()>& disconnected,
         const std::function<void(const std::queue<Event>&)>& received);
 
   // Delete copy constructor.
@@ -65,6 +72,25 @@ public:
   // calls are sent but no master is currently detected (i.e., we're
   // disconnected).
   virtual void send(const Call& call);
+
+protected:
+  // NOTE: This constructor is used for testing.
+  Mesos(
+      const std::string& master,
+      ContentType contentType,
+      const std::function<void()>& connected,
+      const std::function<void()>& disconnected,
+      const std::function<void(const std::queue<Event>&)>& received,
+      const Option<std::shared_ptr<mesos::internal::MasterDetector>>& detector);
+
+  // Stops the library so that:
+  //   - No more calls can be sent to the master.
+  //   - No more callbacks can be made to the scheduler. In some cases, there
+  //     may be one additional callback if the library was in the middle of
+  //     processing an event.
+  //
+  // NOTE: This is used for testing.
+  virtual void stop();
 
 private:
   MesosProcess* process;

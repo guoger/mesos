@@ -44,6 +44,9 @@ public:
   // may be a user or a framework.
   virtual void add(const std::string& client, double weight = 1) = 0;
 
+  // Update weight of a client.
+  virtual void update(const std::string& client, double weight) = 0;
+
   // Removes a client.
   virtual void remove(const std::string& client) = 0;
 
@@ -76,7 +79,14 @@ public:
       const Resources& resources) = 0;
 
   // Returns the resources that have been allocated to this client.
-  virtual hashmap<SlaveID, Resources> allocation(const std::string& client) = 0;
+  virtual const hashmap<SlaveID, Resources>& allocation(
+      const std::string& client) = 0;
+
+  // Returns the total scalar resource quantities that are allocated to
+  // this client. This omits metadata about dynamic reservations and
+  // persistent volumes; see `Resources::createStrippedScalarQuantity`.
+  virtual const Resources& allocationScalarQuantities(
+      const std::string& client) = 0;
 
   // Returns the clients that have allocations on this slave.
   virtual hashmap<std::string, Resources> allocation(
@@ -87,6 +97,14 @@ public:
   virtual Resources allocation(
       const std::string& client,
       const SlaveID& slaveId) = 0;
+
+  // Returns the total resources that are in this sorter.
+  virtual const hashmap<SlaveID, Resources>& total() const = 0;
+
+  // Returns the total scalar resource quantities in this sorter. This
+  // omits metadata about dynamic reservations and persistent volumes; see
+  // `Resources::createStrippedScalarQuantity`.
+  virtual const Resources& totalScalarQuantities() const = 0;
 
   // Add resources to the total pool of resources this
   // Sorter should consider.

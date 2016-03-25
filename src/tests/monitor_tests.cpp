@@ -26,6 +26,7 @@
 #include <process/gmock.hpp>
 #include <process/gtest.hpp>
 #include <process/http.hpp>
+#include <process/owned.hpp>
 #include <process/pid.hpp>
 #include <process/process.hpp>
 
@@ -46,7 +47,6 @@ using mesos::internal::slave::ResourceMonitor;
 using mesos::internal::slave::Slave;
 
 using std::numeric_limits;
-using std::string;
 using std::vector;
 
 namespace mesos {
@@ -173,20 +173,21 @@ TEST(MonitorTest, MissingStatistics)
 class MonitorIntegrationTest : public MesosTest {};
 
 
-// This is an end-to-end test that verfies that the slave returns the
+// This is an end-to-end test that verifies that the slave returns the
 // correct ResourceUsage based on the currently running executors, and
-// the values get from the statistics endpoint are as expected.
+// the values returned by the statistics endpoint are as expected.
 TEST_F(MonitorIntegrationTest, RunningExecutor)
 {
-  Try<PID<Master>> master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
-  Try<PID<Slave>> slave = StartSlave();
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
   ASSERT_SOME(slave);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(&driver, _, _));
 
@@ -247,8 +248,6 @@ TEST_F(MonitorIntegrationTest, RunningExecutor)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 } // namespace tests {

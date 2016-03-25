@@ -38,15 +38,15 @@ class BasicAuthenticatorProcess : public Process<BasicAuthenticatorProcess>
 {
 public:
   BasicAuthenticatorProcess(
-      const std::string& realm,
-      const hashmap<std::string, std::string>& credentials);
+      const string& realm,
+      const hashmap<string, string>& credentials);
 
   virtual Future<AuthenticationResult> authenticate(
       const http::Request& request);
 
 private:
-  const std::string realm_;
-  const hashmap<std::string, std::string> credentials_;
+  const string realm_;
+  const hashmap<string, string> credentials_;
 };
 
 
@@ -61,7 +61,7 @@ Future<AuthenticationResult> BasicAuthenticatorProcess::authenticate(
 {
   AuthenticationResult unauthorized;
   unauthorized.unauthorized =
-    Unauthorized(vector<string>({"Basic realm=\"" + realm_ + "\""}));
+    Unauthorized({"Basic realm=\"" + realm_ + "\""});
 
   Option<string> credentials = request.headers.get("Authorization");
 

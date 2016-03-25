@@ -58,6 +58,7 @@
 
 #include "tests/environment.hpp"
 #include "tests/flags.hpp"
+#include "tests/utils.hpp"
 
 #ifdef WITH_NETWORK_ISOLATOR
 using namespace routing;
@@ -104,23 +105,12 @@ public:
 };
 
 
-class RootFilter : public TestFilter
+class BenchmarkFilter : public TestFilter
 {
 public:
   bool disable(const ::testing::TestInfo* test) const
   {
-    Result<string> user = os::user();
-    CHECK_SOME(user);
-
-#ifdef __linux__
-    // On Linux non-privileged users are limited to 64k of locked
-    // memory so we cannot run the MemIsolatorTest.Usage.
-    if (matches(test, "MemIsolatorTest")) {
-      return user.get() != "root";
-    }
-#endif // __linux__
-
-    return matches(test, "ROOT_") && user.get() != "root";
+    return matches(test, "BENCHMARK_") && !flags.benchmark;
   }
 };
 
@@ -236,17 +226,43 @@ private:
 };
 
 
+class CurlFilter : public TestFilter
+{
+public:
+  CurlFilter()
+  {
+    curlError = os::system("which curl") != 0;
+    if (curlError) {
+      std::cerr
+        << "-------------------------------------------------------------\n"
+        << "No 'curl' command found so no 'curl' tests will be run\n"
+        << "-------------------------------------------------------------"
+        << std::endl;
+    }
+  }
+
+  bool disable(const ::testing::TestInfo* test) const
+  {
+    return matches(test, "CURL_") && curlError;
+  }
+
+private:
+  bool curlError;
+};
+
+
 class DockerFilter : public TestFilter
 {
 public:
   DockerFilter()
   {
 #ifdef __linux__
-    Try<Docker*> docker = Docker::create(flags.docker, flags.docker_socket);
+    Try<Owned<Docker>> docker = Docker::create(
+        flags.docker,
+        flags.docker_socket);
+
     if (docker.isError()) {
       dockerError = docker.error();
-    } else {
-      delete docker.get();
     }
 #else
     dockerError = Error("Docker tests not supported on non-Linux systems");
@@ -272,38 +288,54 @@ private:
 };
 
 
-class PerfFilter : public TestFilter
+class InternetFilter : public TestFilter
 {
 public:
-  PerfFilter()
+  InternetFilter()
   {
-#ifdef __linux__
-    perfError = os::system("perf help >&-") != 0;
-    if (perfError) {
+    error = os::system("ping -c 1 -W 1 google.com") != 0;
+    if (error) {
       std::cerr
         << "-------------------------------------------------------------\n"
-        << "No 'perf' command found so no 'perf' tests will be run\n"
+        << "We cannot run any INTERNET tests because no internet access\n"
         << "-------------------------------------------------------------"
         << std::endl;
     }
-#else
-    perfError = true;
-#endif // __linux__
   }
 
   bool disable(const ::testing::TestInfo* test) const
   {
-    // Currently all tests that require 'perf' are part of the
-    // 'PerfTest' test fixture, hence we check for 'Perf' here.
-    //
-    // TODO(ijimenez): Replace all tests which require 'perf' with
-    // the prefix 'PERF_' to be more consistent with the filter
-    // naming we've done (i.e., ROOT_, CGROUPS_, etc).
-    return matches(test, "Perf") && perfError;
+    return matches(test, "INTERNET_") && error;
   }
 
 private:
-  bool perfError;
+  bool error;
+};
+
+
+class LogrotateFilter : public TestFilter
+{
+public:
+  LogrotateFilter()
+  {
+    logrotateError = os::system("which logrotate") != 0;
+    if (logrotateError) {
+      std::cerr
+        << "-------------------------------------------------------------\n"
+        << "No 'logrotate' command found so no 'logrotate' tests\n"
+        << "will be run\n"
+        << "-------------------------------------------------------------"
+        << std::endl;
+    }
+  }
+
+  bool disable(const ::testing::TestInfo* test) const
+  {
+    return matches(test, "LOGROTATE_") && logrotateError;
+  }
+
+private:
+  bool logrotateError;
 };
 
 
@@ -332,38 +364,60 @@ private:
 };
 
 
-class CurlFilter : public TestFilter
+// This filter enables tests for the cgroups/net_cls isolator after
+// checking that net_cls cgroup subsystem has been enabled on the
+// system. We cannot rely on the generic cgroups test filter
+// ('CgroupsFilter') to enable the cgroups/net_cls isolator tests
+// since, although cgroups might be enabled on a linux distribution
+// the net_cls subsystem is not turned on, by default, on all
+// distributions.
+class NetClsCgroupsFilter : public TestFilter
 {
 public:
-  CurlFilter()
+  NetClsCgroupsFilter()
   {
-    curlError = os::system("which curl") != 0;
-    if (curlError) {
+    netClsError = true;
+#ifdef __linux__
+    Try<bool> netCls = cgroups::enabled("net_cls");
+
+    if (netCls.isError()) {
       std::cerr
         << "-------------------------------------------------------------\n"
-        << "No 'curl' command found so no 'curl' tests will be run\n"
-        << "-------------------------------------------------------------"
-        << std::endl;
+        << "Cannot enable NetClsIsolatorTest since we cannot determine \n"
+        << "the existence of the net_cls cgroup subsystem.\n"
+        << "-------------------------------------------------------------\n";
+      return;
     }
+
+    if (netCls.isSome() && !netCls.get()) {
+      std::cerr
+        << "-------------------------------------------------------------\n"
+        << "Cannot enable NetClsIsolatorTest since net_cls cgroup \n"
+        << "subsystem is not enabled. Check instructions for your linux\n"
+        << "distrubtion to enable the net_cls cgroups on your system.\n"
+        << "-----------------------------------------------------------\n";
+      return;
+    }
+    netClsError = false;
+#else
+    std::cerr
+        << "-----------------------------------------------------------\n"
+        << "Cannot enable NetClsIsolatorTest since this platform does\n"
+        << "not support cgroups.\n"
+        << "-----------------------------------------------------------\n";
+#endif
   }
 
   bool disable(const ::testing::TestInfo* test) const
   {
-    return matches(test, "CURL_") && curlError;
+    if (matches(test, "NetClsIsolatorTest")) {
+      return netClsError;
+    }
+    return false;
   }
 
 private:
-  bool curlError;
-};
-
-
-class BenchmarkFilter : public TestFilter
-{
-public:
-  bool disable(const ::testing::TestInfo* test) const
-  {
-    return matches(test, "BENCHMARK_") && !flags.benchmark;
-  }
+  bool netClsError;
 };
 
 
@@ -402,6 +456,172 @@ public:
 
 private:
   Option<Error> portMappingError;
+};
+
+
+class OverlayFSTestFilter : public TestFilter
+{
+public:
+  OverlayFSTestFilter()
+  {
+#ifdef __linux__
+    Try<bool> check = fs::supported("overlayfs");
+    if (check.isError()) {
+      overlayfsError = check.error();
+    } else if (!check.get()) {
+      overlayfsError = Error("Overlayfs is not supported on your systems");
+    }
+#else
+    overlayfsError =
+      Error("Overlayfs tests not supported on non-Linux systems");
+#endif // __linux__
+    if (overlayfsError.isSome()) {
+      std::cerr
+        << "-------------------------------------------------------------\n"
+        << "We cannot run any overlayfs tests because:\n"
+        << overlayfsError.get().message << "\n"
+        << "-------------------------------------------------------------\n";
+    }
+  }
+
+  bool disable(const ::testing::TestInfo* test) const
+  {
+    return overlayfsError.isSome() && matches(test, "OVERLAYFS_");
+  }
+
+private:
+  Option<Error> overlayfsError;
+};
+
+
+class PerfCPUCyclesFilter : public TestFilter
+{
+public:
+  PerfCPUCyclesFilter()
+  {
+#ifdef __linux__
+    bool perfUnavailable = os::system("perf help >&-") != 0;
+    if (perfUnavailable) {
+      perfError = Error(
+          "The 'perf' command wasn't found so tests using it\n"
+          "to sample the 'cpu-cycles' hardware event will not be run.");
+    } else {
+      bool cyclesUnavailable =
+        os::system("perf list hw | grep cpu-cycles >/dev/null") != 0;
+      if (cyclesUnavailable) {
+        perfError = Error(
+            "The 'cpu-cycles' hardware event of 'perf' is not available on\n"
+            "this platform so tests using it will not be run.\n"
+            "One likely reason is that the tests are run in a virtual\n"
+            "machine that does not provide CPU performance counters");
+      }
+    }
+#else
+    perfError = Error("Tests using 'perf' cannot be run on non-Linux systems");
+#endif // __linux__
+
+    if (perfError.isSome()) {
+      std::cerr
+        << "-------------------------------------------------------------\n"
+        << perfError.get().message << "\n"
+        << "-------------------------------------------------------------"
+        << std::endl;
+    }
+  }
+
+  bool disable(const ::testing::TestInfo* test) const
+  {
+    // Disable all tests that try to sample 'cpu-cycles' events using 'perf'.
+    return (matches(test, "ROOT_CGROUPS_Perf") ||
+            matches(test, "ROOT_CGROUPS_Sample") ||
+            matches(test, "ROOT_CGROUPS_UserCgroup") ||
+            matches(test, "CGROUPS_ROOT_PerfRollForward") ||
+            matches(test, "ROOT_Sample")) && perfError.isSome();
+  }
+
+private:
+  Option<Error> perfError;
+};
+
+
+class PerfFilter : public TestFilter
+{
+public:
+  PerfFilter()
+  {
+#ifdef __linux__
+    perfError = os::system("perf help >&-") != 0;
+    if (perfError) {
+      std::cerr
+        << "-------------------------------------------------------------\n"
+        << "No 'perf' command found so no 'perf' tests will be run\n"
+        << "-------------------------------------------------------------"
+        << std::endl;
+    }
+#else
+    perfError = true;
+#endif // __linux__
+  }
+
+  bool disable(const ::testing::TestInfo* test) const
+  {
+    // Currently all tests that require 'perf' are part of the
+    // 'PerfTest' test fixture, hence we check for 'Perf' here.
+    //
+    // TODO(ijimenez): Replace all tests which require 'perf' with
+    // the prefix 'PERF_' to be more consistent with the filter
+    // naming we've done (i.e., ROOT_, CGROUPS_, etc).
+    return matches(test, "Perf") && perfError;
+  }
+
+private:
+  bool perfError;
+};
+
+
+class RootFilter : public TestFilter
+{
+public:
+  bool disable(const ::testing::TestInfo* test) const
+  {
+    Result<string> user = os::user();
+    CHECK_SOME(user);
+
+#ifdef __linux__
+    // On Linux non-privileged users are limited to 64k of locked
+    // memory so we cannot run the MemIsolatorTest.Usage.
+    if (matches(test, "MemIsolatorTest")) {
+      return user.get() != "root";
+    }
+#endif // __linux__
+
+    return matches(test, "ROOT_") && user.get() != "root";
+  }
+};
+
+
+class UnzipFilter : public TestFilter
+{
+public:
+  UnzipFilter()
+  {
+    unzipError = os::system("which unzip") != 0;
+    if (unzipError) {
+      std::cerr
+        << "-------------------------------------------------------------\n"
+        << "No 'uznip' command found so no 'unzip' tests will be run\n"
+        << "-------------------------------------------------------------"
+        << std::endl;
+    }
+  }
+
+  bool disable(const ::testing::TestInfo* test) const
+  {
+    return matches(test, "UNZIP_") && unzipError;
+  }
+
+private:
+  bool unzipError;
 };
 
 
@@ -471,15 +691,21 @@ Environment::Environment(const Flags& _flags) : flags(_flags)
 
   vector<Owned<TestFilter> > filters;
 
-  filters.push_back(Owned<TestFilter>(new RootFilter()));
+  filters.push_back(Owned<TestFilter>(new BenchmarkFilter()));
   filters.push_back(Owned<TestFilter>(new CfsFilter()));
   filters.push_back(Owned<TestFilter>(new CgroupsFilter()));
-  filters.push_back(Owned<TestFilter>(new DockerFilter()));
-  filters.push_back(Owned<TestFilter>(new BenchmarkFilter()));
-  filters.push_back(Owned<TestFilter>(new NetworkIsolatorTestFilter()));
-  filters.push_back(Owned<TestFilter>(new PerfFilter()));
-  filters.push_back(Owned<TestFilter>(new NetcatFilter()));
   filters.push_back(Owned<TestFilter>(new CurlFilter()));
+  filters.push_back(Owned<TestFilter>(new DockerFilter()));
+  filters.push_back(Owned<TestFilter>(new InternetFilter()));
+  filters.push_back(Owned<TestFilter>(new LogrotateFilter()));
+  filters.push_back(Owned<TestFilter>(new NetcatFilter()));
+  filters.push_back(Owned<TestFilter>(new NetClsCgroupsFilter()));
+  filters.push_back(Owned<TestFilter>(new NetworkIsolatorTestFilter()));
+  filters.push_back(Owned<TestFilter>(new OverlayFSTestFilter()));
+  filters.push_back(Owned<TestFilter>(new PerfCPUCyclesFilter()));
+  filters.push_back(Owned<TestFilter>(new PerfFilter()));
+  filters.push_back(Owned<TestFilter>(new RootFilter()));
+  filters.push_back(Owned<TestFilter>(new UnzipFilter()));
 
   // Construct the filter string to handle system or platform specific tests.
   ::testing::UnitTest* unitTest = ::testing::UnitTest::GetInstance();
@@ -518,17 +744,12 @@ void Environment::SetUp()
   // TODO(tillt): Adapt library towards JNI specific name once libmesos
   // has been split.
   if (os::getenv("MESOS_NATIVE_JAVA_LIBRARY").isNone()) {
-    string path = path::join(tests::flags.build_dir, "src", ".libs");
-#ifdef __APPLE__
-    path = path::join(path, "libmesos-" VERSION ".dylib");
-#else
-    path = path::join(path, "libmesos-" VERSION ".so");
-#endif
+    string path = getLibMesosPath();
     os::setenv("MESOS_NATIVE_JAVA_LIBRARY", path);
   }
 
   if (!GTEST_IS_THREADSAFE) {
-    EXIT(1) << "Testing environment is not thread safe, bailing!";
+    EXIT(EXIT_FAILURE) << "Testing environment is not thread safe, bailing!";
   }
 }
 

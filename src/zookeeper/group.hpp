@@ -100,7 +100,7 @@ public:
     // has been cancelled. In which case, the value of the future is
     // true if you own this membership and cancelled it by invoking
     // Group::cancel. Otherwise, the value of the future is false (and
-    // could signify cancellation due to a sesssion expiration or
+    // could signify cancellation due to a session expiration or
     // operator error).
     process::Future<bool> cancelled() const
     {
@@ -121,13 +121,13 @@ public:
   };
 
   // Constructs this group using the specified ZooKeeper servers (list
-  // of host:port) with the given timeout at the specified znode.
+  // of host:port) with the given session timeout at the specified znode.
   Group(const std::string& servers,
-        const Duration& timeout,
+        const Duration& sessionTimeout,
         const std::string& znode,
         const Option<Authentication>& auth = None());
   Group(const URL& url,
-        const Duration& timeout);
+        const Duration& sessionTimeout);
 
   ~Group();
 
@@ -150,16 +150,16 @@ public:
   // group membership.
   // A None is returned if the specified membership doesn't exist,
   // e.g., it can be removed before this call can read it content.
-  process::Future<Option<std::string> > data(const Membership& membership);
+  process::Future<Option<std::string>> data(const Membership& membership);
 
   // Returns a future that gets set when the group memberships differ
   // from the "expected" memberships specified.
-  process::Future<std::set<Membership> > watch(
+  process::Future<std::set<Membership>> watch(
       const std::set<Membership>& expected = std::set<Membership>());
 
   // Returns the current ZooKeeper session associated with this group,
   // or none if no session currently exists.
-  process::Future<Option<int64_t> > session();
+  process::Future<Option<int64_t>> session();
 
   // Made public for testing purposes.
   GroupProcess* process;
@@ -170,12 +170,12 @@ class GroupProcess : public process::Process<GroupProcess>
 {
 public:
   GroupProcess(const std::string& servers,
-               const Duration& timeout,
+               const Duration& sessionTimeout,
                const std::string& znode,
                const Option<Authentication>& auth);
 
   GroupProcess(const URL& url,
-               const Duration& timeout);
+               const Duration& sessionTimeout);
 
   virtual ~GroupProcess();
 
@@ -192,11 +192,11 @@ public:
       const std::string& data,
       const Option<std::string>& label);
   process::Future<bool> cancel(const Group::Membership& membership);
-  process::Future<Option<std::string> > data(
+  process::Future<Option<std::string>> data(
       const Group::Membership& membership);
-  process::Future<std::set<Group::Membership> > watch(
+  process::Future<std::set<Group::Membership>> watch(
       const std::set<Group::Membership>& expected);
-  process::Future<Option<int64_t> > session();
+  process::Future<Option<int64_t>> session();
 
   // ZooKeeper events.
   // Note that events from previous sessions are dropped.
@@ -208,11 +208,13 @@ public:
   void deleted(int64_t sessionId, const std::string& path);
 
 private:
+  void startConnection();
+
   Result<Group::Membership> doJoin(
       const std::string& data,
       const Option<std::string>& label);
   Result<bool> doCancel(const Group::Membership& membership);
-  Result<Option<std::string> > doData(const Group::Membership& membership);
+  Result<Option<std::string>> doData(const Group::Membership& membership);
 
   // Returns true if authentication is successful, false if the
   // failure is retryable and Error otherwise.
@@ -256,7 +258,7 @@ private:
   const std::string servers;
 
   // The session timeout requested by the client.
-  const Duration timeout;
+  const Duration sessionTimeout;
 
   const std::string znode;
 
@@ -308,7 +310,7 @@ private:
     explicit Data(const Group::Membership& _membership)
       : membership(_membership) {}
     Group::Membership membership;
-    process::Promise<Option<std::string> > promise;
+    process::Promise<Option<std::string>> promise;
   };
 
   struct Watch
@@ -316,7 +318,7 @@ private:
     explicit Watch(const std::set<Group::Membership>& _expected)
       : expected(_expected) {}
     std::set<Group::Membership> expected;
-    process::Promise<std::set<Group::Membership> > promise;
+    process::Promise<std::set<Group::Membership>> promise;
   };
 
   struct {
@@ -337,11 +339,11 @@ private:
 
   // Cache of owned + unowned, where 'None' represents an invalid
   // cache and 'Some' represents a valid cache.
-  Option<std::set<Group::Membership> > memberships;
+  Option<std::set<Group::Membership>> memberships;
 
-  // The timer that determines whether we should quit waiting for the
-  // connection to be restored.
-  Option<process::Timer> timer;
+  // A timer that controls when we should give up on waiting for the
+  // current connection attempt to succeed and try to reconnect.
+  Option<process::Timer> connectTimer;
 };
 
 } // namespace zookeeper {

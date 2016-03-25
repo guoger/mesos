@@ -14,16 +14,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+include(StoutConfigure)
+
+if (NOT WIN32)
+  find_package(Apr REQUIRED)
+  find_package(Svn REQUIRED)
+endif (NOT WIN32)
+
 # Define process library dependencies. Tells the process library build targets
 # download/configure/build all third-party libraries before attempting to build.
 ################################################################################
 set(AGENT_DEPENDENCIES
   ${AGENT_DEPENDENCIES}
+  ${PROCESS_DEPENDENCIES}
   ${PROCESS_TARGET}
-  ${BOOST_TARGET}
-  ${GLOG_TARGET}
-  ${PICOJSON_TARGET}
   ${ZOOKEEPER_TARGET}
+  ${LEVELDB_TARGET}
   make_bin_include_dir
   make_bin_src_dir
   )
@@ -41,12 +47,9 @@ set(AGENT_INCLUDE_DIRS
   ${MESOS_SRC_DIR}
 
   ${PROCESS_INCLUDE_DIRS}
-  ${STOUT_INCLUDE_DIR}
-  ${BOOST_INCLUDE_DIR}
-  ${GLOG_INCLUDE_DIR}
-  ${PICOJSON_INCLUDE_DIR}
-  ${PROTOBUF_INCLUDE_DIR}
   ${ZOOKEEPER_INCLUDE_DIR}
+  ${ZOOKEEPER_INCLUDE_GENDIR}
+  ${LEVELDB_INCLUDE_DIR}
   )
 
 # Define third-party lib install directories. Used to tell the compiler
@@ -56,7 +59,6 @@ set(AGENT_INCLUDE_DIRS
 set(AGENT_LIB_DIRS
   ${AGENT_LIB_DIRS}
   ${PROCESS_LIB_DIRS}
-  ${GLOG_LIB_DIR}
   ${ZOOKEEPER_LIB_DIR}
   )
 
@@ -66,8 +68,17 @@ set(AGENT_LIB_DIRS
 set(AGENT_LIBS
   ${AGENT_LIBS}
   ${PROCESS_LIBS}
-  ${GLOG_LFLAG}
+  ${ZOOKEEPER_LFLAG}
+  ${PROCESS_TARGET}
   )
+
+if (NOT WIN32)
+  set(AGENT_LIBS
+    ${AGENT_LIBS}
+    ${LEVELDB_LFLAG}
+    ${SASL_LFLAG}
+    )
+endif (NOT WIN32)
 
 if (NOT ENABLE_LIBEVENT)
   set(AGENT_LIBS ${AGENT_LIBS} ${LIBEV_LFLAG})

@@ -444,7 +444,6 @@ LibeventSSLSocketImpl::LibeventSSLSocketImpl(int _s)
   : Socket::Impl(_s),
     bev(NULL),
     listener(NULL),
-    lock(ATOMIC_FLAG_INIT),
     recv_request(NULL),
     send_request(NULL),
     connect_request(NULL),
@@ -455,11 +454,10 @@ LibeventSSLSocketImpl::LibeventSSLSocketImpl(int _s)
 LibeventSSLSocketImpl::LibeventSSLSocketImpl(
     int _s,
     bufferevent* _bev,
-    Option<std::string>&& _peer_hostname)
+    Option<string>&& _peer_hostname)
   : Socket::Impl(_s),
     bev(_bev),
     listener(NULL),
-    lock(ATOMIC_FLAG_INIT),
     recv_request(NULL),
     send_request(NULL),
     connect_request(NULL),

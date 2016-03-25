@@ -154,9 +154,8 @@ public:
       const std::list<mesos::slave::ContainerState>& states,
       const hashset<ContainerID>& orphans);
 
-  virtual process::Future<Option<mesos::slave::ContainerPrepareInfo>> prepare(
+  virtual process::Future<Option<mesos::slave::ContainerLaunchInfo>> prepare(
       const ContainerID& containerId,
-      const ExecutorInfo& executorInfo,
       const mesos::slave::ContainerConfig& containerConfig);
 
   virtual process::Future<Nothing> isolate(
@@ -385,6 +384,7 @@ public:
     Option<pid_t> pid;
     bool enable_socket_statistics_summary;
     bool enable_socket_statistics_details;
+    bool enable_snmp_statistics;
   };
 
   PortMappingStatistics() : Subcommand(NAME) {}

@@ -28,6 +28,8 @@
 #include <process/clock.hpp>
 #include <process/gmock.hpp>
 #include <process/gtest.hpp>
+#include <process/owned.hpp>
+#include <process/pid.hpp>
 
 #include <stout/gtest.hpp>
 #include <stout/strings.hpp>
@@ -38,6 +40,7 @@
 
 #include "slave/slave.hpp"
 
+#include "tests/containerizer.hpp"
 #include "tests/mesos.hpp"
 
 using namespace mesos::internal::master::validation;
@@ -50,6 +53,7 @@ using mesos::internal::slave::Slave;
 
 using process::Clock;
 using process::Future;
+using process::Owned;
 using process::PID;
 
 using std::vector;
@@ -197,7 +201,7 @@ TEST_F(ReserveOperationValidationTest, MatchingRole)
   Offer::Operation::Reserve reserve;
   reserve.add_resources()->CopyFrom(resource);
 
-  EXPECT_NONE(operation::validate(reserve, "role", "principal"));
+  EXPECT_NONE(operation::validate(reserve, "principal"));
 }
 
 
@@ -213,50 +217,23 @@ TEST_F(ReserveOperationValidationTest, DisallowStarRoleFrameworks)
   Offer::Operation::Reserve reserve;
   reserve.add_resources()->CopyFrom(resource);
 
-  EXPECT_SOME(operation::validate(reserve, "*", "principal"));
+  EXPECT_SOME(operation::validate(reserve, "principal"));
 }
 
 
-// This test verifies that validation fails if the 'role'
-// specified in the resources of the RESERVE operation does not
-// match the framework's 'role'.
-TEST_F(ReserveOperationValidationTest, NonMatchingRole)
+// This test verifies that validation fails if the framework attempts
+// to reserve for the "*" role.
+TEST_F(ReserveOperationValidationTest, DisallowReserveForStarRole)
 {
-  {
-    // Non-matching role, "role" reserving for "*".
-    Resource resource = Resources::parse("cpus", "8", "*").get();
-    resource.mutable_reservation()->CopyFrom(
-        createReservationInfo("principal"));
+  // Principal "principal" reserving for "*".
+  Resource resource = Resources::parse("cpus", "8", "*").get();
+  resource.mutable_reservation()->CopyFrom(
+      createReservationInfo("principal"));
 
-    Offer::Operation::Reserve reserve;
-    reserve.add_resources()->CopyFrom(resource);
+  Offer::Operation::Reserve reserve;
+  reserve.add_resources()->CopyFrom(resource);
 
-    EXPECT_SOME(operation::validate(reserve, "role", "principal"));
-  }
-
-  {
-    // Non-matching role, "*" reserving for "role".
-    Resource resource = Resources::parse("cpus", "8", "role").get();
-    resource.mutable_reservation()->CopyFrom(
-        createReservationInfo("principal"));
-
-    Offer::Operation::Reserve reserve;
-    reserve.add_resources()->CopyFrom(resource);
-
-    EXPECT_SOME(operation::validate(reserve, "*", "principal"));
-  }
-
-  {
-    // Non-matching role, "role1" reserving for "role2".
-    Resource resource = Resources::parse("cpus", "8", "role2").get();
-    resource.mutable_reservation()->CopyFrom(
-        createReservationInfo("principal"));
-
-    Offer::Operation::Reserve reserve;
-    reserve.add_resources()->CopyFrom(resource);
-
-    EXPECT_SOME(operation::validate(reserve, "role1", "principal"));
-  }
+  EXPECT_SOME(operation::validate(reserve, "principal"));
 }
 
 
@@ -270,7 +247,7 @@ TEST_F(ReserveOperationValidationTest, MatchingPrincipal)
   Offer::Operation::Reserve reserve;
   reserve.add_resources()->CopyFrom(resource);
 
-  EXPECT_NONE(operation::validate(reserve, "role", "principal"));
+  EXPECT_NONE(operation::validate(reserve, "principal"));
 }
 
 
@@ -285,7 +262,7 @@ TEST_F(ReserveOperationValidationTest, NonMatchingPrincipal)
   Offer::Operation::Reserve reserve;
   reserve.add_resources()->CopyFrom(resource);
 
-  EXPECT_SOME(operation::validate(reserve, "role", "principal1"));
+  EXPECT_SOME(operation::validate(reserve, "principal1"));
 }
 
 
@@ -299,7 +276,23 @@ TEST_F(ReserveOperationValidationTest, FrameworkMissingPrincipal)
   Offer::Operation::Reserve reserve;
   reserve.add_resources()->CopyFrom(resource);
 
-  EXPECT_SOME(operation::validate(reserve, "role", None()));
+  EXPECT_SOME(operation::validate(reserve, None()));
+}
+
+
+// This test verifies that validation fails if the `principal`
+// in `ReservationInfo` is not set.
+TEST_F(ReserveOperationValidationTest, ReservationInfoMissingPrincipal)
+{
+  Resource::ReservationInfo reservationInfo;
+
+  Resource resource = Resources::parse("cpus", "8", "role").get();
+  resource.mutable_reservation()->CopyFrom(reservationInfo);
+
+  Offer::Operation::Reserve reserve;
+  reserve.add_resources()->CopyFrom(resource);
+
+  EXPECT_SOME(operation::validate(reserve, "principal"));
 }
 
 
@@ -312,7 +305,7 @@ TEST_F(ReserveOperationValidationTest, StaticReservation)
   Offer::Operation::Reserve reserve;
   reserve.add_resources()->CopyFrom(staticallyReserved);
 
-  EXPECT_SOME(operation::validate(reserve, "role", "principal"));
+  EXPECT_SOME(operation::validate(reserve, "principal"));
 }
 
 
@@ -326,7 +319,7 @@ TEST_F(ReserveOperationValidationTest, NoPersistentVolumes)
   Offer::Operation::Reserve reserve;
   reserve.add_resources()->CopyFrom(reserved);
 
-  EXPECT_NONE(operation::validate(reserve, "role", "principal"));
+  EXPECT_NONE(operation::validate(reserve, "principal"));
 }
 
 
@@ -344,7 +337,7 @@ TEST_F(ReserveOperationValidationTest, PersistentVolumes)
   reserve.add_resources()->CopyFrom(reserved);
   reserve.add_resources()->CopyFrom(volume);
 
-  EXPECT_SOME(operation::validate(reserve, "role", "principal"));
+  EXPECT_SOME(operation::validate(reserve, "principal"));
 }
 
 
@@ -361,21 +354,21 @@ TEST_F(UnreserveOperationValidationTest, WithoutACL)
   Offer::Operation::Unreserve unreserve;
   unreserve.add_resources()->CopyFrom(resource);
 
-  EXPECT_NONE(operation::validate(unreserve, true));
+  EXPECT_NONE(operation::validate(unreserve));
 }
 
 
-// This test verifies that validation fails if the framework's
-// 'principal' is not set.
+// This test verifies that validation succeeds if the framework's
+// `principal` is not set.
 TEST_F(UnreserveOperationValidationTest, FrameworkMissingPrincipal)
 {
   Resource resource = Resources::parse("cpus", "8", "role").get();
-  resource.mutable_reservation()->CopyFrom(createReservationInfo("principal"));
+  resource.mutable_reservation()->CopyFrom(createReservationInfo());
 
   Offer::Operation::Unreserve unreserve;
   unreserve.add_resources()->CopyFrom(resource);
 
-  EXPECT_SOME(operation::validate(unreserve, false));
+  EXPECT_NONE(operation::validate(unreserve));
 }
 
 
@@ -388,7 +381,7 @@ TEST_F(UnreserveOperationValidationTest, StaticReservation)
   Offer::Operation::Unreserve unreserve;
   unreserve.add_resources()->CopyFrom(staticallyReserved);
 
-  EXPECT_SOME(operation::validate(unreserve, true));
+  EXPECT_SOME(operation::validate(unreserve));
 }
 
 
@@ -402,7 +395,7 @@ TEST_F(UnreserveOperationValidationTest, NoPersistentVolumes)
   Offer::Operation::Unreserve unreserve;
   unreserve.add_resources()->CopyFrom(reserved);
 
-  EXPECT_NONE(operation::validate(unreserve, true));
+  EXPECT_NONE(operation::validate(unreserve));
 }
 
 
@@ -420,7 +413,7 @@ TEST_F(UnreserveOperationValidationTest, PersistentVolumes)
   unreserve.add_resources()->CopyFrom(reserved);
   unreserve.add_resources()->CopyFrom(volume);
 
-  EXPECT_SOME(operation::validate(unreserve, true));
+  EXPECT_SOME(operation::validate(unreserve));
 }
 
 
@@ -485,18 +478,19 @@ TEST_F(CreateOperationValidationTest, InsufficientDiskResource)
   masterFlags.acls = acls;
   masterFlags.roles = "role1";
 
-  Try<PID<Master>> master = StartMaster(masterFlags);
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
   ASSERT_SOME(master);
 
   slave::Flags slaveFlags = CreateSlaveFlags();
   slaveFlags.resources = "disk(role1):1024";
 
-  Try<PID<Slave>> slave = StartSlave(slaveFlags);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), slaveFlags);
   ASSERT_SOME(slave);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, frameworkInfo, master.get(), DEFAULT_CREDENTIAL);
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(&driver, _, _));
 
@@ -550,8 +544,6 @@ TEST_F(CreateOperationValidationTest, InsufficientDiskResource)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
@@ -608,15 +600,16 @@ class TaskValidationTest : public MesosTest {};
 
 TEST_F(TaskValidationTest, TaskUsesInvalidFrameworkID)
 {
-  Try<PID<Master>> master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
-  Try<PID<Slave>> slave = StartSlave();
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
   ASSERT_SOME(slave);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(&driver, _, _));
 
@@ -642,22 +635,21 @@ TEST_F(TaskValidationTest, TaskUsesInvalidFrameworkID)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
 TEST_F(TaskValidationTest, TaskUsesCommandInfoAndExecutorInfo)
 {
-  Try<PID<Master>> master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
-  Try<PID<Slave>> slave = StartSlave();
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
   ASSERT_SOME(slave);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(&driver, _, _));
 
@@ -688,22 +680,21 @@ TEST_F(TaskValidationTest, TaskUsesCommandInfoAndExecutorInfo)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
 TEST_F(TaskValidationTest, TaskUsesNoResources)
 {
-  Try<PID<Master>> master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
-  Try<PID<Slave>> slave = StartSlave();
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
   ASSERT_SOME(slave);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(&driver, _, _))
     .Times(1);
@@ -739,22 +730,21 @@ TEST_F(TaskValidationTest, TaskUsesNoResources)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
 TEST_F(TaskValidationTest, TaskUsesMoreResourcesThanOffered)
 {
-  Try<PID<Master>> master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
-  Try<PID<Slave>> slave = StartSlave();
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
   ASSERT_SOME(slave);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(&driver, _, _))
     .Times(1);
@@ -797,8 +787,6 @@ TEST_F(TaskValidationTest, TaskUsesMoreResourcesThanOffered)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
@@ -806,17 +794,19 @@ TEST_F(TaskValidationTest, TaskUsesMoreResourcesThanOffered)
 // task ID, the second task will get rejected.
 TEST_F(TaskValidationTest, DuplicatedTaskID)
 {
-  Try<PID<Master>> master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer(&exec);
 
-  Try<PID<Slave>> slave = StartSlave(&exec);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
   ASSERT_SOME(slave);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(&driver, _, _));
 
@@ -881,8 +871,6 @@ TEST_F(TaskValidationTest, DuplicatedTaskID)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
@@ -890,17 +878,19 @@ TEST_F(TaskValidationTest, DuplicatedTaskID)
 // the same executor id but different executor info are rejected.
 TEST_F(TaskValidationTest, ExecutorInfoDiffersOnSameSlave)
 {
-  Try<PID<Master>> master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer(&exec);
 
-  Try<PID<Slave>> slave = StartSlave(&exec);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
   ASSERT_SOME(slave);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(&driver, _, _))
     .Times(1);
@@ -971,8 +961,6 @@ TEST_F(TaskValidationTest, ExecutorInfoDiffersOnSameSlave)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
@@ -981,12 +969,12 @@ TEST_F(TaskValidationTest, ExecutorInfoDiffersOnSameSlave)
 // allowed.
 TEST_F(TaskValidationTest, ExecutorInfoDiffersOnDifferentSlaves)
 {
-  Try<PID<Master>> master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
   Future<Nothing> registered;
   EXPECT_CALL(sched, registered(&driver, _, _))
@@ -1002,8 +990,11 @@ TEST_F(TaskValidationTest, ExecutorInfoDiffersOnDifferentSlaves)
 
   // Start the first slave.
   MockExecutor exec1(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer1(&exec1);
 
-  Try<PID<Slave>> slave1 = StartSlave(&exec1);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave1 =
+    StartSlave(detector.get(), &containerizer1);
   ASSERT_SOME(slave1);
 
   AWAIT_READY(offers1);
@@ -1039,8 +1030,10 @@ TEST_F(TaskValidationTest, ExecutorInfoDiffersOnDifferentSlaves)
 
   // Now start the second slave.
   MockExecutor exec2(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer2(&exec2);
 
-  Try<PID<Slave>> slave2 = StartSlave(&exec2);
+  Try<Owned<cluster::Slave>> slave2 =
+    StartSlave(detector.get(), &containerizer2);
   ASSERT_SOME(slave2);
 
   AWAIT_READY(offers2);
@@ -1078,8 +1071,6 @@ TEST_F(TaskValidationTest, ExecutorInfoDiffersOnDifferentSlaves)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
@@ -1173,6 +1164,121 @@ TEST_F(TaskValidationTest, TaskAndExecutorUseRevocableResources)
   EXPECT_SOME(task::internal::validateResources(task));
 }
 
+
+// Ensures that negative executor shutdown grace period in `ExecutorInfo`
+// is rejected during `TaskInfo` validation.
+TEST_F(TaskValidationTest, ExecutorShutdownGracePeriodIsNonNegative)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _))
+    .Times(1);
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  driver.start();
+
+  AWAIT_READY(offers);
+  EXPECT_NE(0u, offers->size());
+  Offer offer = offers.get()[0];
+
+  ExecutorInfo executorInfo(DEFAULT_EXECUTOR_INFO);
+  executorInfo.mutable_shutdown_grace_period()->set_nanoseconds(
+      Seconds(-1).ns());
+
+  TaskInfo task;
+  task.set_name("");
+  task.mutable_task_id()->set_value("1");
+  task.mutable_slave_id()->MergeFrom(offer.slave_id());
+  task.mutable_resources()->MergeFrom(offer.resources());
+  task.mutable_executor()->MergeFrom(executorInfo);
+
+  Future<TaskStatus> status;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&status));
+
+  driver.launchTasks(offer.id(), {task});
+
+  AWAIT_READY(status);
+  EXPECT_EQ(task.task_id(), status->task_id());
+  EXPECT_EQ(TASK_ERROR, status->state());
+  EXPECT_EQ(TaskStatus::REASON_TASK_INVALID, status->reason());
+  EXPECT_TRUE(status->has_message());
+  EXPECT_EQ("ExecutorInfo's 'shutdown_grace_period' must be non-negative",
+            status->message());
+
+  driver.stop();
+  driver.join();
+}
+
+
+// Ensures that negative grace period in `KillPolicy`
+// is rejected during `TaskInfo` validation.
+TEST_F(TaskValidationTest, KillPolicyGracePeriodIsNonNegative)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
+  ASSERT_SOME(slave);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(&driver, _, _))
+    .Times(1);
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return()); // Ignore subsequent offers.
+
+  driver.start();
+
+  AWAIT_READY(offers);
+  EXPECT_NE(0u, offers->size());
+  Offer offer = offers.get()[0];
+
+  TaskInfo task;
+  task.set_name("");
+  task.mutable_task_id()->set_value("1");
+  task.mutable_slave_id()->MergeFrom(offer.slave_id());
+  task.mutable_resources()->MergeFrom(offer.resources());
+  task.mutable_executor()->MergeFrom(DEFAULT_EXECUTOR_INFO);
+  task.mutable_kill_policy()->mutable_grace_period()->set_nanoseconds(
+      Seconds(-1).ns());
+
+  Future<TaskStatus> status;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&status));
+
+  driver.launchTasks(offer.id(), {task});
+
+  AWAIT_READY(status);
+  EXPECT_EQ(task.task_id(), status->task_id());
+  EXPECT_EQ(TASK_ERROR, status->state());
+  EXPECT_EQ(TaskStatus::REASON_TASK_INVALID, status->reason());
+  EXPECT_TRUE(status->has_message());
+  EXPECT_EQ("Task's 'kill_policy.grace_period' must be non-negative",
+            status->message());
+
+  driver.stop();
+  driver.join();
+}
 
 // TODO(jieyu): Add tests for checking duplicated persistence ID
 // against offered resources.

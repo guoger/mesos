@@ -1,4 +1,5 @@
 ---
+title: Apache Mesos - Roles
 layout: documentation
 ---
 
@@ -11,13 +12,17 @@ resources are offered to frameworks. Some use-cases for roles include:
 
 * arranging for all the resources on a particular agent to only be offered to a
   particular framework.
-* dividing a cluster between two organizations: resources assigned for use by
+* dividing a cluster between two organizations: resources reserved for use by
   organization _A_ will only be offered to frameworks that have registered
-  using organization _A_'s role.
+  using organization _A_'s role (see the
+  [reservation documentation](reservation.md)).
 * ensuring that [persistent volumes](persistent-volume.md) created by one
   framework are not offered to frameworks registered with a different role.
 * expressing that one group of frameworks should be considered "higher priority"
   (and offered more resources) than another group of frameworks.
+* setting a guaranteed resource allocation for one or more frameworks belonging
+  to a role (see the [quota documentation](quota.md)).
+
 
 ## Roles and access control
 
@@ -55,6 +60,7 @@ start the framework. How to do this depends on the user interface of the
 framework you're using; for example, Marathon takes a `--mesos_role`
 command-line flag.
 
+<a id="roles-multiple-frameworks"></a>
 ### Multiple frameworks in the same role
 
 Multiple frameworks can use the same role. This can be useful: for example, one
@@ -93,9 +99,9 @@ agent node are initially assigned to the `*` role (this can be changed via the
 The `*` role behaves differently from non-default roles. For example, dynamic
 reservations can be used to reassign resources from the `*` role to a specific
 role, but not from one specific role to another specific role (without first
-unreserving the resource, e.g., using the `/unreserve` operator HTTP
-endpoint). Similarly, persistent volumes cannot be created on unreserved
-resources.
+unreserving the resource, e.g., using the [/unreserve](endpoints/master/unreserve.md)
+operator HTTP endpoint). Similarly, persistent volumes cannot be created on
+unreserved resources.
 
 ## Invalid role
 
@@ -113,7 +119,24 @@ resources. In particular, this implementation of DRF first identifies which
 _role_ is furthest below its fair share of the role's dominant resource. Each of
 the frameworks in that role are then offered additional resources in turn.
 
-The resource allocation process can be customized by assigning _weights_ to
-roles: a role with a weight of 2 will be allocated twice the fair share of a
-role with a weight of 1. Weights are optional, and can be specified via the
-`--weights` command-line flag when starting the Mesos master.
+The resource allocation process can be customized by assigning
+_[weights](weights.md)_ to roles: a role with a weight of 2 will be allocated
+twice the fair share of a role with a weight of 1. By default, every role has a
+weight of 1. Weights can be configured using the
+[/weights](endpoints/master/weights.md) operator endpoint, or else using the
+deprecated `--weights` command-line flag when starting the Mesos master.
+
+
+## Role vs. Principal
+
+A principal identifies an entity that interacts with Mesos; principals are
+similar to user names. For example, frameworks supply a principal when they
+register with the Mesos master, and operators provide a principal when using the
+operator HTTP endpoints. An entity may be required to
+[authenticate](authentication.md) with its principal in order to prove its
+identity, and the principal may be used to [authorize](authorization.md) actions
+performed by an entity, such as [resource reservation](reservation.md) and
+[persistent volume](persistent-volume.md) creation/destruction.
+
+Roles, on the other hand, are used exclusively to associate resources with
+frameworks in various ways, as covered above.

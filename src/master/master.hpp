@@ -56,6 +56,7 @@
 #include <stout/multihashmap.hpp>
 #include <stout/option.hpp>
 #include <stout/recordio.hpp>
+#include <stout/uuid.hpp>
 
 #include "common/http.hpp"
 #include "common/protobuf_utils.hpp"
@@ -279,8 +280,6 @@ struct Slave
     usedResources[frameworkId] -=
       executors[frameworkId][executorId].resources();
 
-    // XXX Remove.
-
     executors[frameworkId].erase(executorId);
     if (executors[frameworkId].empty()) {
       executors.erase(frameworkId);
@@ -304,7 +303,7 @@ struct Slave
   process::UPID pid;
 
   // TODO(bmahler): Use stout's Version when it can parse labels, etc.
-  const std::string version;
+  std::string version;
 
   process::Time registeredTime;
   Option<process::Time> reregisteredTime;
@@ -1018,12 +1017,44 @@ private:
     Master* master;
   };
 
+  /**
+   * Inner class used to namespace the handling of /weights requests.
+   *
+   * It operates inside the Master actor. It is responsible for validating
+   * and persisting /weights requests.
+   * @see master/weights_handler.cpp for implementations.
+   */
+  class WeightsHandler
+  {
+  public:
+    explicit WeightsHandler(Master* _master) : master(_master)
+    {
+      CHECK_NOTNULL(master);
+    }
+
+    process::Future<process::http::Response> update(
+        const process::http::Request& request,
+        const Option<std::string>& principal) const;
+
+  private:
+    process::Future<bool> authorize(
+        const Option<std::string>& principal,
+        const std::vector<std::string>& roles) const;
+
+    process::Future<process::http::Response> _update(
+        const std::vector<WeightInfo>& updateWeightInfos) const;
+
+    Master* master;
+  };
+
   // Inner class used to namespace HTTP route handlers (see
   // master/http.cpp for implementations).
   class Http
   {
   public:
-    explicit Http(Master* _master) : master(_master), quotaHandler(_master) {}
+    explicit Http(Master* _master) : master(_master),
+                                     quotaHandler(_master),
+                                     weightsHandler(_master) {}
 
     // Logs the request, route handlers can compose this with the
     // desired request handler to get consistent request logging.
@@ -1045,11 +1076,13 @@ private:
 
     // /master/flags
     process::Future<process::http::Response> flags(
-        const process::http::Request& request) const;
+        const process::http::Request& request,
+        const Option<std::string>& principal) const;
 
     // /master/frameworks
     process::Future<process::http::Response> frameworks(
-        const process::http::Request& request) const;
+        const process::http::Request& request,
+        const Option<std::string>& principal) const;
 
     // /master/health
     process::Future<process::http::Response> health(
@@ -1057,7 +1090,8 @@ private:
 
     // /master/observe
     process::Future<process::http::Response> observe(
-        const process::http::Request& request) const;
+        const process::http::Request& request,
+        const Option<std::string>& principal) const;
 
     // /master/redirect
     process::Future<process::http::Response> redirect(
@@ -1070,7 +1104,8 @@ private:
 
     // /master/roles
     process::Future<process::http::Response> roles(
-        const process::http::Request& request) const;
+        const process::http::Request& request,
+        const Option<std::string>& principal) const;
 
     // /master/teardown
     process::Future<process::http::Response> teardown(
@@ -1079,35 +1114,43 @@ private:
 
     // /master/slaves
     process::Future<process::http::Response> slaves(
-        const process::http::Request& request) const;
+        const process::http::Request& request,
+        const Option<std::string>& principal) const;
 
     // /master/state
     process::Future<process::http::Response> state(
-        const process::http::Request& request) const;
+        const process::http::Request& request,
+        const Option<std::string>& principal) const;
 
     // /master/state-summary
     process::Future<process::http::Response> stateSummary(
-        const process::http::Request& request) const;
+        const process::http::Request& request,
+        const Option<std::string>& principal) const;
 
     // /master/tasks
     process::Future<process::http::Response> tasks(
-        const process::http::Request& request) const;
+        const process::http::Request& request,
+        const Option<std::string>& principal) const;
 
     // /master/maintenance/schedule
     process::Future<process::http::Response> maintenanceSchedule(
-        const process::http::Request& request) const;
+        const process::http::Request& request,
+        const Option<std::string>& principal) const;
 
     // /master/maintenance/status
     process::Future<process::http::Response> maintenanceStatus(
-        const process::http::Request& request) const;
+        const process::http::Request& request,
+        const Option<std::string>& principal) const;
 
     // /master/machine/down
     process::Future<process::http::Response> machineDown(
-        const process::http::Request& request) const;
+        const process::http::Request& request,
+        const Option<std::string>& principal) const;
 
     // /master/machine/up
     process::Future<process::http::Response> machineUp(
-        const process::http::Request& request) const;
+        const process::http::Request& request,
+        const Option<std::string>& principal) const;
 
     // /master/unreserve
     process::Future<process::http::Response> unreserve(
@@ -1119,9 +1162,14 @@ private:
         const process::http::Request& request,
         const Option<std::string>& principal) const;
 
+    // /master/weights
+    process::Future<process::http::Response> weights(
+        const process::http::Request& request,
+        const Option<std::string>& principal) const;
+
     static std::string SCHEDULER_HELP();
     static std::string FLAGS_HELP();
-    static std::string FRAMEWORKS();
+    static std::string FRAMEWORKS_HELP();
     static std::string HEALTH_HELP();
     static std::string OBSERVE_HELP();
     static std::string REDIRECT_HELP();
@@ -1140,6 +1188,7 @@ private:
     static std::string RESERVE_HELP();
     static std::string UNRESERVE_HELP();
     static std::string QUOTA_HELP();
+    static std::string WEIGHTS_HELP();
 
   private:
     // Continuations.
@@ -1175,6 +1224,10 @@ private:
     // NOTE: The quota specific pieces of the Operator API are factored
     // out into this separate class.
     QuotaHandler quotaHandler;
+
+    // NOTE: The weights specific pieces of the Operator API are factored
+    // out into this separate class.
+    WeightsHandler weightsHandler;
   };
 
   Master(const Master&);              // No copying.
@@ -1464,6 +1517,7 @@ private:
   double _tasks_staging();
   double _tasks_starting();
   double _tasks_running();
+  double _tasks_killing();
 
   double _resources_total(const std::string& name);
   double _resources_used(const std::string& name);
@@ -1601,9 +1655,11 @@ inline std::ostream& operator<<(
 struct HttpConnection
 {
   HttpConnection(const process::http::Pipe::Writer& _writer,
-                 ContentType _contentType)
+                 ContentType _contentType,
+                 UUID _streamId)
     : writer(_writer),
       contentType(_contentType),
+      streamId(_streamId),
       encoder(lambda::bind(serialize, contentType, lambda::_1)) {}
 
   // Converts the message to an Event before sending.
@@ -1627,6 +1683,7 @@ struct HttpConnection
 
   process::http::Pipe::Writer writer;
   ContentType contentType;
+  UUID streamId;
   ::recordio::Encoder<v1::scheduler::Event> encoder;
 };
 

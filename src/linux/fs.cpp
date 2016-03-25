@@ -20,6 +20,7 @@
 
 #include <linux/limits.h>
 
+#include <stout/adaptor.hpp>
 #include <stout/check.hpp>
 #include <stout/error.hpp>
 #include <stout/numify.hpp>
@@ -41,6 +42,30 @@ using std::vector;
 namespace mesos {
 namespace internal {
 namespace fs {
+
+
+Try<bool> supported(const std::string& fsname)
+{
+  Try<string> lines = os::read("/proc/filesystems");
+  if (lines.isError()) {
+    return Error("Failed to read /proc/filesystems: " + lines.error());
+  }
+
+  // Each line of /proc/filesystems is "nodev" + "\t" + "fsname", and the
+  // field "nodev" is optional. For the details, check the kernel src code:
+  // https://github.com/torvalds/linux/blob/2101ae42899a14fe7caa73114e2161e778328661/fs/filesystems.c#L222-L237 NOLINT(whitespace/line_length)
+  foreach (const string& line, strings::tokenize(lines.get(), "\n")) {
+    vector<string> tokens = strings::tokenize(line, "\t");
+    if (tokens.size() != 1 && tokens.size() != 2) {
+      return Error("Failed to parse /proc/filesystems: '" + line + "'");
+    }
+    if (fsname == tokens.back()) {
+      return true;
+    }
+  }
+
+  return false;
+}
 
 
 Try<MountInfoTable> MountInfoTable::read(const Option<pid_t>& pid)
@@ -340,6 +365,27 @@ Try<Nothing> unmount(const string& target, int flags)
 }
 
 
+Try<Nothing> unmountAll(const string& target, int flags)
+{
+  Try<fs::MountTable> mountTable = fs::MountTable::read("/proc/mounts");
+  if (mountTable.isError()) {
+    return Error("Failed to read mount table: " + mountTable.error());
+  }
+
+  foreach (const MountTable::Entry& entry,
+           adaptor::reverse(mountTable.get().entries)) {
+    if (strings::startsWith(entry.dir, target)) {
+      Try<Nothing> unmount = fs::unmount(entry.dir, flags);
+      if (unmount.isError()) {
+        return unmount;
+      }
+    }
+  }
+
+  return Nothing();
+}
+
+
 Try<Nothing> pivot_root(
     const string& newRoot,
     const string& putOld)
@@ -513,9 +559,9 @@ Try<Nothing> createStandardDevices(const string& root)
   }
 
   vector<SymLink> symlinks = {
-    {"/proc/self/fd0", path::join(root, "dev", "stdin")},
-    {"/proc/self/fd1", path::join(root, "dev", "stdout")},
-    {"/proc/self/fd2", path::join(root, "dev", "stderr")},
+    {"/proc/self/fd/0", path::join(root, "dev", "stdin")},
+    {"/proc/self/fd/1", path::join(root, "dev", "stdout")},
+    {"/proc/self/fd/2", path::join(root, "dev", "stderr")},
     {"pts/ptmx",       path::join(root, "dev", "ptmx")}
   };
 
@@ -562,21 +608,25 @@ Try<Nothing> enter(const string& root)
     return Error("Failed to create devices: " + create.error());
   }
 
-  // Create a /tmp directory if it doesn't exist.
-  // TODO(idownes): Consider mounting a tmpfs to /tmp.
+  // Prepare /tmp in the new root. Note that we cannot assume that the
+  // new root is writable (i.e., it could be a read only filesystem).
+  // Therefore, we always mount a tmpfs on /tmp in the new root so
+  // that we can create the mount point for the old root.
   if (!os::exists(path::join(root, "tmp"))) {
-    Try<Nothing> mkdir = os::mkdir(path::join(root, "tmp"));
-     if (mkdir.isError()) {
-       return Error("Failed to create /tmp in chroot: " + mkdir.error());
-     }
+    return Error("/tmp in chroot does not exist");
+  }
 
-     Try<Nothing> chmod = os::chmod(
-         path::join(root, "tmp"),
-         S_IRWXU | S_IRWXG | S_IRWXO | S_ISVTX);
+  // TODO(jieyu): Consider limiting the size of the tmpfs.
+  mount = fs::mount(
+      "tmpfs",
+      path::join(root, "tmp"),
+      "tmpfs",
+      MS_NOSUID | MS_NOEXEC | MS_NODEV,
+      "mode=1777");
 
-     if (chmod.isError()) {
-       return Error("Failed to set mode on /tmp: " + chmod.error());
-     }
+  if (mount.isError()) {
+    return Error("Failed to mount the temporary tmpfs at /tmp in new root: " +
+                 mount.error());
   }
 
   // Create a mount point for the old root.
@@ -638,6 +688,11 @@ Try<Nothing> enter(const string& root)
   // ignore.
   // Check status when we stop using lazy umounts.
   os::rmdir(relativeOld);
+
+  Try<Nothing> unmount = fs::unmount("/tmp");
+  if (unmount.isError()) {
+    return Error("Failed to umount /tmp in the chroot: " + unmount.error());
+  }
 
   return Nothing();
 }

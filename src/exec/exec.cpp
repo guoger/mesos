@@ -72,15 +72,25 @@ using process::wait; // Necessary on some OS's to disambiguate.
 namespace mesos {
 namespace internal {
 
+// The ShutdownProcess is a relic of the pre-cgroup process isolation
+// days. It ensures that the executor process tree is killed after a
+// shutdown has been sent.
+//
+// TODO(bmahler): Update 'delay' to handle deferred callbacks without
+// needing a Process. This would eliminate the need for an explicit
+// Process here, see: MESOS-4729.
 class ShutdownProcess : public Process<ShutdownProcess>
 {
+public:
+  explicit ShutdownProcess(const Duration& _gracePeriod)
+    : gracePeriod(_gracePeriod) {}
+
 protected:
   virtual void initialize()
   {
-    VLOG(1) << "Scheduling shutdown of the executor";
-    // TODO(benh): Pass the shutdown timeout with ExecutorRegistered
-    // since it might have gotten configured on the command line.
-    delay(slave::EXECUTOR_SHUTDOWN_GRACE_PERIOD, self(), &Self::kill);
+    VLOG(1) << "Scheduling shutdown of the executor in " << gracePeriod;
+
+    delay(gracePeriod, self(), &Self::kill);
   }
 
   void kill()
@@ -96,24 +106,29 @@ protected:
     os::sleep(Seconds(5));
     exit(EXIT_FAILURE);
   }
+
+private:
+  const Duration gracePeriod;
 };
 
 
 class ExecutorProcess : public ProtobufProcess<ExecutorProcess>
 {
 public:
-  ExecutorProcess(const UPID& _slave,
-                  MesosExecutorDriver* _driver,
-                  Executor* _executor,
-                  const SlaveID& _slaveId,
-                  const FrameworkID& _frameworkId,
-                  const ExecutorID& _executorId,
-                  bool _local,
-                  const string& _directory,
-                  bool _checkpoint,
-                  Duration _recoveryTimeout,
-                  std::recursive_mutex* _mutex,
-                  Latch* _latch)
+  ExecutorProcess(
+      const UPID& _slave,
+      MesosExecutorDriver* _driver,
+      Executor* _executor,
+      const SlaveID& _slaveId,
+      const FrameworkID& _frameworkId,
+      const ExecutorID& _executorId,
+      bool _local,
+      const string& _directory,
+      bool _checkpoint,
+      const Duration& _recoveryTimeout,
+      const Duration& _shutdownGracePeriod,
+      std::recursive_mutex* _mutex,
+      Latch* _latch)
     : ProcessBase(ID::generate("executor")),
       slave(_slave),
       driver(_driver),
@@ -129,7 +144,8 @@ public:
       latch(_latch),
       directory(_directory),
       checkpoint(_checkpoint),
-      recoveryTimeout(_recoveryTimeout)
+      recoveryTimeout(_recoveryTimeout),
+      shutdownGracePeriod(_shutdownGracePeriod)
   {
     LOG(INFO) << "Version: " << MESOS_VERSION;
 
@@ -193,11 +209,12 @@ protected:
     send(slave, message);
   }
 
-  void registered(const ExecutorInfo& executorInfo,
-                  const FrameworkID& frameworkId,
-                  const FrameworkInfo& frameworkInfo,
-                  const SlaveID& slaveId,
-                  const SlaveInfo& slaveInfo)
+  void registered(
+      const ExecutorInfo& executorInfo,
+      const FrameworkID& frameworkId,
+      const FrameworkInfo& frameworkInfo,
+      const SlaveID& slaveId,
+      const SlaveInfo& slaveInfo)
   {
     if (aborted.load()) {
       VLOG(1) << "Ignoring registered message from slave " << slaveId
@@ -349,10 +366,11 @@ protected:
     tasks.erase(taskId);
   }
 
-  void frameworkMessage(const SlaveID& slaveId,
-                        const FrameworkID& frameworkId,
-                        const ExecutorID& executorId,
-                        const string& data)
+  void frameworkMessage(
+      const SlaveID& slaveId,
+      const FrameworkID& frameworkId,
+      const ExecutorID& executorId,
+      const string& data)
   {
     if (aborted.load()) {
       VLOG(1) << "Ignoring framework message because the driver is aborted!";
@@ -382,7 +400,7 @@ protected:
 
     if (!local) {
       // Start the Shutdown Process.
-      spawn(new ShutdownProcess(), true);
+      spawn(new ShutdownProcess(shutdownGracePeriod), true);
     }
 
     Stopwatch stopwatch;
@@ -466,7 +484,7 @@ protected:
 
     if (!local) {
       // Start the Shutdown Process.
-      spawn(new ShutdownProcess(), true);
+      spawn(new ShutdownProcess(shutdownGracePeriod), true);
     }
 
     Stopwatch stopwatch;
@@ -550,6 +568,7 @@ private:
   const string directory;
   bool checkpoint;
   Duration recoveryTimeout;
+  Duration shutdownGracePeriod;
 
   LinkedHashMap<UUID, StatusUpdate> updates; // Unacknowledged updates.
 
@@ -646,7 +665,8 @@ Status MesosExecutorDriver::start()
     // Get slave PID from environment.
     value = os::getenv("MESOS_SLAVE_PID");
     if (value.isNone()) {
-      EXIT(1) << "Expecting 'MESOS_SLAVE_PID' to be set in the environment";
+      EXIT(EXIT_FAILURE)
+        << "Expecting 'MESOS_SLAVE_PID' to be set in the environment";
     }
 
     slave = UPID(value.get());
@@ -655,30 +675,52 @@ Status MesosExecutorDriver::start()
     // Get slave ID from environment.
     value = os::getenv("MESOS_SLAVE_ID");
     if (value.isNone()) {
-      EXIT(1) << "Expecting 'MESOS_SLAVE_ID' to be set in the environment";
+      EXIT(EXIT_FAILURE)
+        << "Expecting 'MESOS_SLAVE_ID' to be set in the environment";
     }
     slaveId.set_value(value.get());
 
     // Get framework ID from environment.
     value = os::getenv("MESOS_FRAMEWORK_ID");
     if (value.isNone()) {
-      EXIT(1) << "Expecting 'MESOS_FRAMEWORK_ID' to be set in the environment";
+      EXIT(EXIT_FAILURE)
+        << "Expecting 'MESOS_FRAMEWORK_ID' to be set in the environment";
     }
     frameworkId.set_value(value.get());
 
     // Get executor ID from environment.
     value = os::getenv("MESOS_EXECUTOR_ID");
     if (value.isNone()) {
-      EXIT(1) << "Expecting 'MESOS_EXECUTOR_ID' to be set in the environment";
+      EXIT(EXIT_FAILURE)
+        << "Expecting 'MESOS_EXECUTOR_ID' to be set in the environment";
     }
     executorId.set_value(value.get());
 
     // Get working directory from environment.
     value = os::getenv("MESOS_DIRECTORY");
     if (value.isNone()) {
-      EXIT(1) << "Expecting 'MESOS_DIRECTORY' to be set in the environment";
+      EXIT(EXIT_FAILURE)
+        << "Expecting 'MESOS_DIRECTORY' to be set in the environment";
     }
     workDirectory = value.get();
+
+    // Get executor shutdown grace period from the environment.
+    //
+    // NOTE: We do not require this variable to be set
+    // (in contrast to the others above) for backwards
+    // compatibility: agents < 0.28.0 do not set it.
+    Duration shutdownGracePeriod = DEFAULT_EXECUTOR_SHUTDOWN_GRACE_PERIOD;
+    value = os::getenv("MESOS_EXECUTOR_SHUTDOWN_GRACE_PERIOD");
+    if (value.isSome()) {
+      Try<Duration> parse = Duration::parse(value.get());
+      if (parse.isError()) {
+        EXIT(EXIT_FAILURE)
+          << "Failed to parse value '" << value.get() << "' of "
+          << "'MESOS_EXECUTOR_SHUTDOWN_GRACE_PERIOD': " << parse.error();
+      }
+
+      shutdownGracePeriod = parse.get();
+    }
 
     // Get checkpointing status from environment.
     value = os::getenv("MESOS_CHECKPOINT");
@@ -691,15 +733,15 @@ Status MesosExecutorDriver::start()
       value = os::getenv("MESOS_RECOVERY_TIMEOUT");
 
       if (value.isSome()) {
-        Try<Duration> _recoveryTimeout = Duration::parse(value.get());
+        Try<Duration> parse = Duration::parse(value.get());
 
-        if (_recoveryTimeout.isError()) {
+        if (parse.isError()) {
           EXIT(EXIT_FAILURE)
-            << "Cannot parse MESOS_RECOVERY_TIMEOUT '" << value.get() << "': "
-            << _recoveryTimeout.error();
+            << "Failed to parse value '" << value.get() << "'"
+            << " of 'MESOS_RECOVERY_TIMEOUT': " << parse.error();
         }
 
-        recoveryTimeout = _recoveryTimeout.get();
+        recoveryTimeout = parse.get();
       }
     }
 
@@ -716,6 +758,7 @@ Status MesosExecutorDriver::start()
         workDirectory,
         checkpoint,
         recoveryTimeout,
+        shutdownGracePeriod,
         &mutex,
         latch);
 

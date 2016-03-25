@@ -214,7 +214,7 @@ public:
   {
     // Terminating process with EXIT here because we cannot interrupt
     // LoadGenerator's long-running loop.
-    EXIT(1) << "Error received: " << error;
+    EXIT(EXIT_FAILURE) << "Error received: " << error;
   }
 
 private:
@@ -352,7 +352,7 @@ int main(int argc, char** argv)
         &scheduler, framework, flags.master.get());
   }
 
-  int status = driver->run() == DRIVER_STOPPED ? EXIT_SUCCESS : EXIT_SUCCESS;
+  int status = driver->run() == DRIVER_STOPPED ? EXIT_SUCCESS : EXIT_FAILURE;
 
   // Ensure that the driver process terminates.
   driver->stop();

@@ -21,7 +21,7 @@ include(ExternalProject)
 
 # Define sources of third-party dependencies.
 #############################################
-set(UPSTREAM_URL https://github.com/3rdparty/mesos-3rdparty/raw/master)
+set(UPSTREAM_URL ${3RDPARTY_DEPENDENCIES})
 set(REBUNDLED_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 if (REBUNDLED)
   set(BOOST_URL       ${REBUNDLED_DIR}/boost-${BOOST_VERSION}.tar.gz)
@@ -42,29 +42,21 @@ endif (REBUNDLED)
 set(LIBEVENT_URL ${UPSTREAM_URL}/libevent-release-${LIBEVENT_VERSION}.tar.gz)
 
 if (WIN32)
-  # TODO(hausdorff): (MESOS-3394) Upgrade Windows to use glog v0.3.5, as that
-  # release will contain fixes that will allow us to build glog on Windows.
-  #
-  # NOTE: hausdorff has ported glog v0.3.4 to support compilation with MSVC
-  # 1900 (it works on MSVC 1800, but not 1900). The patch has been submitted
-  # to the glog project which you can see in pull request #43[1].
-  #
-  # Note also that this tarball actually points directly at the branch the
-  # PR is issued from, and uses the GitHub REST API to get a tarball of it.
-  # We think this is stictly better than pulling a tarball out of 3rdparty, or
-  # running `patch` on a tarball version of the vanilla 0.3.4 release, because
-  # it means that this code will automatically be up-to-date, and to transition
-  # to the next release of glog (when this will presumably be fixed), we need
-  # only change this line.
+  # TODO(hausdorff): (MESOS-3394) Upgrade Windows to use glog v0.3.5 when they
+  # release it, as that will contain fixes that will allow us to build glog on
+  # Windows, as well as build using CMake directly. For now, we simply point
+  # Windows builds at a commit hash in the glog history that has all the
+  # functionality we want.
   #
   # Finally, for our third-party libraries, MSVC 1800 and 1900 are not
   # linker-compatible, so it's important for us to be able to build glog
   # (as well as all the other third-party dependencies) on MSVC 1900.
   #
   # [1] https://github.com/google/glog/pull/43
-  set(GLOG_URL     https://github.com/hausdorff/glog/tarball/glog-${GLOG_VERSION}-msvc1900)
-  set(CURL_URL     ${UPSTREAM_URL}/curl-static-${CURL_VERSION}.tar.gz)
-  set(LIBAPR_URL   ${UPSTREAM_URL}/libapr-${LIBAPR_VERSION}.tar.gz)
+  set(GLOG_URL   ${UPSTREAM_URL}/glog-v0.3.4-g4d391fe.tar.gz)
+  set(CURL_URL   ${UPSTREAM_URL}/curl-${CURL_VERSION}.tar.gz)
+  set(LIBAPR_URL ${UPSTREAM_URL}/libapr-${LIBAPR_VERSION}.tar.gz)
+  set(ZLIB_URL   ${UPSTREAM_URL}/zlib-${ZLIB_VERSION}.tar.gz)
 endif (WIN32)
 
 # Define build/patch/configure commands for third-party libs.
@@ -107,21 +99,37 @@ if (NOT WIN32)
 
   set(LIBEVENT_INSTALL_CMD mkdir -p ${LIBEVENT_LIB_ROOT} && cp -r ${LIBEVENT_ROOT}-build/lib/. ${LIBEVENT_LIB_DIR} && cp -r ${LIBEVENT_ROOT}-build/include/. ${LIBEVENT_INCLUDE_DIR} && cp -r ${LIBEVENT_ROOT}/include/. ${LIBEVENT_INCLUDE_DIR})
 elseif (WIN32)
-  set(GLOG_PATCH_CMD   ${CMAKE_NOOP})
-  set(GLOG_CONFIG_CMD  ${CMAKE_NOOP})
   set(GLOG_INSTALL_CMD ${CMAKE_NOOP})
-  VS_BUILD_CMD(
-      GLOG
-      ${GLOG_ROOT}/google-glog.sln
-      ${CMAKE_BUILD_TYPE}
-      "libglog")
 
   set(LIBEVENT_INSTALL_CMD ${CMAKE_NOOP})
 
   set(LIBAPR_INSTALL_CMD ${CMAKE_NOOP})
+
+  set(LIBEVENT_C_FLAGS "/MTd /Zi")
+  set(LIBEVENT_CMAKE_ARGS
+    ${LIBEVENT_CMAKE_ARGS}
+    -DCMAKE_C_FLAGS_DEBUG=${LIBEVENT_C_FLAGS}
+    -DCMAKE_C_FLAGS_RELEASE=${LIBEVENT_C_FLAGS}
+    -DEVENT__DISABLE_OPENSSL=TRUE
+    )
 endif (NOT WIN32)
 
 set(RY_UPDATE_CMD ${CMAKE_COMMAND} -E copy ${PROCESS_3RD_SRC}/http-parser/CMakeLists.txt.template ${HTTP_PARSER_ROOT}/CMakeLists.txt)
+
+if (NOT WIN32)
+  set(HTTP_PARSER_PATCH_CMD  ${CMAKE_NOOP})
+elseif (WIN32)
+  # Set the patch command which will utilize patch.exe under
+  # `\Users\<user>\AppData\Local\Temp with no elevation prompt`
+  set(HTTP_PARSER_PATCH_CMD ${PATCHEXE_LOCATION} --binary -p1 < ${PROCESS_3RD_SRC}/ry-http-parser-${HTTP_PARSER_VERSION}.patch)
+endif (NOT WIN32)
+
+set(LIBEVENT_CMAKE_ARGS
+  ${LIBEVENT_CMAKE_ARGS}
+  -LH
+  -DEVENT__HAVE_SYS_STAT_H=1
+  -DBUILD_SHARED_LIBS=${BUILD_SHARED_LIBS}
+  )
 
 # Third-party libraries. Tell the build system how to pull in and build third-
 # party libraries at compile time, using the ExternalProject_Add macro.
@@ -135,9 +143,14 @@ ExternalProject_Add(
   URL               ${BOOST_URL}
   )
 
+# The patch, configure, build, and install commands are stubbed out on Windows
+# builds so that it defaults to build using CMake. This is for the same reason
+# as the GMock code library build, see the call to `ExternalProject_Add` for
+# the GMock project below for more details.
 ExternalProject_Add(
   ${GLOG_TARGET}
   PREFIX            ${GLOG_CMAKE_ROOT}
+  CMAKE_ARGS        -DBUILD_SHARED_LIBS=OFF -DCMAKE_CXX_FLAGS_DEBUG=${CMAKE_CXX_FLAGS_DEBUG}
   PATCH_COMMAND     ${GLOG_PATCH_CMD}
   CONFIGURE_COMMAND ${GLOG_CONFIG_CMD}
   BUILD_COMMAND     ${GLOG_BUILD_CMD}
@@ -159,6 +172,7 @@ ExternalProject_Add(
   ${HTTP_PARSER_TARGET}
   PREFIX            ${HTTP_PARSER_CMAKE_ROOT}
   UPDATE_COMMAND    ${RY_UPDATE_CMD}
+  PATCH_COMMAND     ${HTTP_PARSER_PATCH_CMD}
   INSTALL_COMMAND   ${CMAKE_NOOP}
   URL               ${HTTP_PARSER_URL}
   )
@@ -177,7 +191,7 @@ elseif (ENABLE_LIBEVENT)
   ExternalProject_Add(
     ${LIBEVENT_TARGET}
     PREFIX          ${LIBEVENT_CMAKE_ROOT}
-    CMAKE_ARGS      -LH -DEVENT__DISABLE_OPENSSL=TRUE
+    CMAKE_ARGS      ${LIBEVENT_CMAKE_ARGS}
     INSTALL_COMMAND ${LIBEVENT_INSTALL_CMD}
     URL             ${LIBEVENT_URL}
     )
@@ -187,6 +201,7 @@ if (WIN32)
   ExternalProject_Add(
     ${LIBAPR_TARGET}
     PREFIX          ${LIBAPR_CMAKE_ROOT}
+    CMAKE_ARGS      -DBUILD_SHARED_LIBS=OFF
     INSTALL_COMMAND ${LIBAPR_INSTALL_CMD}
     URL             ${LIBAPR_URL}
     )
@@ -200,11 +215,20 @@ if (WIN32)
   ExternalProject_Add(
     ${CURL_TARGET}
     PREFIX            ${CURL_CMAKE_ROOT}
+    CMAKE_ARGS        -DBUILD_CURL_TESTS=OFF -DCURL_STATICLIB=ON -DCMAKE_C_FLAGS_DEBUG="/MTd"
     PATCH_COMMAND     ${CMAKE_NOOP}
-    CONFIGURE_COMMAND ${CMAKE_NOOP}
-    BUILD_COMMAND     ${CMAKE_NOOP}
+    BUILD_COMMAND     msbuild /p:RuntimeLibrary=MT_StaticDebug lib/libcurl.vcxproj
     INSTALL_COMMAND   ${CMAKE_NOOP}
     URL               ${CURL_URL}
+  )
+
+  ExternalProject_Add(
+    ${ZLIB_TARGET}
+    PREFIX          ${ZLIB_CMAKE_ROOT}
+    CMAKE_ARGS      -DBUILD_SHARED_LIBS=OFF
+    BUILD_COMMAND   ${GLOG_BUILD_CMD}
+    INSTALL_COMMAND ${CMAKE_NOOP}
+    URL             ${ZLIB_URL}
   )
 endif (WIN32)
 
@@ -223,7 +247,7 @@ if (WIN32)
   # library that compiles on Windows. We need to either send this as a PR back
   # to the protobuf project, or we need to apply these changes to our existing
   # protobuf tarball in the patch step.
-  set(PROTOBUF_URL https://github.com/haosdent/3rdparty-packages/raw/master/protobuf-${PROTOBUF_VERSION}.tar.gz)
+  set(PROTOBUF_URL ${UPSTREAM_URL}/protobuf-3.0.0-beta-2.tar.gz)
 endif (WIN32)
 
 # NOTE: `gmock` is "installed" into a lib directory, see "NOTE: (fix for
@@ -240,14 +264,9 @@ if (NOT WIN32)
   set(PROTOBUF_BUILD_CMD   make)
   set(PROTOBUF_INSTALL_CMD make install)
 elseif (WIN32)
-  set(PROTOBUF_PATCH_CMD   ${CMAKE_NOOP})
-  set(PROTOBUF_CONFIG_CMD  ${CMAKE_NOOP})
+  set(PROTOBUF_CONFIG_CMD  cmake -G "Visual Studio 14 2015 Win64" ../protobuf-${PROTOBUF_VERSION}/cmake -DBUILD_SHARED_LIBS=OFF -Dprotobuf_MSVC_STATIC_RUNTIME=ON -Dprotobuf_BUILD_TESTS=OFF)
+  set(PROTOBUF_BUILD_CMD   msbuild protobuf.sln)
   set(PROTOBUF_INSTALL_CMD ${CMAKE_NOOP})
-  VS_BUILD_CMD(
-      PROTOBUF
-      ${PROTOBUF_ROOT}/vsprojects/protobuf.sln
-      ${CMAKE_BUILD_TYPE}
-      "libprotobuf libprotoc protoc")
 endif (NOT WIN32)
 
 # NOTE: An implicit consequence of the following code is that on non-Windows
@@ -259,6 +278,7 @@ endif (NOT WIN32)
 ExternalProject_Add(
   ${GMOCK_TARGET}
   PREFIX            ${GMOCK_CMAKE_ROOT}
+  CMAKE_ARGS        -DBUILD_SHARED_LIBS=FALSE
   CONFIGURE_COMMAND ${GMOCK_CONFIG_CMD}
   BUILD_COMMAND     ${GMOCK_BUILD_CMD}
   INSTALL_COMMAND   ${GMOCK_INSTALL_CMD}
@@ -268,6 +288,7 @@ ExternalProject_Add(
 ExternalProject_Add(
   ${PROTOBUF_TARGET}
   PREFIX            ${PROTOBUF_CMAKE_ROOT}
+  CMAKE_ARGS        -DBUILD_SHARED_LIBS=${BUILD_SHARED_LIBS} -DCMAKE_CXX_FLAGS_DEBUG="/MTd"
   PATCH_COMMAND     ${PROTOBUF_PATCH_CMD}
   CONFIGURE_COMMAND ${PROTOBUF_CONFIG_CMD}
   BUILD_COMMAND     ${PROTOBUF_BUILD_CMD}
@@ -281,5 +302,6 @@ list(
   APPEND CMAKE_MODULE_PATH
   ${CMAKE_SOURCE_DIR}/3rdparty/libprocess/3rdparty/stout/cmake
   )
+include(StoutConfigure)
 include(StoutTestsConfigure)
 add_subdirectory(stout/tests)

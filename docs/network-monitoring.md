@@ -1,4 +1,5 @@
 ---
+title: Apache Mesos - Per-container Network Monitoring and Isolation
 layout: documentation
 ---
 
@@ -8,7 +9,7 @@ Mesos on Linux provides support for per-container network monitoring and
 isolation. The network isolation prevents a single container from exhausting the
 available network ports, consuming an unfair share of the network bandwidth or
 significantly delaying packet transmission for others. Network statistics for
-each active container are published through the `/monitor/statistics.json`
+each active container are published through the [/monitor/statistics](endpoints/monitor/statistics.md)
 endpoint on the slave. The network isolation is transparent for the majority of
 tasks running on a slave (those that bind to port 0 and let the kernel allocate
 their port).
@@ -32,13 +33,13 @@ versions 3.6 and above. Additionally, the kernel must include these patches
 
 The following packages are required on the slave:
 
-* [libnl3](http://www.infradead.org/~tgr/libnl/) >= 3.2.26
+* [libnl3](https://github.com/thom311/libnl/releases) >= 3.2.26
 * [iproute](http://www.linuxfoundation.org/collaborate/workgroups/networking/iproute2) >= 2.6.39 is advised for debugging purpose but not required.
 
 Additionally, if you are building from source, you need will also need the
 libnl3 development package to compile Mesos:
 
-* [libnl3-devel / libnl3-dev](http://www.infradead.org/~tgr/libnl/) >= 3.2.26
+* [libnl3-devel / libnl3-dev](https://github.com/thom311/libnl/releases) >= 3.2.26
 
 ### Build
 
@@ -176,7 +177,7 @@ enabled would thus be:
 ## Monitoring container network statistics
 
 Mesos exposes statistics from the Linux network stack for each container network
-on the `/monitor/statistics.json` slave endpoint.
+on the [/monitor/statistics](endpoints/monitor/statistics.md) slave endpoint.
 
 From the network interface inside the container, we report the following
 counters (since container creation) under the `statistics` key:
@@ -284,9 +285,9 @@ for each of these elements includes:
 </tr>
 </table>
 
-[1] `backlog` is only reported on the bloat_reduction interface
+[1] `backlog` is only reported on the bloat_reduction interface.
 
-[2] `overlimits` are only reported on the bw_limit interface
+[2] `overlimits` are only reported on the bw_limit interface.
 
 [3] Currently always reported as 0 by the underlying Traffic Control element.
 

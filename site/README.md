@@ -10,13 +10,28 @@ within the publish folder will be the actual deployed site.
 
 
 ## Generating the site
-To generate the site one only needs to run `rake` after performing the setup
-tasks mentioned above. This will download the latest Apache Mesos documentation
-contained in the `docs` folder, integrate them into the site, and generate all
-other files within the source folder.
+Running `rake` will download the latest Apache Mesos documentation contained
+in the `docs` folder, integrate them into the site, and generate all other
+files within the source folder.
 
+		# First generate the help endpoint documentation. Running
+		# `make check` is needed to generate the latest version of
+		# the master and slave binaries.
+                make check -jN GTEST_FILTER=""
+		../support/generate-help-site.py
 		rake
 
+The doxygen and javadoc pages must be generated _after_ running `rake`.
+
+### Generating doxygen pages
+Doxygen pages can be generated using:
+
+		rake doxygen
+
+### Generating javadoc pages
+Javadoc pages can be generated using:
+
+		rake javadoc
 
 ## Development
 To live edit the site run `rake dev` and then open a browser window to

@@ -44,7 +44,7 @@ namespace validation {
 
 // A helper function which returns true if the given character is not
 // suitable for an ID.
-static bool invalid(char c)
+static bool invalidCharacter(char c)
 {
   return iscntrl(c) || c == '/' || c == '\\';
 }
@@ -198,12 +198,12 @@ Option<Error> validateDiskInfo(const RepeatedPtrField<Resource>& resources)
 
       // Ensure persistence ID does not have invalid characters.
       string id = resource.disk().persistence().id();
-      if (std::count_if(id.begin(), id.end(), invalid) > 0) {
+      if (std::any_of(id.begin(), id.end(), invalidCharacter)) {
         return Error("Persistence ID '" + id + "' contains invalid characters");
       }
     } else if (resource.disk().has_volume()) {
       return Error("Non-persistent volume not supported");
-    } else {
+    } else if (!resource.disk().has_source()) {
       return Error("DiskInfo is set but empty");
     }
   }
@@ -287,7 +287,7 @@ Option<Error> validateTaskID(const TaskInfo& task)
 {
   const string& id = task.task_id().value();
 
-  if (std::count_if(id.begin(), id.end(), invalid) > 0) {
+  if (std::any_of(id.begin(), id.end(), invalidCharacter)) {
     return Error("TaskID '" + id + "' contains invalid characters");
   }
 
@@ -367,6 +367,14 @@ Option<Error> validateExecutorInfo(
           "Task's ExecutorInfo:\n" +
           stringify(task.executor()) + "\n"
           "------------------------------------------------------------\n");
+    }
+
+    // Make sure provided duration is non-negative.
+    if (task.executor().has_shutdown_grace_period() &&
+        Nanoseconds(task.executor().shutdown_grace_period().nanoseconds()) <
+          Duration::zero()) {
+      return Error(
+          "ExecutorInfo's 'shutdown_grace_period' must be non-negative");
     }
   }
 
@@ -479,6 +487,20 @@ Option<Error> validateResources(const TaskInfo& task)
   return None();
 }
 
+
+Option<Error> validateKillPolicy(const TaskInfo& task)
+{
+  if (task.has_kill_policy() &&
+      task.kill_policy().has_grace_period() &&
+      Nanoseconds(task.kill_policy().grace_period().nanoseconds()) <
+        Duration::zero()) {
+    return Error("Task's 'kill_policy.grace_period' must be non-negative");
+  }
+
+  return None();
+}
+
+
 } // namespace internal {
 
 
@@ -495,12 +517,13 @@ Option<Error> validate(
   // executed does matter! For example, 'validateResourceUsage'
   // assumes that ExecutorInfo is valid which is verified by
   // 'validateExecutorInfo'.
-  vector<lambda::function<Option<Error>(void)>> validators = {
+  vector<lambda::function<Option<Error>()>> validators = {
     lambda::bind(internal::validateTaskID, task),
     lambda::bind(internal::validateUniqueTaskID, task, framework),
     lambda::bind(internal::validateSlaveID, task, slave),
     lambda::bind(internal::validateExecutorInfo, task, framework, slave),
     lambda::bind(internal::validateResources, task),
+    lambda::bind(internal::validateKillPolicy, task),
     lambda::bind(
         internal::validateResourceUsage, task, framework, slave, offered)
   };
@@ -509,7 +532,7 @@ Option<Error> validate(
 
   // TODO(jieyu): Add a validateCommandInfo function.
 
-  foreach (const lambda::function<Option<Error>(void)>& validator, validators) {
+  foreach (const lambda::function<Option<Error>()>& validator, validators) {
     Option<Error> error = validator();
     if (error.isSome()) {
       return error;
@@ -629,13 +652,13 @@ Option<Error> validate(
   CHECK_NOTNULL(master);
   CHECK_NOTNULL(framework);
 
-  vector<lambda::function<Option<Error>(void)>> validators = {
+  vector<lambda::function<Option<Error>()>> validators = {
     lambda::bind(validateUniqueOfferID, offerIds),
     lambda::bind(validateFramework, offerIds, master, framework),
     lambda::bind(validateSlave, offerIds, master)
   };
 
-  foreach (const lambda::function<Option<Error>(void)>& validator, validators) {
+  foreach (const lambda::function<Option<Error>()>& validator, validators) {
     Option<Error> error = validator();
     if (error.isSome()) {
       return error;
@@ -652,16 +675,11 @@ namespace operation {
 
 Option<Error> validate(
     const Offer::Operation::Reserve& reserve,
-    const Option<string>& role,
     const Option<string>& principal)
 {
   Option<Error> error = resource::validate(reserve.resources());
   if (error.isSome()) {
     return Error("Invalid resources: " + error.get().message);
-  }
-
-  if (principal.isNone()) {
-    return Error("Cannot reserve resources without a principal");
   }
 
   foreach (const Resource& resource, reserve.resources()) {
@@ -670,18 +688,26 @@ Option<Error> validate(
           "Resource " + stringify(resource) + " is not dynamically reserved");
     }
 
-    if (role.isSome() && resource.role() != role.get()) {
-      return Error(
-          "The reserved resource's role '" + resource.role() +
-          "' does not match the framework's role '" + role.get() + "'");
-    }
+    if (principal.isSome()) {
+      if (!resource.reservation().has_principal()) {
+        return Error(
+            "A reserve operation was attempted by principal '" +
+            principal.get() + "', but there is a reserved resource in the "
+            "request with no principal set in `ReservationInfo`");
+      }
 
-    if (resource.reservation().principal() != principal.get()) {
+      if (resource.reservation().principal() != principal.get()) {
+        return Error(
+            "A reserve operation was attempted by principal '" +
+            principal.get() + "', but there is a reserved resource in the "
+            "request with principal '" + resource.reservation().principal() +
+            "' set in `ReservationInfo`");
+      }
+    } else if (resource.reservation().has_principal()) {
       return Error(
-          "The reserved resource's principal '" +
-          resource.reservation().principal() +
-          "' does not match the principal '" +
-          principal.get() + "'");
+          "A reserve operation was attempted with no principal, but there is a "
+          "reserved resource in the request with principal '" +
+          resource.reservation().principal() + "' set in `ReservationInfo`");
     }
 
     // NOTE: This check would be covered by 'contains' since there
@@ -698,17 +724,11 @@ Option<Error> validate(
 }
 
 
-Option<Error> validate(
-    const Offer::Operation::Unreserve& unreserve,
-    bool hasPrincipal)
+Option<Error> validate(const Offer::Operation::Unreserve& unreserve)
 {
   Option<Error> error = resource::validate(unreserve.resources());
   if (error.isSome()) {
     return Error("Invalid resources: " + error.get().message);
-  }
-
-  if (!hasPrincipal) {
-    return Error("Resources cannot be unreserved without a principal");
   }
 
   // NOTE: We don't check that 'FrameworkInfo.principal' matches

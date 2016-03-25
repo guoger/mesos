@@ -22,6 +22,8 @@
 
 #include <mesos/resources.hpp>
 
+#include <mesos/authorizer/authorizer.hpp>
+
 #include <mesos/quota/quota.hpp>
 
 #include <process/defer.hpp>
@@ -47,10 +49,11 @@ using google::protobuf::RepeatedPtrField;
 using http::Accepted;
 using http::BadRequest;
 using http::Conflict;
+using http::Forbidden;
 using http::OK;
-using http::Unauthorized;
 
 using mesos::quota::QuotaInfo;
+using mesos::quota::QuotaRequest;
 using mesos::quota::QuotaStatus;
 
 using process::Future;
@@ -62,42 +65,6 @@ using std::vector;
 namespace mesos {
 namespace internal {
 namespace master {
-
-// Creates a `QuotaInfo` protobuf from the quota request.
-static Try<QuotaInfo> createQuotaInfo(RepeatedPtrField<Resource> resources)
-{
-  VLOG(1) << "Constructing QuotaInfo from resources protobuf";
-
-  QuotaInfo quota;
-
-  // Set the role if we have one. Since all roles must be the same, pick
-  // any, e.g. the first one.
-  if (resources.size() > 0) {
-     quota.set_role(resources.begin()->role());
-  }
-
-  // Check that all roles are set and equal.
-  // TODO(alexr): Remove this check as per MESOS-4058.
-  foreach (const Resource& resource, resources) {
-    if (resource.role() != quota.role()) {
-      return Error(
-          "Resources with different roles: '" + quota.role() + "', '" +
-          resource.role() + "'");
-    }
-  }
-
-  // Remove the role from each resource.
-  // TODO(alexr): Remove this as per MESOS-4058. Corresponding validation
-  // is in `internal::master::quota::validation::quotaInfo()`.
-  foreach (Resource& resource, resources) {
-    resource.clear_role();
-  }
-
-  quota.mutable_guarantee()->CopyFrom(resources);
-
-  return quota;
-}
-
 
 Option<Error> Master::QuotaHandler::capacityHeuristic(
     const QuotaInfo& request) const
@@ -248,46 +215,26 @@ Future<http::Response> Master::QuotaHandler::set(
   // Check that the request type is POST which is guaranteed by the master.
   CHECK_EQ("POST", request.method);
 
-  // Validate request and extract JSON.
-  // TODO(alexr): Create a type (e.g. a protobuf) for the request JSON. If we
-  // move the `force` field out of the request JSON, we can reuse `QuotaInfo`.
-  Try<JSON::Object> parse = JSON::parse<JSON::Object>(request.body);
-  if (parse.isError()) {
+  // Parse the request body into JSON.
+  Try<JSON::Object> jsonRequest = JSON::parse<JSON::Object>(request.body);
+  if (jsonRequest.isError()) {
     return BadRequest(
         "Failed to parse set quota request JSON '" + request.body + "': " +
-        parse.error());
+        jsonRequest.error());
   }
 
-  Result<JSON::Array> resourcesJSON =
-    parse.get().find<JSON::Array>("resources");
+  // Convert JSON request to the `QuotaRequest` protobuf.
+  Try<QuotaRequest> protoRequest =
+    ::protobuf::parse<QuotaRequest>(jsonRequest.get());
 
-  if (resourcesJSON.isError()) {
-    // An `Error` usually indicates that a search string is malformed
-    // (which is not the case here), however it may also indicate that
-    // the `resources` field is not an array.
+  if (protoRequest.isError()) {
     return BadRequest(
-        "Failed to extract 'resources' from set quota request JSON '" +
-        request.body + "': " + resourcesJSON.error());
-  }
-
-  if (resourcesJSON.isNone()) {
-    return BadRequest(
-        "Failed to extract 'resources' from set quota request JSON '" +
-        request.body + "': Field is missing");
-  }
-
-  // Create protobuf representation of resources.
-  Try<RepeatedPtrField<Resource>> resources =
-    ::protobuf::parse<RepeatedPtrField<Resource>>(resourcesJSON.get());
-
-  if (resources.isError()) {
-    return BadRequest(
-        "Failed to parse 'resources' from set quota request JSON '" +
-        request.body + "': " + resources.error());
+        "Failed to validate set quota request JSON '" + request.body + "': " +
+        protoRequest.error());
   }
 
   // Create the `QuotaInfo` protobuf message from the request JSON.
-  Try<QuotaInfo> create = createQuotaInfo(resources.get());
+  Try<QuotaInfo> create = quota::createQuotaInfo(protoRequest.get());
   if (create.isError()) {
     return BadRequest(
         "Failed to create 'QuotaInfo' from set quota request JSON '" +
@@ -297,11 +244,11 @@ Future<http::Response> Master::QuotaHandler::set(
   QuotaInfo quotaInfo = create.get();
 
   // Check that the `QuotaInfo` is a valid quota request.
-  Try<Nothing> validate = quota::validation::quotaInfo(quotaInfo);
-  if (validate.isError()) {
+  Option<Error> validateError = quota::validation::quotaInfo(quotaInfo);
+  if (validateError.isSome()) {
     return BadRequest(
         "Failed to validate set quota request JSON '" + request.body + "': " +
-        validate.error());
+        validateError.get().message);
   }
 
   // Check that the role is on the role whitelist, if it exists.
@@ -319,18 +266,8 @@ Future<http::Response> Master::QuotaHandler::set(
         "': Can not set quota for a role that already has quota");
   }
 
-  // The force flag can be used to overwrite the `capacityHeuristic` check.
-  Result<JSON::Boolean> force = parse.get().find<JSON::Boolean>("force");
-  if (force.isError()) {
-    // An `Error` usually indicates that a search string is malformed
-    // (which is not the case here), however it may also indicate that
-    // the `force` field is not a boolean.
-    return BadRequest(
-        "Failed to extract 'force' from set quota request JSON '" +
-        request.body + "': " + force.error());
-  }
-
-  const bool forced = force.isSome() ? force.get().value : false;
+  // The force flag is used to overwrite the `capacityHeuristic` check.
+  const bool forced = protoRequest.get().force();
 
   if (principal.isSome()) {
     quotaInfo.set_principal(principal.get());
@@ -339,7 +276,7 @@ Future<http::Response> Master::QuotaHandler::set(
   return authorizeSetQuota(principal, quotaInfo.role())
     .then(defer(master->self(), [=](bool authorized) -> Future<http::Response> {
       if (!authorized) {
-        return Unauthorized("Mesos master");
+        return Forbidden();
       }
 
       return _set(quotaInfo, forced);
@@ -363,12 +300,14 @@ Future<http::Response> Master::QuotaHandler::_set(
     }
   }
 
+  Quota quota = Quota{quotaInfo};
+
   // Populate master's quota-related local state. We do this before updating
   // the registry in order to make sure that we are not already trying to
   // satisfy a request for this role (since this is a multi-phase event).
   // NOTE: We do not need to remove quota for the role if the registry update
   // fails because in this case the master fails as well.
-  master->quotas[quotaInfo.role()] = Quota{quotaInfo};
+  master->quotas[quotaInfo.role()] = quota;
 
   // Update the registry with the new quota and acknowledge the request.
   return master->registrar->apply(Owned<Operation>(
@@ -377,7 +316,7 @@ Future<http::Response> Master::QuotaHandler::_set(
       // See the top comment in "master/quota.hpp" for why this check is here.
       CHECK(result);
 
-      master->allocator->setQuota(quotaInfo.role(), quotaInfo);
+      master->allocator->setQuota(quotaInfo.role(), quota);
 
       // Rescind outstanding offers to facilitate satisfying the quota request.
       // NOTE: We set quota before we rescind to avoid a race. If we were to
@@ -446,7 +385,7 @@ Future<http::Response> Master::QuotaHandler::remove(
   return authorizeRemoveQuota(principal, quota_principal)
     .then(defer(master->self(), [=](bool authorized) -> Future<http::Response> {
       if (!authorized) {
-        return Unauthorized("Mesos master");
+        return Forbidden();
       }
 
       return _remove(role);
@@ -510,17 +449,16 @@ Future<bool> Master::QuotaHandler::authorizeSetQuota(
             << (principal.isSome() ? principal.get() : "ANY")
             << "' to request quota for role '" << role << "'";
 
-  mesos::ACL::SetQuota request;
+  authorization::Request request;
+  request.set_action(authorization::SET_QUOTA_WITH_ROLE);
 
   if (principal.isSome()) {
-    request.mutable_principals()->add_values(principal.get());
-  } else {
-    request.mutable_principals()->set_type(mesos::ACL::Entity::ANY);
+    request.mutable_subject()->set_value(principal.get());
   }
 
-  request.mutable_roles()->add_values(role);
+  request.mutable_object()->set_value(role);
 
-  return master->authorizer.get()->authorize(request);
+  return master->authorizer.get()->authorized(request);
 }
 
 
@@ -538,21 +476,18 @@ Future<bool> Master::QuotaHandler::authorizeRemoveQuota(
             << (quotaPrincipal.isSome() ? quotaPrincipal.get() : "ANY")
             << "'";
 
-  mesos::ACL::RemoveQuota request;
+  authorization::Request request;
+  request.set_action(authorization::DESTROY_QUOTA_WITH_PRINCIPAL);
 
   if (requestPrincipal.isSome()) {
-    request.mutable_principals()->add_values(requestPrincipal.get());
-  } else {
-    request.mutable_principals()->set_type(mesos::ACL::Entity::ANY);
+    request.mutable_subject()->set_value(requestPrincipal.get());
   }
 
   if (quotaPrincipal.isSome()) {
-    request.mutable_quota_principals()->add_values(quotaPrincipal.get());
-  } else {
-    request.mutable_quota_principals()->set_type(mesos::ACL::Entity::ANY);
+    request.mutable_object()->set_value(quotaPrincipal.get());
   }
 
-  return master->authorizer.get()->authorize(request);
+  return master->authorizer.get()->authorized(request);
 }
 
 } // namespace master {

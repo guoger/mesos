@@ -14,7 +14,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License
 
+#ifndef __WINDOWS__
 #include <unistd.h>
+#endif // __WINDOWS__
 
 #include <sys/stat.h>
 
@@ -116,10 +118,10 @@ private:
   // Returns the internal virtual path mapping.
   Future<Response> debug(const Request& request);
 
-  const static std::string BROWSE_HELP;
-  const static std::string READ_HELP;
-  const static std::string DOWNLOAD_HELP;
-  const static std::string DEBUG_HELP;
+  const static string BROWSE_HELP;
+  const static string READ_HELP;
+  const static string DOWNLOAD_HELP;
+  const static string DEBUG_HELP;
 
   hashmap<string, string> paths;
 };
@@ -334,8 +336,10 @@ Future<Response> FilesProcess::read(const Request& request)
   Try<int> fd = os::open(resolvedPath.get(), O_RDONLY | O_CLOEXEC);
 
   if (fd.isError()) {
-    string error = strings::format("Failed to open file at '%s': %s",
-        resolvedPath.get(), fd.error()).get();
+    string error = strings::format(
+        "Failed to open file at '%s': %s",
+        resolvedPath.get(),
+        fd.error()).get();
     LOG(WARNING) << error;
     return InternalServerError(error + ".\n");
   }
@@ -362,7 +366,7 @@ Future<Response> FilesProcess::read(const Request& request)
   }
 
   // Cap the read length at 16 pages.
-  length = std::min<ssize_t>(length, sysconf(_SC_PAGE_SIZE) * 16);
+  length = std::min<ssize_t>(length, os::pagesize() * 16);
 
   if (offset >= size) {
     os::close(fd.get());

@@ -20,12 +20,19 @@
 #include <unistd.h>
 
 #include <map>
+#include <memory>
 #include <string>
 
-#include <gmock/gmock.h>
+#include <mesos/executor.hpp>
+#include <mesos/mesos.hpp>
+#include <mesos/resources.hpp>
+#include <mesos/type_utils.hpp>
+
+#include <mesos/v1/executor.hpp>
 
 #include <process/dispatch.hpp>
 #include <process/future.hpp>
+#include <process/gmock.hpp>
 #include <process/pid.hpp>
 
 #include <stout/hashmap.hpp>
@@ -33,15 +40,12 @@
 #include <stout/try.hpp>
 #include <stout/uuid.hpp>
 
-#include "mesos/executor.hpp"
-#include "mesos/mesos.hpp"
-#include "mesos/resources.hpp"
-#include "mesos/type_utils.hpp"
-
 #include "slave/containerizer/containerizer.hpp"
 
 #include "slave/slave.hpp"
 #include "slave/state.hpp"
+
+#include "tests/mesos.hpp"
 
 namespace mesos {
 namespace internal {
@@ -53,6 +57,10 @@ class MockExecutor;
 class TestContainerizer : public slave::Containerizer
 {
 public:
+  TestContainerizer(
+      const ExecutorID& executorId,
+      const std::shared_ptr<MockV1HTTPExecutor>& executor);
+
   TestContainerizer(const hashmap<ExecutorID, Executor*>& executors);
 
   TestContainerizer(const ExecutorID& executorId, Executor* executor);
@@ -62,6 +70,12 @@ public:
   TestContainerizer();
 
   virtual ~TestContainerizer();
+
+  virtual process::Future<hashset<ContainerID>> containers();
+
+  MOCK_METHOD1(
+      recover,
+      process::Future<Nothing>(const Option<slave::state::SlaveState>&));
 
   MOCK_METHOD7(
       launch,
@@ -84,18 +98,6 @@ public:
       const process::PID<slave::Slave>& slavePid,
       bool checkpoint);
 
-  // Additional destroy method for testing because we won't know the
-  // ContainerID created for each container.
-  void destroy(const FrameworkID& frameworkId, const ExecutorID& executorId);
-
-  virtual void destroy(const ContainerID& containerId);
-
-  virtual process::Future<hashset<ContainerID> > containers();
-
-  MOCK_METHOD1(
-      recover,
-      process::Future<Nothing>(const Option<slave::state::SlaveState>&));
-
   MOCK_METHOD2(
       update,
       process::Future<Nothing>(const ContainerID&, const Resources&));
@@ -108,10 +110,18 @@ public:
       wait,
       process::Future<containerizer::Termination>(const ContainerID&));
 
+  MOCK_METHOD1(
+      destroy,
+      void(const ContainerID&));
+
+  // Additional destroy method for testing because we won't know the
+  // ContainerID created for each container.
+  void destroy(const FrameworkID& frameworkId, const ExecutorID& executorId);
+
 private:
   void setup();
 
-  // Default 'launch' implementation.
+  // Default implementations of mock methods.
   process::Future<bool> _launch(
       const ContainerID& containerId,
       const ExecutorInfo& executorInfo,
@@ -124,10 +134,14 @@ private:
   process::Future<containerizer::Termination> _wait(
       const ContainerID& containerId);
 
+  void _destroy(const ContainerID& containerID);
+
   hashmap<ExecutorID, Executor*> executors;
+  hashmap<ExecutorID, std::shared_ptr<MockV1HTTPExecutor>> v1Executors;
 
   hashmap<std::pair<FrameworkID, ExecutorID>, ContainerID> containers_;
   hashmap<ContainerID, process::Owned<MesosExecutorDriver> > drivers;
+  hashmap<ContainerID, process::Owned<executor::TestV1Mesos> > v1Libraries;
   hashmap<ContainerID,
       process::Owned<process::Promise<containerizer::Termination> > > promises;
 };

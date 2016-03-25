@@ -62,6 +62,8 @@
 #define DROP_DISPATCHES(pid, method)            \
   process::DropDispatches(pid, method)
 
+#define EXPECT_NO_FUTURE_DISPATCHES(pid, method)        \
+  process::ExpectNoFutureDispatches(pid, method)
 
 ACTION_TEMPLATE(PromiseArg,
                 HAS_1_TEMPLATE_PARAMS(int, k),
@@ -273,7 +275,7 @@ public:
   TestsFilter* install()
   {
     if (!started) {
-      EXIT(1)
+      EXIT(EXIT_FAILURE)
         << "To use FUTURE/DROP_MESSAGE/DISPATCH, etc. you need to do the "
         << "following before you invoke RUN_ALL_TESTS():\n\n"
         << "\t::testing::TestEventListeners& listeners =\n"
@@ -351,6 +353,87 @@ MATCHER_P2(DispatchMatcher, pid, method, "")
   return (testing::Matcher<UPID>(pid).Matches(event.pid) &&
           event.functionType.isSome() &&
           *event.functionType.get() == typeid(method));
+}
+
+
+MATCHER_P3(HttpMatcher, message, path, deserializer, "")
+{
+  const HttpEvent& event = ::std::tr1::get<0>(arg);
+
+  Try<message_type> message_ = deserializer(event.request->body);
+  if (message_.isError()) {
+    return false;
+  }
+
+  return (testing::Matcher<std::string>(path).Matches(event.request->url.path));
+}
+
+
+// See `UnionMessageMatcher` for more details on protobuf messages using the
+// "union" trick.
+MATCHER_P4(UnionHttpMatcher, message, unionType, path, deserializer, "")
+{
+  const HttpEvent& event = ::std::tr1::get<0>(arg);
+
+  Try<message_type> message_ = deserializer(event.request->body);
+  if (message_.isError()) {
+    return false;
+  }
+
+  return (testing::Matcher<unionType_type>(unionType).Matches(
+            message_.get().type()) &&
+          testing::Matcher<std::string>(path).Matches(
+            event.request->url.path));
+}
+
+
+template <typename Message, typename Path, typename Deserializer>
+Future<http::Request> FutureHttpRequest(
+    Message message,
+    Path path,
+    Deserializer deserializer,
+    bool drop = false)
+{
+  TestsFilter* filter = FilterTestEventListener::instance()->install();
+  Future<http::Request> future;
+  synchronized (filter->mutex) {
+    EXPECT_CALL(filter->mock, filter(testing::A<const HttpEvent&>()))
+      .With(HttpMatcher(message, path, deserializer))
+      .WillOnce(testing::DoAll(FutureArgField<0>(
+                                   &HttpEvent::request,
+                                   &future),
+                               testing::Return(drop)))
+      .RetiresOnSaturation(); // Don't impose any subsequent expectations.
+  }
+
+  return future;
+}
+
+
+template <typename Message,
+          typename UnionType,
+          typename Path,
+          typename Deserializer>
+Future<http::Request> FutureUnionHttpRequest(
+    Message message,
+    UnionType unionType,
+    Path path,
+    Deserializer deserializer,
+    bool drop = false)
+{
+  TestsFilter* filter = FilterTestEventListener::instance()->install();
+  Future<http::Request> future;
+  synchronized (filter->mutex) {
+    EXPECT_CALL(filter->mock, filter(testing::A<const HttpEvent&>()))
+      .With(UnionHttpMatcher(message, unionType, path, deserializer))
+      .WillOnce(testing::DoAll(FutureArgField<0>(
+                                   &HttpEvent::request,
+                                   &future),
+                               testing::Return(drop)))
+      .RetiresOnSaturation(); // Don't impose any subsequent expectations.
+  }
+
+  return future;
 }
 
 
@@ -436,6 +519,80 @@ void DropUnionMessages(Message message, UnionType unionType, From from, To to)
 }
 
 
+template <typename Message, typename Path, typename Deserializer>
+void DropHttpRequests(
+    Message message,
+    Path path,
+    Deserializer deserializer,
+    bool drop = false)
+{
+  TestsFilter* filter = FilterTestEventListener::instance()->install();
+  synchronized (filter->mutex) {
+    EXPECT_CALL(filter->mock, filter(testing::A<const HttpEvent&>()))
+      .With(HttpMatcher(message, path, deserializer))
+      .WillRepeatedly(testing::Return(true));
+  }
+}
+
+
+template <typename Message,
+          typename UnionType,
+          typename Path,
+          typename Deserializer>
+void DropUnionHttpRequests(
+    Message message,
+    UnionType unionType,
+    Path path,
+    Deserializer deserializer,
+    bool drop = false)
+{
+  TestsFilter* filter = FilterTestEventListener::instance()->install();
+  Future<http::Request> future;
+  synchronized (filter->mutex) {
+    EXPECT_CALL(filter->mock, filter(testing::A<const HttpEvent&>()))
+      .With(UnionHttpMatcher(message, unionType, path, deserializer))
+      .WillRepeatedly(testing::Return(true));
+  }
+}
+
+
+template <typename Message, typename Path, typename Deserializer>
+void ExpectNoFutureHttpRequests(
+    Message message,
+    Path path,
+    Deserializer deserializer,
+    bool drop = false)
+{
+  TestsFilter* filter = FilterTestEventListener::instance()->install();
+  synchronized (filter->mutex) {
+    EXPECT_CALL(filter->mock, filter(testing::A<const HttpEvent&>()))
+      .With(HttpMatcher(message, path, deserializer))
+      .Times(0);
+  }
+}
+
+
+template <typename Message,
+          typename UnionType,
+          typename Path,
+          typename Deserializer>
+void ExpectNoFutureUnionHttpRequests(
+    Message message,
+    UnionType unionType,
+    Path path,
+    Deserializer deserializer,
+    bool drop = false)
+{
+  TestsFilter* filter = FilterTestEventListener::instance()->install();
+  Future<http::Request> future;
+  synchronized (filter->mutex) {
+    EXPECT_CALL(filter->mock, filter(testing::A<const HttpEvent&>()))
+      .With(UnionHttpMatcher(message, unionType, path, deserializer))
+      .Times(0);
+  }
+}
+
+
 template <typename Name, typename From, typename To>
 void ExpectNoFutureMessages(Name name, From from, To to)
 {
@@ -469,6 +626,18 @@ void DropDispatches(PID pid, Method method)
     EXPECT_CALL(filter->mock, filter(testing::A<const DispatchEvent&>()))
       .With(DispatchMatcher(pid, method))
       .WillRepeatedly(testing::Return(true));
+  }
+}
+
+
+template <typename PID, typename Method>
+void ExpectNoFutureDispatches(PID pid, Method method)
+{
+  TestsFilter* filter = FilterTestEventListener::instance()->install();
+  synchronized (filter->mutex) {
+    EXPECT_CALL(filter->mock, filter(testing::A<const DispatchEvent&>()))
+      .With(DispatchMatcher(pid, method))
+      .Times(0);
   }
 }
 

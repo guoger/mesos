@@ -31,6 +31,7 @@
 #include <process/future.hpp>
 #include <process/gmock.hpp>
 #include <process/gtest.hpp>
+#include <process/owned.hpp>
 #include <process/pid.hpp>
 #include <process/queue.hpp>
 
@@ -60,6 +61,7 @@ using mesos::v1::scheduler::Mesos;
 
 using process::Clock;
 using process::Future;
+using process::Owned;
 using process::PID;
 using process::Queue;
 
@@ -76,19 +78,9 @@ namespace internal {
 namespace tests {
 
 
-class SchedulerTest : public MesosTest, public WithParamInterface<ContentType>
-{
-protected:
-  // Helper class for using EXPECT_CALL since the Mesos scheduler API
-  // is callback based.
-  class Callbacks
-  {
-  public:
-    MOCK_METHOD0(connected, void(void));
-    MOCK_METHOD0(disconnected, void(void));
-    MOCK_METHOD1(received, void(const std::queue<Event>&));
-  };
-};
+class SchedulerTest
+  : public MesosTest,
+    public WithParamInterface<ContentType> {};
 
 
 // The scheduler library tests are parameterized by the content type
@@ -99,53 +91,80 @@ INSTANTIATE_TEST_CASE_P(
     ::testing::Values(ContentType::PROTOBUF, ContentType::JSON));
 
 
-// Enqueues all received events into a libprocess queue.
-ACTION_P(Enqueue, queue)
-{
-  std::queue<Event> events = arg0;
-  while (!events.empty()) {
-    // Note that we currently drop HEARTBEATs because most of these tests
-    // are not designed to deal with heartbeats.
-    // TODO(vinod): Implement DROP_HTTP_CALLS that can filter heartbeats.
-    if (events.front().type() == Event::HEARTBEAT) {
-      VLOG(1) << "Ignoring HEARTBEAT event";
-    } else {
-      queue->put(events.front());
-    }
-    events.pop();
-  }
-}
-
-
-// This test verifies that when a scheduler resubscribes it receives
-// SUBSCRIBED event with the previously assigned framework id.
+// This test verifies that a scheduler can subscribe with the master.
 TEST_P(SchedulerTest, Subscribe)
 {
   master::Flags flags = CreateMasterFlags();
   flags.authenticate_frameworks = false;
 
-  Try<PID<Master>> master = StartMaster(flags);
+  Try<Owned<cluster::Master>> master = StartMaster(flags);
   ASSERT_SOME(master);
 
-  Callbacks callbacks;
+  auto scheduler = std::make_shared<MockV1HTTPScheduler>();
 
   Future<Nothing> connected;
-  EXPECT_CALL(callbacks, connected())
-    .WillOnce(FutureSatisfy(&connected));
+  EXPECT_CALL(*scheduler, connected(_))
+    .WillOnce(FutureSatisfy(&connected))
+    .WillRepeatedly(Return()); // Ignore future invocations.
 
-  Mesos mesos(
-      master.get(),
-      GetParam(),
-      lambda::bind(&Callbacks::connected, lambda::ref(callbacks)),
-      lambda::bind(&Callbacks::disconnected, lambda::ref(callbacks)),
-      lambda::bind(&Callbacks::received, lambda::ref(callbacks), lambda::_1));
+  ContentType contentType = GetParam();
+
+  scheduler::TestV1Mesos mesos(master.get()->pid, contentType, scheduler);
 
   AWAIT_READY(connected);
 
-  Queue<Event> events;
+  Future<Event::Subscribed> subscribed;
+  EXPECT_CALL(*scheduler, subscribed(_, _))
+    .WillOnce(FutureArg<1>(&subscribed));
 
-  EXPECT_CALL(callbacks, received(_))
-    .WillRepeatedly(Enqueue(&events));
+  EXPECT_CALL(*scheduler, heartbeat(_))
+    .WillRepeatedly(Return()); // Ignore heartbeats.
+
+  {
+    Call call;
+    call.set_type(Call::SUBSCRIBE);
+    Call::Subscribe* subscribe = call.mutable_subscribe();
+    subscribe->mutable_framework_info()->CopyFrom(DEFAULT_V1_FRAMEWORK_INFO);
+
+    mesos.send(call);
+  }
+
+  AWAIT_READY(subscribed);
+
+  EXPECT_CALL(*scheduler, disconnected(_))
+    .Times(AtMost(1));
+}
+
+
+// This test verifies that a scheduler can subscribe with the master after
+// failing over to another instance.
+TEST_P(SchedulerTest, SchedulerFailover)
+{
+  master::Flags flags = CreateMasterFlags();
+  flags.authenticate_frameworks = false;
+
+  Try<Owned<cluster::Master>> master = StartMaster(flags);
+  ASSERT_SOME(master);
+
+  auto scheduler = std::make_shared<MockV1HTTPScheduler>();
+
+  Future<Nothing> connected;
+  EXPECT_CALL(*scheduler, connected(_))
+    .WillOnce(FutureSatisfy(&connected))
+    .WillRepeatedly(Return()); // Ignore future invocations.
+
+  ContentType contentType = GetParam();
+
+  scheduler::TestV1Mesos mesos(master.get()->pid, contentType, scheduler);
+
+  AWAIT_READY(connected);
+
+  Future<Event::Subscribed> subscribed;
+  EXPECT_CALL(*scheduler, subscribed(_, _))
+    .WillOnce(FutureArg<1>(&subscribed));
+
+  EXPECT_CALL(*scheduler, heartbeat(_))
+    .WillRepeatedly(Return()); // Ignore heartbeats.
 
   {
     Call call;
@@ -153,37 +172,150 @@ TEST_P(SchedulerTest, Subscribe)
 
     Call::Subscribe* subscribe = call.mutable_subscribe();
     subscribe->mutable_framework_info()->CopyFrom(DEFAULT_V1_FRAMEWORK_INFO);
-    subscribe->set_force(true);
 
     mesos.send(call);
   }
 
-  Future<Event> event = events.get();
-  AWAIT_READY(event);
-  EXPECT_EQ(Event::SUBSCRIBED, event.get().type());
+  AWAIT_READY(subscribed);
 
-  v1::FrameworkID id(event.get().subscribed().framework_id());
+  v1::FrameworkID frameworkId = subscribed.get().framework_id();
 
-  // Resubscribe with the same framework id.
+  auto scheduler2 = std::make_shared<MockV1HTTPScheduler>();
+
+  EXPECT_CALL(*scheduler2, connected(_))
+    .WillOnce(FutureSatisfy(&connected))
+    .WillRepeatedly(Return()); // Ignore future invocations.
+
+  // Failover to another scheduler instance.
+  scheduler::TestV1Mesos mesos2(master.get()->pid, contentType, scheduler2);
+
+  AWAIT_READY(connected);
+
+  // The previously connected scheduler instance should receive an
+  // error/disconnected event.
+  Future<Nothing> error;
+  EXPECT_CALL(*scheduler, error(_, _))
+    .WillOnce(FutureSatisfy(&error));
+
+  Future<Nothing> disconnected;
+  EXPECT_CALL(*scheduler, disconnected(_))
+    .WillOnce(FutureSatisfy(&disconnected));
+
+  EXPECT_CALL(*scheduler2, subscribed(_, _))
+    .WillOnce(FutureArg<1>(&subscribed));
+
+  EXPECT_CALL(*scheduler2, heartbeat(_))
+    .WillRepeatedly(Return()); // Ignore heartbeats.
+
   {
     Call call;
-    call.mutable_framework_id()->CopyFrom(id);
+    call.mutable_framework_id()->CopyFrom(frameworkId);
     call.set_type(Call::SUBSCRIBE);
 
     Call::Subscribe* subscribe = call.mutable_subscribe();
     subscribe->mutable_framework_info()->CopyFrom(DEFAULT_V1_FRAMEWORK_INFO);
-    subscribe->mutable_framework_info()->mutable_id()->CopyFrom(id);
-    subscribe->set_force(true);
+    subscribe->mutable_framework_info()->mutable_id()->CopyFrom(frameworkId);
+
+    mesos2.send(call);
+  }
+
+  AWAIT_READY(error);
+  AWAIT_READY(disconnected);
+  AWAIT_READY(subscribed);
+
+  EXPECT_EQ(frameworkId, subscribed.get().framework_id());
+
+  EXPECT_CALL(*scheduler, disconnected(_))
+    .Times(AtMost(1));
+
+  EXPECT_CALL(*scheduler2, disconnected(_))
+    .Times(AtMost(1));
+}
+
+
+// This test verifies that the scheduler can subscribe after a master failover.
+TEST_P(SchedulerTest, MasterFailover)
+{
+  master::Flags flags = CreateMasterFlags();
+  flags.authenticate_frameworks = false;
+
+  Try<Owned<cluster::Master>> master = StartMaster(flags);
+  ASSERT_SOME(master);
+
+  auto scheduler = std::make_shared<MockV1HTTPScheduler>();
+  auto detector = std::make_shared<StandaloneMasterDetector>(master.get()->pid);
+
+  Future<Nothing> connected;
+  EXPECT_CALL(*scheduler, connected(_))
+    .WillOnce(FutureSatisfy(&connected))
+    .WillRepeatedly(Return()); // Ignore future invocations.
+
+  ContentType contentType = GetParam();
+
+  scheduler::TestV1Mesos mesos(
+      master.get()->pid, contentType, scheduler, detector);
+
+  AWAIT_READY(connected);
+
+  Future<Event::Subscribed> subscribed;
+  EXPECT_CALL(*scheduler, subscribed(_, _))
+    .WillOnce(FutureArg<1>(&subscribed));
+
+  EXPECT_CALL(*scheduler, heartbeat(_))
+    .WillRepeatedly(Return()); // Ignore heartbeats.
+
+  {
+    Call call;
+    call.set_type(Call::SUBSCRIBE);
+
+    Call::Subscribe* subscribe = call.mutable_subscribe();
+    subscribe->mutable_framework_info()->CopyFrom(DEFAULT_V1_FRAMEWORK_INFO);
 
     mesos.send(call);
   }
 
-  event = events.get();
-  AWAIT_READY(event);
-  EXPECT_EQ(Event::SUBSCRIBED, event.get().type());
-  EXPECT_EQ(id, event.get().subscribed().framework_id());
+  AWAIT_READY(subscribed);
 
-  Shutdown();
+  v1::FrameworkID frameworkId = subscribed.get().framework_id();
+
+  Future<Nothing> disconnected;
+  EXPECT_CALL(*scheduler, disconnected(_))
+    .WillOnce(FutureSatisfy(&disconnected))
+    .WillRepeatedly(Return()); // Ignore future invocations.
+
+  // Failover the master.
+  master->reset();
+  master = StartMaster(flags);
+  ASSERT_SOME(master);
+
+  AWAIT_READY(disconnected);
+
+  EXPECT_CALL(*scheduler, connected(_))
+    .WillOnce(FutureSatisfy(&connected))
+    .WillRepeatedly(Return()); // Ignore future invocations.
+
+  detector->appoint(master.get()->pid);
+
+  AWAIT_READY(connected);
+
+  EXPECT_CALL(*scheduler, subscribed(_, _))
+    .WillOnce(FutureArg<1>(&subscribed));
+
+  {
+    Call call;
+    call.mutable_framework_id()->CopyFrom(frameworkId);
+    call.set_type(Call::SUBSCRIBE);
+
+    Call::Subscribe* subscribe = call.mutable_subscribe();
+    subscribe->mutable_framework_info()->CopyFrom(DEFAULT_V1_FRAMEWORK_INFO);
+    subscribe->mutable_framework_info()->mutable_id()->CopyFrom(frameworkId);
+
+    mesos.send(call);
+  }
+
+  AWAIT_READY(subscribed);
+
+  EXPECT_EQ(frameworkId, subscribed.get().framework_id());
 }
 
 
@@ -192,35 +324,40 @@ TEST_P(SchedulerTest, TaskRunning)
   master::Flags flags = CreateMasterFlags();
   flags.authenticate_frameworks = false;
 
-  Try<PID<Master>> master = StartMaster(flags);
+  Try<Owned<cluster::Master>> master = StartMaster(flags);
   ASSERT_SOME(master);
 
-  MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  auto scheduler = std::make_shared<MockV1HTTPScheduler>();
+  auto executor = std::make_shared<MockV1HTTPExecutor>();
 
-  TestContainerizer containerizer(&exec);
+  ExecutorID executorId = DEFAULT_EXECUTOR_ID;
+  TestContainerizer containerizer(executorId, executor);
 
-  Try<PID<Slave>> slave = StartSlave(&containerizer);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
   ASSERT_SOME(slave);
 
-  Callbacks callbacks;
-
   Future<Nothing> connected;
-  EXPECT_CALL(callbacks, connected())
-    .WillOnce(FutureSatisfy(&connected));
+  EXPECT_CALL(*scheduler, connected(_))
+    .WillOnce(FutureSatisfy(&connected))
+    .WillRepeatedly(Return()); // Ignore future invocations.
 
-  Mesos mesos(
-      master.get(),
-      GetParam(),
-      lambda::bind(&Callbacks::connected, lambda::ref(callbacks)),
-      lambda::bind(&Callbacks::disconnected, lambda::ref(callbacks)),
-      lambda::bind(&Callbacks::received, lambda::ref(callbacks), lambda::_1));
+  ContentType contentType = GetParam();
+
+  scheduler::TestV1Mesos mesos(master.get()->pid, contentType, scheduler);
 
   AWAIT_READY(connected);
 
-  Queue<Event> events;
+  Future<Event::Subscribed> subscribed;
+  EXPECT_CALL(*scheduler, subscribed(_, _))
+    .WillOnce(FutureArg<1>(&subscribed));
 
-  EXPECT_CALL(callbacks, received(_))
-    .WillRepeatedly(Enqueue(&events));
+  EXPECT_CALL(*scheduler, heartbeat(_))
+    .WillRepeatedly(Return()); // Ignore heartbeats.
+
+  Future<Event::Offers> offers;
+  EXPECT_CALL(*scheduler, offers(_, _))
+    .WillOnce(FutureArg<1>(&offers));
 
   {
     Call call;
@@ -232,22 +369,29 @@ TEST_P(SchedulerTest, TaskRunning)
     mesos.send(call);
   }
 
-  Future<Event> event = events.get();
-  AWAIT_READY(event);
-  EXPECT_EQ(Event::SUBSCRIBED, event.get().type());
+  AWAIT_READY(subscribed);
 
-  v1::FrameworkID id(event.get().subscribed().framework_id());
+  v1::FrameworkID frameworkId(subscribed.get().framework_id());
 
-  event = events.get();
-  AWAIT_READY(event);
-  EXPECT_EQ(Event::OFFERS, event.get().type());
-  EXPECT_NE(0, event.get().offers().offers().size());
+  AWAIT_READY(offers);
+  EXPECT_NE(0, offers->offers().size());
 
-  EXPECT_CALL(exec, registered(_, _, _, _))
-    .Times(1);
+  EXPECT_CALL(*executor, connected(_))
+    .WillOnce(executor::SendSubscribe(frameworkId, evolve(executorId)));
 
-  EXPECT_CALL(exec, launchTask(_, _))
-    .WillOnce(SendStatusUpdateFromTask(TASK_RUNNING));
+  EXPECT_CALL(*executor, subscribed(_, _));
+
+  EXPECT_CALL(*executor, launch(_, _))
+    .WillOnce(executor::SendUpdateFromTask(
+        frameworkId, evolve(executorId), v1::TASK_RUNNING));
+
+  Future<Nothing> acknowledged;
+  EXPECT_CALL(*executor, acknowledged(_, _))
+    .WillOnce(FutureSatisfy(&acknowledged));
+
+  Future<Event::Update> statusUpdate;
+  EXPECT_CALL(*scheduler, update(_, _))
+    .WillOnce(FutureArg<1>(&statusUpdate));
 
   Future<Nothing> update;
   EXPECT_CALL(containerizer, update(_, _))
@@ -259,9 +403,9 @@ TEST_P(SchedulerTest, TaskRunning)
   taskInfo.set_name("");
   taskInfo.mutable_task_id()->set_value("1");
   taskInfo.mutable_agent_id()->CopyFrom(
-      event.get().offers().offers(0).agent_id());
+      offers->offers(0).agent_id());
   taskInfo.mutable_resources()->CopyFrom(
-      event.get().offers().offers(0).resources());
+      offers->offers(0).resources());
   taskInfo.mutable_executor()->CopyFrom(DEFAULT_V1_EXECUTOR_INFO);
 
   // TODO(benh): Enable just running a task with a command in the tests:
@@ -269,11 +413,11 @@ TEST_P(SchedulerTest, TaskRunning)
 
   {
     Call call;
-    call.mutable_framework_id()->CopyFrom(id);
+    call.mutable_framework_id()->CopyFrom(frameworkId);
     call.set_type(Call::ACCEPT);
 
     Call::Accept* accept = call.mutable_accept();
-    accept->add_offer_ids()->CopyFrom(event.get().offers().offers(0).id());
+    accept->add_offer_ids()->CopyFrom(offers->offers(0).id());
 
     v1::Offer::Operation* operation = accept->add_operations();
     operation->set_type(v1::Offer::Operation::LAUNCH);
@@ -282,19 +426,23 @@ TEST_P(SchedulerTest, TaskRunning)
     mesos.send(call);
   }
 
-  event = events.get();
-  AWAIT_READY(event);
-  EXPECT_EQ(Event::UPDATE, event.get().type());
-  EXPECT_EQ(v1::TASK_RUNNING, event.get().update().status().state());
-  EXPECT_TRUE(event.get().update().status().has_executor_id());
-  EXPECT_EQ(exec.id, devolve(event.get().update().status().executor_id()));
+  AWAIT_READY(acknowledged);
+  AWAIT_READY(statusUpdate);
+
+  EXPECT_EQ(v1::TASK_RUNNING, statusUpdate->status().state());
+  EXPECT_TRUE(statusUpdate->status().has_executor_id());
+  EXPECT_EQ(executorId, devolve(statusUpdate->status().executor_id()));
 
   AWAIT_READY(update);
 
-  EXPECT_CALL(exec, shutdown(_))
+  EXPECT_CALL(*executor, shutdown(_))
     .Times(AtMost(1));
 
-  Shutdown(); // Must shutdown before 'containerizer' gets deallocated.
+  EXPECT_CALL(*executor, disconnected(_))
+    .Times(AtMost(1));
+
+  EXPECT_CALL(*scheduler, disconnected(_))
+    .Times(AtMost(1));
 }
 
 
@@ -303,35 +451,40 @@ TEST_P(SchedulerTest, ReconcileTask)
   master::Flags flags = CreateMasterFlags();
   flags.authenticate_frameworks = false;
 
-  Try<PID<Master>> master = StartMaster(flags);
+  Try<Owned<cluster::Master>> master = StartMaster(flags);
   ASSERT_SOME(master);
 
-  MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  auto scheduler = std::make_shared<MockV1HTTPScheduler>();
+  auto executor = std::make_shared<MockV1HTTPExecutor>();
 
-  TestContainerizer containerizer(&exec);
+  ExecutorID executorId = DEFAULT_EXECUTOR_ID;
+  TestContainerizer containerizer(executorId, executor);
 
-  Try<PID<Slave>> slave = StartSlave(&containerizer);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
   ASSERT_SOME(slave);
 
-  Callbacks callbacks;
-
   Future<Nothing> connected;
-  EXPECT_CALL(callbacks, connected())
-    .WillOnce(FutureSatisfy(&connected));
+  EXPECT_CALL(*scheduler, connected(_))
+    .WillOnce(FutureSatisfy(&connected))
+    .WillRepeatedly(Return()); // Ignore future invocations.
 
-  Mesos mesos(
-      master.get(),
-      GetParam(),
-      lambda::bind(&Callbacks::connected, lambda::ref(callbacks)),
-      lambda::bind(&Callbacks::disconnected, lambda::ref(callbacks)),
-      lambda::bind(&Callbacks::received, lambda::ref(callbacks), lambda::_1));
+  ContentType contentType = GetParam();
+
+  scheduler::TestV1Mesos mesos(master.get()->pid, contentType, scheduler);
 
   AWAIT_READY(connected);
 
-  Queue<Event> events;
+  Future<Event::Subscribed> subscribed;
+  EXPECT_CALL(*scheduler, subscribed(_, _))
+    .WillOnce(FutureArg<1>(&subscribed));
 
-  EXPECT_CALL(callbacks, received(_))
-    .WillRepeatedly(Enqueue(&events));
+  EXPECT_CALL(*scheduler, heartbeat(_))
+    .WillRepeatedly(Return()); // Ignore heartbeats.
+
+  Future<Event::Offers> offers;
+  EXPECT_CALL(*scheduler, offers(_, _))
+    .WillOnce(FutureArg<1>(&offers));
 
   {
     Call call;
@@ -343,31 +496,38 @@ TEST_P(SchedulerTest, ReconcileTask)
     mesos.send(call);
   }
 
-  Future<Event> event = events.get();
-  AWAIT_READY(event);
-  EXPECT_EQ(Event::SUBSCRIBED, event.get().type());
+  AWAIT_READY(subscribed);
 
-  v1::FrameworkID id(event.get().subscribed().framework_id());
+  v1::FrameworkID frameworkId(subscribed->framework_id());
 
-  event = events.get();
-  AWAIT_READY(event);
-  EXPECT_EQ(Event::OFFERS, event.get().type());
-  EXPECT_NE(0, event.get().offers().offers().size());
+  AWAIT_READY(offers);
+  EXPECT_NE(0, offers->offers().size());
 
-  EXPECT_CALL(exec, registered(_, _, _, _))
-    .Times(1);
+  EXPECT_CALL(*executor, connected(_))
+    .WillOnce(executor::SendSubscribe(frameworkId, evolve(executorId)));
 
-  EXPECT_CALL(exec, launchTask(_, _))
-    .WillOnce(SendStatusUpdateFromTask(TASK_RUNNING));
+  EXPECT_CALL(*executor, subscribed(_, _));
 
-  v1::Offer offer = event.get().offers().offers(0);
+  EXPECT_CALL(*executor, launch(_, _))
+    .WillOnce(executor::SendUpdateFromTask(
+        frameworkId, evolve(executorId), v1::TASK_RUNNING));
+
+  Future<Nothing> acknowledged;
+  EXPECT_CALL(*executor, acknowledged(_, _))
+    .WillOnce(FutureSatisfy(&acknowledged));
+
+  Future<Event::Update> update1;
+  EXPECT_CALL(*scheduler, update(_, _))
+    .WillOnce(FutureArg<1>(&update1));
+
+  const v1::Offer& offer = offers->offers(0);
 
   v1::TaskInfo taskInfo =
     evolve(createTask(devolve(offer), "", DEFAULT_EXECUTOR_ID));
 
   {
     Call call;
-    call.mutable_framework_id()->CopyFrom(id);
+    call.mutable_framework_id()->CopyFrom(frameworkId);
     call.set_type(Call::ACCEPT);
 
     Call::Accept* accept = call.mutable_accept();
@@ -380,14 +540,18 @@ TEST_P(SchedulerTest, ReconcileTask)
     mesos.send(call);
   }
 
-  event = events.get();
-  AWAIT_READY(event);
-  EXPECT_EQ(Event::UPDATE, event.get().type());
-  EXPECT_EQ(v1::TASK_RUNNING, event.get().update().status().state());
+  AWAIT_READY(acknowledged);
+  AWAIT_READY(update1);
+
+  EXPECT_EQ(v1::TASK_RUNNING, update1->status().state());
+
+  Future<Event::Update> update2;
+  EXPECT_CALL(*scheduler, update(_, _))
+    .WillOnce(FutureArg<1>(&update2));
 
   {
     Call call;
-    call.mutable_framework_id()->CopyFrom(id);
+    call.mutable_framework_id()->CopyFrom(frameworkId);
     call.set_type(Call::RECONCILE);
 
     Call::Reconcile::Task* task = call.mutable_reconcile()->add_tasks();
@@ -396,18 +560,21 @@ TEST_P(SchedulerTest, ReconcileTask)
     mesos.send(call);
   }
 
-  event = events.get();
-  AWAIT_READY(event);
-  EXPECT_EQ(Event::UPDATE, event.get().type());
-  EXPECT_FALSE(event.get().update().status().has_uuid());
-  EXPECT_EQ(v1::TASK_RUNNING, event.get().update().status().state());
-  EXPECT_EQ(v1::TaskStatus::REASON_RECONCILIATION,
-            event.get().update().status().reason());
+  AWAIT_READY(update2);
 
-  EXPECT_CALL(exec, shutdown(_))
+  EXPECT_FALSE(update2->status().has_uuid());
+  EXPECT_EQ(v1::TASK_RUNNING, update2->status().state());
+  EXPECT_EQ(v1::TaskStatus::REASON_RECONCILIATION,
+            update2->status().reason());
+
+  EXPECT_CALL(*executor, shutdown(_))
     .Times(AtMost(1));
 
-  Shutdown(); // Must shutdown before 'containerizer' gets deallocated.
+  EXPECT_CALL(*executor, disconnected(_))
+    .Times(AtMost(1));
+
+  EXPECT_CALL(*scheduler, disconnected(_))
+    .Times(AtMost(1));
 }
 
 
@@ -416,35 +583,40 @@ TEST_P(SchedulerTest, KillTask)
   master::Flags flags = CreateMasterFlags();
   flags.authenticate_frameworks = false;
 
-  Try<PID<Master>> master = StartMaster(flags);
+  Try<Owned<cluster::Master>> master = StartMaster(flags);
   ASSERT_SOME(master);
 
-  MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  auto scheduler = std::make_shared<MockV1HTTPScheduler>();
+  auto executor = std::make_shared<MockV1HTTPExecutor>();
 
-  TestContainerizer containerizer(&exec);
+  ExecutorID executorId = DEFAULT_EXECUTOR_ID;
+  TestContainerizer containerizer(executorId, executor);
 
-  Try<PID<Slave>> slave = StartSlave(&containerizer);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
   ASSERT_SOME(slave);
 
-  Callbacks callbacks;
-
   Future<Nothing> connected;
-  EXPECT_CALL(callbacks, connected())
-    .WillOnce(FutureSatisfy(&connected));
+  EXPECT_CALL(*scheduler, connected(_))
+    .WillOnce(FutureSatisfy(&connected))
+    .WillRepeatedly(Return()); // Ignore future invocations.
 
-  Mesos mesos(
-      master.get(),
-      GetParam(),
-      lambda::bind(&Callbacks::connected, lambda::ref(callbacks)),
-      lambda::bind(&Callbacks::disconnected, lambda::ref(callbacks)),
-      lambda::bind(&Callbacks::received, lambda::ref(callbacks), lambda::_1));
+  ContentType contentType = GetParam();
+
+  scheduler::TestV1Mesos mesos(master.get()->pid, contentType, scheduler);
 
   AWAIT_READY(connected);
 
-  Queue<Event> events;
+  Future<Event::Subscribed> subscribed;
+  EXPECT_CALL(*scheduler, subscribed(_, _))
+    .WillOnce(FutureArg<1>(&subscribed));
 
-  EXPECT_CALL(callbacks, received(_))
-    .WillRepeatedly(Enqueue(&events));
+  EXPECT_CALL(*scheduler, heartbeat(_))
+    .WillRepeatedly(Return()); // Ignore heartbeats.
+
+  Future<Event::Offers> offers;
+  EXPECT_CALL(*scheduler, offers(_, _))
+    .WillOnce(FutureArg<1>(&offers));
 
   {
     Call call;
@@ -456,31 +628,39 @@ TEST_P(SchedulerTest, KillTask)
     mesos.send(call);
   }
 
-  Future<Event> event = events.get();
-  AWAIT_READY(event);
-  EXPECT_EQ(Event::SUBSCRIBED, event.get().type());
+  AWAIT_READY(subscribed);
 
-  v1::FrameworkID id(event.get().subscribed().framework_id());
+  v1::FrameworkID frameworkId(subscribed.get().framework_id());
 
-  event = events.get();
-  AWAIT_READY(event);
-  EXPECT_EQ(Event::OFFERS, event.get().type());
-  EXPECT_NE(0, event.get().offers().offers().size());
+  AWAIT_READY(offers);
+  EXPECT_NE(0, offers->offers().size());
 
-  EXPECT_CALL(exec, registered(_, _, _, _))
-    .Times(1);
+  EXPECT_CALL(*executor, connected(_))
+    .WillOnce(executor::SendSubscribe(frameworkId, evolve(executorId)));
 
-  EXPECT_CALL(exec, launchTask(_, _))
-    .WillOnce(SendStatusUpdateFromTask(TASK_RUNNING));
+  EXPECT_CALL(*executor, subscribed(_, _));
 
-  v1::Offer offer = event.get().offers().offers(0);
+  EXPECT_CALL(*executor, launch(_, _))
+    .WillOnce(executor::SendUpdateFromTask(
+        frameworkId, evolve(executorId), v1::TASK_RUNNING));
+
+  Future<Nothing> acknowledged;
+  EXPECT_CALL(*executor, acknowledged(_, _))
+    .WillOnce(FutureSatisfy(&acknowledged))
+    .WillRepeatedly(Return());
+
+  Future<Event::Update> update1;
+  EXPECT_CALL(*scheduler, update(_, _))
+    .WillOnce(FutureArg<1>(&update1));
+
+  const v1::Offer& offer = offers->offers(0);
 
   v1::TaskInfo taskInfo =
     evolve(createTask(devolve(offer), "", DEFAULT_EXECUTOR_ID));
 
   {
     Call call;
-    call.mutable_framework_id()->CopyFrom(id);
+    call.mutable_framework_id()->CopyFrom(frameworkId);
     call.set_type(Call::ACCEPT);
 
     Call::Accept* accept = call.mutable_accept();
@@ -493,31 +673,36 @@ TEST_P(SchedulerTest, KillTask)
     mesos.send(call);
   }
 
-  event = events.get();
-  AWAIT_READY(event);
-  EXPECT_EQ(Event::UPDATE, event.get().type());
-  EXPECT_EQ(v1::TASK_RUNNING, event.get().update().status().state());
+  AWAIT_READY(acknowledged);
+  AWAIT_READY(update1);
+
+  EXPECT_EQ(v1::TASK_RUNNING, update1->status().state());
 
   {
     // Acknowledge TASK_RUNNING update.
     Call call;
-    call.mutable_framework_id()->CopyFrom(id);
+    call.mutable_framework_id()->CopyFrom(frameworkId);
     call.set_type(Call::ACKNOWLEDGE);
 
     Call::Acknowledge* acknowledge = call.mutable_acknowledge();
     acknowledge->mutable_task_id()->CopyFrom(taskInfo.task_id());
     acknowledge->mutable_agent_id()->CopyFrom(offer.agent_id());
-    acknowledge->set_uuid(event.get().update().status().uuid());
+    acknowledge->set_uuid(update1->status().uuid());
 
     mesos.send(call);
   }
 
-  EXPECT_CALL(exec, killTask(_, _))
-    .WillOnce(SendStatusUpdateFromTaskID(TASK_KILLED));
+  Future<Event::Update> update2;
+  EXPECT_CALL(*scheduler, update(_, _))
+    .WillOnce(FutureArg<1>(&update2));
+
+  EXPECT_CALL(*executor, kill(_, _))
+    .WillOnce(executor::SendUpdateFromTaskID(
+        frameworkId, evolve(executorId), v1::TASK_KILLED));
 
   {
     Call call;
-    call.mutable_framework_id()->CopyFrom(id);
+    call.mutable_framework_id()->CopyFrom(frameworkId);
     call.set_type(Call::KILL);
 
     Call::Kill* kill = call.mutable_kill();
@@ -527,15 +712,18 @@ TEST_P(SchedulerTest, KillTask)
     mesos.send(call);
   }
 
-  event = events.get();
-  AWAIT_READY(event);
-  EXPECT_EQ(Event::UPDATE, event.get().type());
-  EXPECT_EQ(v1::TASK_KILLED, event.get().update().status().state());
+  AWAIT_READY(update2);
 
-  EXPECT_CALL(exec, shutdown(_))
+  EXPECT_EQ(v1::TASK_KILLED, update2->status().state());
+
+  EXPECT_CALL(*executor, shutdown(_))
     .Times(AtMost(1));
 
-  Shutdown(); // Must shutdown before 'containerizer' gets deallocated.
+  EXPECT_CALL(*executor, disconnected(_))
+    .Times(AtMost(1));
+
+  EXPECT_CALL(*scheduler, disconnected(_))
+    .Times(AtMost(1));
 }
 
 
@@ -544,35 +732,41 @@ TEST_P(SchedulerTest, ShutdownExecutor)
   master::Flags flags = CreateMasterFlags();
   flags.authenticate_frameworks = false;
 
-  Try<PID<Master>> master = StartMaster(flags);
+  Try<Owned<cluster::Master>> master = StartMaster(flags);
   ASSERT_SOME(master);
 
-  MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  auto scheduler = std::make_shared<MockV1HTTPScheduler>();
+  auto executor = std::make_shared<MockV1HTTPExecutor>();
 
-  TestContainerizer containerizer(&exec);
+  ExecutorID executorId = DEFAULT_EXECUTOR_ID;
+  TestContainerizer containerizer(executorId, executor);
 
-  Try<PID<Slave>> slave = StartSlave(&containerizer);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
   ASSERT_SOME(slave);
 
-  Callbacks callbacks;
-
   Future<Nothing> connected;
-  EXPECT_CALL(callbacks, connected())
-    .WillOnce(FutureSatisfy(&connected));
+  EXPECT_CALL(*scheduler, connected(_))
+    .WillOnce(FutureSatisfy(&connected))
+    .WillRepeatedly(Return()); // Ignore future invocations.
 
-  Mesos mesos(
-      master.get(),
-      GetParam(),
-      lambda::bind(&Callbacks::connected, lambda::ref(callbacks)),
-      lambda::bind(&Callbacks::disconnected, lambda::ref(callbacks)),
-      lambda::bind(&Callbacks::received, lambda::ref(callbacks), lambda::_1));
+  ContentType contentType = GetParam();
+
+  scheduler::TestV1Mesos mesos(master.get()->pid, contentType, scheduler);
 
   AWAIT_READY(connected);
 
-  Queue<Event> events;
+  Future<Event::Subscribed> subscribed;
+  EXPECT_CALL(*scheduler, subscribed(_, _))
+    .WillOnce(FutureArg<1>(&subscribed));
 
-  EXPECT_CALL(callbacks, received(_))
-    .WillRepeatedly(Enqueue(&events));
+  EXPECT_CALL(*scheduler, heartbeat(_))
+    .WillRepeatedly(Return()); // Ignore heartbeats.
+
+  Future<Event::Offers> offers;
+  EXPECT_CALL(*scheduler, offers(_, _))
+    .WillOnce(FutureArg<1>(&offers))
+    .WillRepeatedly(Return());
 
   {
     Call call;
@@ -584,31 +778,38 @@ TEST_P(SchedulerTest, ShutdownExecutor)
     mesos.send(call);
   }
 
-  Future<Event> event = events.get();
-  AWAIT_READY(event);
-  EXPECT_EQ(Event::SUBSCRIBED, event.get().type());
+  AWAIT_READY(subscribed);
 
-  v1::FrameworkID id(event.get().subscribed().framework_id());
+  v1::FrameworkID frameworkId(subscribed->framework_id());
 
-  event = events.get();
-  AWAIT_READY(event);
-  EXPECT_EQ(Event::OFFERS, event.get().type());
-  EXPECT_NE(0, event.get().offers().offers().size());
+  AWAIT_READY(offers);
+  EXPECT_NE(0, offers->offers().size());
 
-  EXPECT_CALL(exec, registered(_, _, _, _))
-    .Times(1);
+  EXPECT_CALL(*executor, connected(_))
+    .WillOnce(executor::SendSubscribe(frameworkId, evolve(executorId)));
 
-  EXPECT_CALL(exec, launchTask(_, _))
-    .WillOnce(SendStatusUpdateFromTask(TASK_FINISHED));
+  EXPECT_CALL(*executor, subscribed(_, _));
 
-  v1::Offer offer = event.get().offers().offers(0);
+  EXPECT_CALL(*executor, launch(_, _))
+    .WillOnce(executor::SendUpdateFromTask(
+        frameworkId, evolve(executorId), v1::TASK_FINISHED));
+
+  Future<Nothing> acknowledged;
+  EXPECT_CALL(*executor, acknowledged(_, _))
+    .WillOnce(FutureSatisfy(&acknowledged));
+
+  Future<Event::Update> update;
+  EXPECT_CALL(*scheduler, update(_, _))
+    .WillOnce(FutureArg<1>(&update));
+
+  const v1::Offer& offer = offers->offers(0);
 
   v1::TaskInfo taskInfo =
     evolve(createTask(devolve(offer), "", DEFAULT_EXECUTOR_ID));
 
   {
     Call call;
-    call.mutable_framework_id()->CopyFrom(id);
+    call.mutable_framework_id()->CopyFrom(frameworkId);
     call.set_type(Call::ACCEPT);
 
     Call::Accept* accept = call.mutable_accept();
@@ -621,18 +822,22 @@ TEST_P(SchedulerTest, ShutdownExecutor)
     mesos.send(call);
   }
 
-  event = events.get();
-  AWAIT_READY(event);
-  EXPECT_EQ(Event::UPDATE, event.get().type());
-  EXPECT_EQ(v1::TASK_FINISHED, event.get().update().status().state());
+  AWAIT_READY(acknowledged);
+  AWAIT_READY(update);
+
+  EXPECT_EQ(v1::TASK_FINISHED, update->status().state());
 
   Future<Nothing> shutdown;
-  EXPECT_CALL(exec, shutdown(_))
+  EXPECT_CALL(*executor, shutdown(_))
     .WillOnce(FutureSatisfy(&shutdown));
+
+  Future<Event::Failure> failure;
+  EXPECT_CALL(*scheduler, failure(_, _))
+    .WillOnce(FutureArg<1>(&failure));
 
   {
     Call call;
-    call.mutable_framework_id()->CopyFrom(id);
+    call.mutable_framework_id()->CopyFrom(frameworkId);
     call.set_type(Call::SHUTDOWN);
 
     Call::Shutdown* shutdown = call.mutable_shutdown();
@@ -643,16 +848,14 @@ TEST_P(SchedulerTest, ShutdownExecutor)
   }
 
   AWAIT_READY(shutdown);
-  containerizer.destroy(devolve(id), DEFAULT_EXECUTOR_ID);
+  containerizer.destroy(devolve(frameworkId), executorId);
 
   // Executor termination results in a 'FAILURE' event.
-  event = events.get();
-  AWAIT_READY(event);
-  EXPECT_EQ(Event::FAILURE, event.get().type());
-  v1::ExecutorID executorId(DEFAULT_V1_EXECUTOR_ID);
-  EXPECT_EQ(executorId, event.get().failure().executor_id());
+  AWAIT_READY(failure);
+  EXPECT_EQ(executorId, devolve(failure->executor_id()));
 
-  Shutdown(); // Must shutdown before 'containerizer' gets deallocated.
+  EXPECT_CALL(*scheduler, disconnected(_))
+    .Times(AtMost(1));
 }
 
 
@@ -661,35 +864,40 @@ TEST_P(SchedulerTest, Teardown)
   master::Flags flags = CreateMasterFlags();
   flags.authenticate_frameworks = false;
 
-  Try<PID<Master>> master = StartMaster(flags);
+  Try<Owned<cluster::Master>> master = StartMaster(flags);
   ASSERT_SOME(master);
 
-  MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  auto scheduler = std::make_shared<MockV1HTTPScheduler>();
+  auto executor = std::make_shared<MockV1HTTPExecutor>();
 
-  TestContainerizer containerizer(&exec);
+  ExecutorID executorId = DEFAULT_EXECUTOR_ID;
+  TestContainerizer containerizer(executorId, executor);
 
-  Try<PID<Slave>> slave = StartSlave(&containerizer);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
   ASSERT_SOME(slave);
 
-  Callbacks callbacks;
-
   Future<Nothing> connected;
-  EXPECT_CALL(callbacks, connected())
-    .WillOnce(FutureSatisfy(&connected));
+  EXPECT_CALL(*scheduler, connected(_))
+    .WillOnce(FutureSatisfy(&connected))
+    .WillRepeatedly(Return()); // Ignore future invocations.
 
-  Mesos mesos(
-      master.get(),
-      GetParam(),
-      lambda::bind(&Callbacks::connected, lambda::ref(callbacks)),
-      lambda::bind(&Callbacks::disconnected, lambda::ref(callbacks)),
-      lambda::bind(&Callbacks::received, lambda::ref(callbacks), lambda::_1));
+  ContentType contentType = GetParam();
+
+  scheduler::TestV1Mesos mesos(master.get()->pid, contentType, scheduler);
 
   AWAIT_READY(connected);
 
-  Queue<Event> events;
+  Future<Event::Subscribed> subscribed;
+  EXPECT_CALL(*scheduler, subscribed(_, _))
+    .WillOnce(FutureArg<1>(&subscribed));
 
-  EXPECT_CALL(callbacks, received(_))
-    .WillRepeatedly(Enqueue(&events));
+  EXPECT_CALL(*scheduler, heartbeat(_))
+    .WillRepeatedly(Return()); // Ignore heartbeats.
+
+  Future<Event::Offers> offers;
+  EXPECT_CALL(*scheduler, offers(_, _))
+    .WillOnce(FutureArg<1>(&offers));
 
   {
     Call call;
@@ -701,31 +909,38 @@ TEST_P(SchedulerTest, Teardown)
     mesos.send(call);
   }
 
-  Future<Event> event = events.get();
-  AWAIT_READY(event);
-  EXPECT_EQ(Event::SUBSCRIBED, event.get().type());
+  AWAIT_READY(subscribed);
 
-  v1::FrameworkID id(event.get().subscribed().framework_id());
+  v1::FrameworkID frameworkId(subscribed->framework_id());
 
-  event = events.get();
-  AWAIT_READY(event);
-  EXPECT_EQ(Event::OFFERS, event.get().type());
-  EXPECT_NE(0, event.get().offers().offers().size());
+  AWAIT_READY(offers);
+  EXPECT_NE(0, offers->offers().size());
 
-  EXPECT_CALL(exec, registered(_, _, _, _))
-    .Times(1);
+  EXPECT_CALL(*executor, connected(_))
+    .WillOnce(executor::SendSubscribe(frameworkId, evolve(executorId)));
 
-  EXPECT_CALL(exec, launchTask(_, _))
-    .WillOnce(SendStatusUpdateFromTask(TASK_RUNNING));
+  EXPECT_CALL(*executor, subscribed(_, _));
 
-  v1::Offer offer = event.get().offers().offers(0);
+  EXPECT_CALL(*executor, launch(_, _))
+    .WillOnce(executor::SendUpdateFromTask(
+        frameworkId, evolve(executorId), v1::TASK_RUNNING));
+
+  Future<Nothing> acknowledged;
+  EXPECT_CALL(*executor, acknowledged(_, _))
+    .WillOnce(FutureSatisfy(&acknowledged));
+
+  Future<Event::Update> update;
+  EXPECT_CALL(*scheduler, update(_, _))
+    .WillOnce(FutureArg<1>(&update));
+
+  const v1::Offer& offer = offers->offers(0);
 
   v1::TaskInfo taskInfo =
     evolve(createTask(devolve(offer), "", DEFAULT_EXECUTOR_ID));
 
   {
     Call call;
-    call.mutable_framework_id()->CopyFrom(id);
+    call.mutable_framework_id()->CopyFrom(frameworkId);
     call.set_type(Call::ACCEPT);
 
     Call::Accept* accept = call.mutable_accept();
@@ -738,18 +953,18 @@ TEST_P(SchedulerTest, Teardown)
     mesos.send(call);
   }
 
-  event = events.get();
-  AWAIT_READY(event);
-  EXPECT_EQ(Event::UPDATE, event.get().type());
-  EXPECT_EQ(v1::TASK_RUNNING, event.get().update().status().state());
+  AWAIT_READY(acknowledged);
+  AWAIT_READY(update);
+
+  EXPECT_EQ(v1::TASK_RUNNING, update->status().state());
 
   Future<Nothing> shutdown;
-  EXPECT_CALL(exec, shutdown(_))
+  EXPECT_CALL(*executor, shutdown(_))
     .WillOnce(FutureSatisfy(&shutdown));
 
   {
     Call call;
-    call.mutable_framework_id()->CopyFrom(id);
+    call.mutable_framework_id()->CopyFrom(frameworkId);
     call.set_type(Call::TEARDOWN);
 
     mesos.send(call);
@@ -757,7 +972,8 @@ TEST_P(SchedulerTest, Teardown)
 
   AWAIT_READY(shutdown);
 
-  Shutdown(); // Must shutdown before 'containerizer' gets deallocated.
+  EXPECT_CALL(*scheduler, disconnected(_))
+    .Times(AtMost(1));
 }
 
 
@@ -766,31 +982,36 @@ TEST_P(SchedulerTest, Decline)
   master::Flags flags = CreateMasterFlags();
   flags.authenticate_frameworks = false;
 
-  Try<PID<Master>> master = StartMaster(flags);
+  Try<Owned<cluster::Master>> master = StartMaster(flags);
   ASSERT_SOME(master);
 
-  Try<PID<Slave>> slave = StartSlave();
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
   ASSERT_SOME(slave);
 
-  Callbacks callbacks;
+  auto scheduler = std::make_shared<MockV1HTTPScheduler>();
 
   Future<Nothing> connected;
-  EXPECT_CALL(callbacks, connected())
-    .WillOnce(FutureSatisfy(&connected));
+  EXPECT_CALL(*scheduler, connected(_))
+    .WillOnce(FutureSatisfy(&connected))
+    .WillRepeatedly(Return()); // Ignore future invocations.
 
-  Mesos mesos(
-      master.get(),
-      GetParam(),
-      lambda::bind(&Callbacks::connected, lambda::ref(callbacks)),
-      lambda::bind(&Callbacks::disconnected, lambda::ref(callbacks)),
-      lambda::bind(&Callbacks::received, lambda::ref(callbacks), lambda::_1));
+  ContentType contentType = GetParam();
+
+  scheduler::TestV1Mesos mesos(master.get()->pid, contentType, scheduler);
 
   AWAIT_READY(connected);
 
-  Queue<Event> events;
+  Future<Event::Subscribed> subscribed;
+  EXPECT_CALL(*scheduler, subscribed(_, _))
+    .WillOnce(FutureArg<1>(&subscribed));
 
-  EXPECT_CALL(callbacks, received(_))
-    .WillRepeatedly(Enqueue(&events));
+  EXPECT_CALL(*scheduler, heartbeat(_))
+    .WillRepeatedly(Return()); // Ignore heartbeats.
+
+  Future<Event::Offers> offers1;
+  EXPECT_CALL(*scheduler, offers(_, _))
+    .WillOnce(FutureArg<1>(&offers1));
 
   {
     Call call;
@@ -802,21 +1023,22 @@ TEST_P(SchedulerTest, Decline)
     mesos.send(call);
   }
 
-  Future<Event> event = events.get();
-  AWAIT_READY(event);
-  EXPECT_EQ(Event::SUBSCRIBED, event.get().type());
+  AWAIT_READY(subscribed);
 
-  v1::FrameworkID id(event.get().subscribed().framework_id());
+  v1::FrameworkID frameworkId(subscribed->framework_id());
 
-  event = events.get();
-  AWAIT_READY(event);
-  EXPECT_EQ(Event::OFFERS, event.get().type());
-  ASSERT_EQ(1, event.get().offers().offers().size());
+  AWAIT_READY(offers1);
+  ASSERT_EQ(1, offers1->offers().size());
 
-  v1::Offer offer = event.get().offers().offers(0);
+  const v1::Offer& offer = offers1->offers(0);
+
+  Future<Event::Offers> offers2;
+  EXPECT_CALL(*scheduler, offers(_, _))
+    .WillOnce(FutureArg<1>(&offers2));
+
   {
     Call call;
-    call.mutable_framework_id()->CopyFrom(id);
+    call.mutable_framework_id()->CopyFrom(frameworkId);
     call.set_type(Call::DECLINE);
 
     Call::Decline* decline = call.mutable_decline();
@@ -832,13 +1054,12 @@ TEST_P(SchedulerTest, Decline)
 
   // If the resources were properly declined, the scheduler should
   // get another offer with same amount of resources.
-  event = events.get();
-  AWAIT_READY(event);
-  EXPECT_EQ(Event::OFFERS, event.get().type());
-  ASSERT_EQ(1, event.get().offers().offers().size());
-  ASSERT_EQ(offer.resources(), event.get().offers().offers(0).resources());
+  AWAIT_READY(offers2);
+  ASSERT_EQ(1, offers2->offers().size());
+  ASSERT_EQ(offer.resources(), offers2->offers(0).resources());
 
-  Shutdown(); // Must shutdown before 'containerizer' gets deallocated.
+  EXPECT_CALL(*scheduler, disconnected(_))
+    .Times(AtMost(1));
 }
 
 
@@ -847,31 +1068,36 @@ TEST_P(SchedulerTest, Revive)
   master::Flags flags = CreateMasterFlags();
   flags.authenticate_frameworks = false;
 
-  Try<PID<Master>> master = StartMaster(flags);
+  Try<Owned<cluster::Master>> master = StartMaster(flags);
   ASSERT_SOME(master);
 
-  Try<PID<Slave>> slave = StartSlave();
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
   ASSERT_SOME(slave);
 
-  Callbacks callbacks;
+  auto scheduler = std::make_shared<MockV1HTTPScheduler>();
 
   Future<Nothing> connected;
-  EXPECT_CALL(callbacks, connected())
-    .WillOnce(FutureSatisfy(&connected));
+  EXPECT_CALL(*scheduler, connected(_))
+    .WillOnce(FutureSatisfy(&connected))
+    .WillRepeatedly(Return()); // Ignore future invocations.
 
-  Mesos mesos(
-      master.get(),
-      GetParam(),
-      lambda::bind(&Callbacks::connected, lambda::ref(callbacks)),
-      lambda::bind(&Callbacks::disconnected, lambda::ref(callbacks)),
-      lambda::bind(&Callbacks::received, lambda::ref(callbacks), lambda::_1));
+  ContentType contentType = GetParam();
+
+  scheduler::TestV1Mesos mesos(master.get()->pid, contentType, scheduler);
 
   AWAIT_READY(connected);
 
-  Queue<Event> events;
+  Future<Event::Subscribed> subscribed;
+  EXPECT_CALL(*scheduler, subscribed(_, _))
+    .WillOnce(FutureArg<1>(&subscribed));
 
-  EXPECT_CALL(callbacks, received(_))
-    .WillRepeatedly(Enqueue(&events));
+  EXPECT_CALL(*scheduler, heartbeat(_))
+    .WillRepeatedly(Return()); // Ignore heartbeats.
+
+  Future<Event::Offers> offers1;
+  EXPECT_CALL(*scheduler, offers(_, _))
+    .WillOnce(FutureArg<1>(&offers1));
 
   {
     Call call;
@@ -883,21 +1109,22 @@ TEST_P(SchedulerTest, Revive)
     mesos.send(call);
   }
 
-  Future<Event> event = events.get();
-  AWAIT_READY(event);
-  EXPECT_EQ(Event::SUBSCRIBED, event.get().type());
+  AWAIT_READY(subscribed);
 
-  v1::FrameworkID id(event.get().subscribed().framework_id());
+  v1::FrameworkID frameworkId(subscribed->framework_id());
 
-  event = events.get();
-  AWAIT_READY(event);
-  EXPECT_EQ(Event::OFFERS, event.get().type());
-  EXPECT_NE(0, event.get().offers().offers().size());
+  AWAIT_READY(offers1);
+  EXPECT_NE(0, offers1->offers().size());
 
-  v1::Offer offer = event.get().offers().offers(0);
+  const v1::Offer& offer = offers1->offers(0);
+
+  Future<Event::Offers> offers2;
+  EXPECT_CALL(*scheduler, offers(_, _))
+    .WillOnce(FutureArg<1>(&offers2));
+
   {
     Call call;
-    call.mutable_framework_id()->CopyFrom(id);
+    call.mutable_framework_id()->CopyFrom(frameworkId);
     call.set_type(Call::DECLINE);
 
     Call::Decline* decline = call.mutable_decline();
@@ -917,25 +1144,24 @@ TEST_P(SchedulerTest, Revive)
   Clock::advance(Minutes(30));
   Clock::settle();
 
-  event = events.get();
-  ASSERT_TRUE(event.isPending());
+  ASSERT_TRUE(offers2.isPending());
 
   // On revival the filters should be cleared and the scheduler should
   // get another offer with same amount of resources.
   {
     Call call;
-    call.mutable_framework_id()->CopyFrom(id);
+    call.mutable_framework_id()->CopyFrom(frameworkId);
     call.set_type(Call::REVIVE);
 
     mesos.send(call);
   }
 
-  AWAIT_READY(event);
-  EXPECT_EQ(Event::OFFERS, event.get().type());
-  EXPECT_NE(0, event.get().offers().offers().size());
-  ASSERT_EQ(offer.resources(), event.get().offers().offers(0).resources());
+  AWAIT_READY(offers2);
+  EXPECT_NE(0, offers2->offers().size());
+  ASSERT_EQ(offer.resources(), offers2->offers(0).resources());
 
-  Shutdown(); // Must shutdown before 'containerizer' gets deallocated.
+  EXPECT_CALL(*scheduler, disconnected(_))
+    .Times(AtMost(1));
 }
 
 
@@ -944,31 +1170,36 @@ TEST_P(SchedulerTest, Suppress)
   master::Flags flags = CreateMasterFlags();
   flags.authenticate_frameworks = false;
 
-  Try<PID<Master>> master = StartMaster(flags);
+  Try<Owned<cluster::Master>> master = StartMaster(flags);
   ASSERT_SOME(master);
 
-  Try<PID<Slave>> slave = StartSlave();
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
   ASSERT_SOME(slave);
 
-  Callbacks callbacks;
+  auto scheduler = std::make_shared<MockV1HTTPScheduler>();
 
   Future<Nothing> connected;
-  EXPECT_CALL(callbacks, connected())
-    .WillOnce(FutureSatisfy(&connected));
+  EXPECT_CALL(*scheduler, connected(_))
+    .WillOnce(FutureSatisfy(&connected))
+    .WillRepeatedly(Return()); // Ignore future invocations.
 
-  Mesos mesos(
-      master.get(),
-      GetParam(),
-      lambda::bind(&Callbacks::connected, lambda::ref(callbacks)),
-      lambda::bind(&Callbacks::disconnected, lambda::ref(callbacks)),
-      lambda::bind(&Callbacks::received, lambda::ref(callbacks), lambda::_1));
+  ContentType contentType = GetParam();
+
+  scheduler::TestV1Mesos mesos(master.get()->pid, contentType, scheduler);
 
   AWAIT_READY(connected);
 
-  Queue<Event> events;
+  Future<Event::Subscribed> subscribed;
+  EXPECT_CALL(*scheduler, subscribed(_, _))
+    .WillOnce(FutureArg<1>(&subscribed));
 
-  EXPECT_CALL(callbacks, received(_))
-    .WillRepeatedly(Enqueue(&events));
+  EXPECT_CALL(*scheduler, heartbeat(_))
+    .WillRepeatedly(Return()); // Ignore heartbeats.
+
+  Future<Event::Offers> offers1;
+  EXPECT_CALL(*scheduler, offers(_, _))
+    .WillOnce(FutureArg<1>(&offers1));
 
   {
     Call call;
@@ -980,21 +1211,22 @@ TEST_P(SchedulerTest, Suppress)
     mesos.send(call);
   }
 
-  Future<Event> event = events.get();
-  AWAIT_READY(event);
-  EXPECT_EQ(Event::SUBSCRIBED, event.get().type());
+  AWAIT_READY(subscribed);
 
-  v1::FrameworkID id(event.get().subscribed().framework_id());
+  v1::FrameworkID frameworkId(subscribed->framework_id());
 
-  event = events.get();
-  AWAIT_READY(event);
-  EXPECT_EQ(Event::OFFERS, event.get().type());
-  EXPECT_NE(0, event.get().offers().offers().size());
+  AWAIT_READY(offers1);
+  EXPECT_NE(0, offers1->offers().size());
 
-  v1::Offer offer = event.get().offers().offers(0);
+  const v1::Offer& offer = offers1->offers(0);
+
+  Future<Event::Offers> offers2;
+  EXPECT_CALL(*scheduler, offers(_, _))
+    .WillOnce(FutureArg<1>(&offers2));
+
   {
     Call call;
-    call.mutable_framework_id()->CopyFrom(id);
+    call.mutable_framework_id()->CopyFrom(frameworkId);
     call.set_type(Call::DECLINE);
 
     Call::Decline* decline = call.mutable_decline();
@@ -1013,7 +1245,7 @@ TEST_P(SchedulerTest, Suppress)
 
   {
     Call call;
-    call.mutable_framework_id()->CopyFrom(id);
+    call.mutable_framework_id()->CopyFrom(frameworkId);
     call.set_type(Call::SUPPRESS);
 
     mesos.send(call);
@@ -1030,25 +1262,25 @@ TEST_P(SchedulerTest, Suppress)
   Clock::advance(Minutes(100));
   Clock::settle();
 
-  event = events.get();
-  ASSERT_TRUE(event.isPending());
+  ASSERT_TRUE(offers2.isPending());
 
   // On reviving offers the scheduler should get another offer with same amount
   // of resources.
   {
     Call call;
-    call.mutable_framework_id()->CopyFrom(id);
+    call.mutable_framework_id()->CopyFrom(frameworkId);
     call.set_type(Call::REVIVE);
 
     mesos.send(call);
   }
 
-  AWAIT_READY(event);
-  EXPECT_EQ(Event::OFFERS, event.get().type());
-  EXPECT_NE(0, event.get().offers().offers().size());
-  ASSERT_EQ(offer.resources(), event.get().offers().offers(0).resources());
+  AWAIT_READY(offers2);
 
-  Shutdown(); // Must shutdown before 'containerizer' gets deallocated.
+  EXPECT_NE(0, offers2->offers().size());
+  ASSERT_EQ(offer.resources(), offers2->offers(0).resources());
+
+  EXPECT_CALL(*scheduler, disconnected(_))
+    .Times(AtMost(1));
 }
 
 
@@ -1057,35 +1289,40 @@ TEST_P(SchedulerTest, Message)
   master::Flags flags = CreateMasterFlags();
   flags.authenticate_frameworks = false;
 
-  Try<PID<Master>> master = StartMaster(flags);
+  Try<Owned<cluster::Master>> master = StartMaster(flags);
   ASSERT_SOME(master);
 
-  MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  auto scheduler = std::make_shared<MockV1HTTPScheduler>();
+  auto executor = std::make_shared<MockV1HTTPExecutor>();
 
-  TestContainerizer containerizer(&exec);
+  ExecutorID executorId = DEFAULT_EXECUTOR_ID;
+  TestContainerizer containerizer(executorId, executor);
 
-  Try<PID<Slave>> slave = StartSlave(&containerizer);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
   ASSERT_SOME(slave);
 
-  Callbacks callbacks;
-
   Future<Nothing> connected;
-  EXPECT_CALL(callbacks, connected())
-    .WillOnce(FutureSatisfy(&connected));
+  EXPECT_CALL(*scheduler, connected(_))
+    .WillOnce(FutureSatisfy(&connected))
+    .WillRepeatedly(Return()); // Ignore future invocations.
 
-  Mesos mesos(
-      master.get(),
-      GetParam(),
-      lambda::bind(&Callbacks::connected, lambda::ref(callbacks)),
-      lambda::bind(&Callbacks::disconnected, lambda::ref(callbacks)),
-      lambda::bind(&Callbacks::received, lambda::ref(callbacks), lambda::_1));
+  ContentType contentType = GetParam();
+
+  scheduler::TestV1Mesos mesos(master.get()->pid, contentType, scheduler);
 
   AWAIT_READY(connected);
 
-  Queue<Event> events;
+  Future<Event::Subscribed> subscribed;
+  EXPECT_CALL(*scheduler, subscribed(_, _))
+    .WillOnce(FutureArg<1>(&subscribed));
 
-  EXPECT_CALL(callbacks, received(_))
-    .WillRepeatedly(Enqueue(&events));
+  EXPECT_CALL(*scheduler, heartbeat(_))
+    .WillRepeatedly(Return()); // Ignore heartbeats.
+
+  Future<Event::Offers> offers;
+  EXPECT_CALL(*scheduler, offers(_, _))
+    .WillOnce(FutureArg<1>(&offers));
 
   {
     Call call;
@@ -1097,31 +1334,38 @@ TEST_P(SchedulerTest, Message)
     mesos.send(call);
   }
 
-  Future<Event> event = events.get();
-  AWAIT_READY(event);
-  EXPECT_EQ(Event::SUBSCRIBED, event.get().type());
+  AWAIT_READY(subscribed);
 
-  v1::FrameworkID id(event.get().subscribed().framework_id());
+  v1::FrameworkID frameworkId(subscribed->framework_id());
 
-  event = events.get();
-  AWAIT_READY(event);
-  EXPECT_EQ(Event::OFFERS, event.get().type());
-  EXPECT_NE(0, event.get().offers().offers().size());
+  AWAIT_READY(offers);
+  EXPECT_NE(0, offers->offers().size());
 
-  EXPECT_CALL(exec, registered(_, _, _, _))
-    .Times(1);
+  EXPECT_CALL(*executor, connected(_))
+    .WillOnce(executor::SendSubscribe(frameworkId, evolve(executorId)));
 
-  EXPECT_CALL(exec, launchTask(_, _))
-    .WillOnce(SendStatusUpdateFromTask(TASK_RUNNING));
+  EXPECT_CALL(*executor, subscribed(_, _));
 
-  v1::Offer offer = event.get().offers().offers(0);
+  EXPECT_CALL(*executor, launch(_, _))
+    .WillOnce(executor::SendUpdateFromTask(
+        frameworkId, evolve(executorId), v1::TASK_RUNNING));
+
+  Future<Nothing> acknowledged;
+  EXPECT_CALL(*executor, acknowledged(_, _))
+    .WillOnce(FutureSatisfy(&acknowledged));
+
+  Future<Event::Update> update;
+  EXPECT_CALL(*scheduler, update(_, _))
+    .WillOnce(FutureArg<1>(&update));
+
+  const v1::Offer& offer = offers->offers(0);
 
   v1::TaskInfo taskInfo =
     evolve(createTask(devolve(offer), "", DEFAULT_EXECUTOR_ID));
 
   {
     Call call;
-    call.mutable_framework_id()->CopyFrom(id);
+    call.mutable_framework_id()->CopyFrom(frameworkId);
     call.set_type(Call::ACCEPT);
 
     Call::Accept* accept = call.mutable_accept();
@@ -1134,18 +1378,18 @@ TEST_P(SchedulerTest, Message)
     mesos.send(call);
   }
 
-  event = events.get();
-  AWAIT_READY(event);
-  EXPECT_EQ(Event::UPDATE, event.get().type());
-  EXPECT_EQ(v1::TASK_RUNNING, event.get().update().status().state());
+  AWAIT_READY(acknowledged);
+  AWAIT_READY(update);
 
-  Future<string> data;
-  EXPECT_CALL(exec, frameworkMessage(_, _))
-    .WillOnce(FutureArg<1>(&data));
+  EXPECT_EQ(v1::TASK_RUNNING, update->status().state());
+
+  Future<v1::executor::Event::Message> message;
+  EXPECT_CALL(*executor, message(_, _))
+    .WillOnce(FutureArg<1>(&message));
 
   {
     Call call;
-    call.mutable_framework_id()->CopyFrom(id);
+    call.mutable_framework_id()->CopyFrom(frameworkId);
     call.set_type(Call::MESSAGE);
 
     Call::Message* message = call.mutable_message();
@@ -1156,9 +1400,17 @@ TEST_P(SchedulerTest, Message)
     mesos.send(call);
   }
 
-  AWAIT_ASSERT_EQ("hello world", data);
+  AWAIT_READY(message);
+  ASSERT_EQ("hello world", message->data());
 
-  Shutdown(); // Must shutdown before 'containerizer' gets deallocated.
+  EXPECT_CALL(*executor, shutdown(_))
+    .Times(AtMost(1));
+
+  EXPECT_CALL(*executor, disconnected(_))
+    .Times(AtMost(1));
+
+  EXPECT_CALL(*scheduler, disconnected(_))
+    .Times(AtMost(1));
 }
 
 
@@ -1167,28 +1419,28 @@ TEST_P(SchedulerTest, Request)
   master::Flags flags = CreateMasterFlags();
   flags.authenticate_frameworks = false;
 
-  Try<PID<Master>> master = StartMaster(flags);
+  Try<Owned<cluster::Master>> master = StartMaster(flags);
   ASSERT_SOME(master);
 
-  Callbacks callbacks;
+  auto scheduler = std::make_shared<MockV1HTTPScheduler>();
 
   Future<Nothing> connected;
-  EXPECT_CALL(callbacks, connected())
-    .WillOnce(FutureSatisfy(&connected));
+  EXPECT_CALL(*scheduler, connected(_))
+    .WillOnce(FutureSatisfy(&connected))
+    .WillRepeatedly(Return()); // Ignore future invocations.
 
-  Mesos mesos(
-      master.get(),
-      GetParam(),
-      lambda::bind(&Callbacks::connected, lambda::ref(callbacks)),
-      lambda::bind(&Callbacks::disconnected, lambda::ref(callbacks)),
-      lambda::bind(&Callbacks::received, lambda::ref(callbacks), lambda::_1));
+  ContentType contentType = GetParam();
+
+  scheduler::TestV1Mesos mesos(master.get()->pid, contentType, scheduler);
 
   AWAIT_READY(connected);
 
-  Queue<Event> events;
+  Future<Event::Subscribed> subscribed;
+  EXPECT_CALL(*scheduler, subscribed(_, _))
+    .WillOnce(FutureArg<1>(&subscribed));
 
-  EXPECT_CALL(callbacks, received(_))
-    .WillRepeatedly(Enqueue(&events));
+  EXPECT_CALL(*scheduler, heartbeat(_))
+    .WillRepeatedly(Return()); // Ignore heartbeats.
 
   {
     Call call;
@@ -1200,18 +1452,16 @@ TEST_P(SchedulerTest, Request)
     mesos.send(call);
   }
 
-  Future<Event> event = events.get();
-  AWAIT_READY(event);
-  EXPECT_EQ(Event::SUBSCRIBED, event.get().type());
+  AWAIT_READY(subscribed);
 
-  v1::FrameworkID id(event.get().subscribed().framework_id());
+  v1::FrameworkID frameworkId(subscribed->framework_id());
 
   Future<Nothing> requestResources =
     FUTURE_DISPATCH(_, &MesosAllocatorProcess::requestResources);
 
   {
     Call call;
-    call.mutable_framework_id()->CopyFrom(id);
+    call.mutable_framework_id()->CopyFrom(frameworkId);
     call.set_type(Call::REQUEST);
 
     // Create a dummy request.
@@ -1223,7 +1473,8 @@ TEST_P(SchedulerTest, Request)
 
   AWAIT_READY(requestResources);
 
-  Shutdown();
+  EXPECT_CALL(*scheduler, disconnected(_))
+    .Times(AtMost(1));
 }
 
 

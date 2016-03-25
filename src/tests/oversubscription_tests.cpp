@@ -85,14 +85,6 @@ protected:
   virtual void SetUp()
   {
     MesosTest::SetUp();
-
-    // Get the current value of LD_LIBRARY_PATH.
-    originalLDLibraryPath = os::libraries::paths();
-
-    // Append our library path to LD_LIBRARY_PATH so that dlopen can
-    // search the library directory for module libraries.
-    os::libraries::appendPaths(
-        path::join(tests::flags.build_dir, "src", ".libs"));
   }
 
   virtual void TearDown()
@@ -106,16 +98,16 @@ protected:
       }
     }
 
-    // Restore LD_LIBRARY_PATH environment variable.
-    os::libraries::setPaths(originalLDLibraryPath);
-
     MesosTest::TearDown();
   }
 
   void loadFixedResourceEstimatorModule(const string& resources)
   {
+    string libraryPath = getModulePath("fixed_resource_estimator");
+
     Modules::Library* library = modules.add_libraries();
     library->set_name("fixed_resource_estimator");
+    library->set_file(libraryPath);
 
     Modules::Library::Module* module = library->add_modules();
     module->set_name(FIXED_RESOURCE_ESTIMATOR_NAME);
@@ -176,7 +168,6 @@ protected:
   }
 
 private:
-  string originalLDLibraryPath;
   Modules modules;
 };
 
@@ -186,7 +177,7 @@ private:
 // the ResourceMonitor.
 TEST_F(OversubscriptionTest, FetchResourceUsageFromMonitor)
 {
-  Try<PID<Master>> master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
@@ -206,16 +197,18 @@ TEST_F(OversubscriptionTest, FetchResourceUsageFromMonitor)
   EXPECT_CALL(resourceEstimator, initialize(_))
     .WillOnce(DoAll(FutureArg<0>(&usageCallback), Return(Nothing())));
 
-  Try<PID<Slave>> slave = StartSlave(
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  Try<Owned<cluster::Slave>> slave = StartSlave(
+      detector.get(),
       &containerizer,
       &resourceEstimator,
       CreateSlaveFlags());
-
   ASSERT_SOME(slave);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(&driver, _, _));
 
@@ -257,10 +250,11 @@ TEST_F(OversubscriptionTest, FetchResourceUsageFromMonitor)
             DEFAULT_EXECUTOR_ID);
   ASSERT_EQ(usage.get().executors(0).statistics(), statistics);
 
+  EXPECT_CALL(exec, shutdown(_))
+    .Times(AtMost(1));
+
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
@@ -268,7 +262,7 @@ TEST_F(OversubscriptionTest, FetchResourceUsageFromMonitor)
 // oversubscribed resources to the master.
 TEST_F(OversubscriptionTest, ForwardUpdateSlaveMessage)
 {
-  Try<PID<Master>> master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   Future<SlaveRegisteredMessage> slaveRegistered =
@@ -283,8 +277,11 @@ TEST_F(OversubscriptionTest, ForwardUpdateSlaveMessage)
     .WillOnce(InvokeWithoutArgs(&estimations, &Queue<Resources>::get));
 
   slave::Flags flags = CreateSlaveFlags();
-  Try<PID<Slave>> slave = StartSlave(&resourceEstimator, flags);
 
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  Try<Owned<cluster::Slave>> slave =
+    StartSlave(detector.get(), &resourceEstimator, flags);
   ASSERT_SOME(slave);
 
   AWAIT_READY(slaveRegistered);
@@ -322,8 +319,6 @@ TEST_F(OversubscriptionTest, ForwardUpdateSlaveMessage)
   ASSERT_EQ(
       1.0,
       metrics.values["master/cpus_revocable_total"]);
-
-  Shutdown();
 }
 
 
@@ -332,11 +327,12 @@ TEST_F(OversubscriptionTest, ForwardUpdateSlaveMessage)
 TEST_F(OversubscriptionTest, RevocableOffer)
 {
   // Start the master.
-  Try<PID<Master>> master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   // Start the slave with mock executor and test resource estimator.
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer(&exec);
 
   MockResourceEstimator resourceEstimator;
 
@@ -348,7 +344,10 @@ TEST_F(OversubscriptionTest, RevocableOffer)
 
   slave::Flags flags = CreateSlaveFlags();
 
-  Try<PID<Slave>> slave = StartSlave(&exec, &resourceEstimator, flags);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  Try<Owned<cluster::Slave>> slave =
+    StartSlave(detector.get(), &containerizer, &resourceEstimator, flags);
   ASSERT_SOME(slave);
 
   // Start the framework which accepts revocable resources.
@@ -358,7 +357,7 @@ TEST_F(OversubscriptionTest, RevocableOffer)
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, framework, master.get(), DEFAULT_CREDENTIAL);
+      &sched, framework, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(&driver, _, _));
 
@@ -416,8 +415,6 @@ TEST_F(OversubscriptionTest, RevocableOffer)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
@@ -426,7 +423,7 @@ TEST_F(OversubscriptionTest, RevocableOffer)
 TEST_F(OversubscriptionTest, RescindRevocableOffer)
 {
   // Start the master.
-  Try<PID<Master>> master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   // Start the slave with test resource estimator.
@@ -442,7 +439,10 @@ TEST_F(OversubscriptionTest, RescindRevocableOffer)
 
   slave::Flags flags = CreateSlaveFlags();
 
-  Try<PID<Slave>> slave = StartSlave(&resourceEstimator, flags);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  Try<Owned<cluster::Slave>> slave =
+    StartSlave(detector.get(), &resourceEstimator, flags);
   ASSERT_SOME(slave);
 
   // Start the framework which desires revocable resources.
@@ -452,7 +452,7 @@ TEST_F(OversubscriptionTest, RescindRevocableOffer)
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, framework, master.get(), DEFAULT_CREDENTIAL);
+      &sched, framework, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(&driver, _, _));
 
@@ -512,8 +512,6 @@ TEST_F(OversubscriptionTest, RescindRevocableOffer)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
@@ -522,7 +520,7 @@ TEST_F(OversubscriptionTest, RescindRevocableOffer)
 // uses a fixed resource estimator should stay the same.
 TEST_F(OversubscriptionTest, FixedResourceEstimator)
 {
-  Try<PID<Master>> master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   Future<SlaveRegisteredMessage> slaveRegistered =
@@ -536,7 +534,8 @@ TEST_F(OversubscriptionTest, FixedResourceEstimator)
   slave::Flags flags = CreateSlaveFlags();
   flags.resource_estimator = FIXED_RESOURCE_ESTIMATOR_NAME;
 
-  Try<PID<Slave>> slave = StartSlave(flags);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), flags);
   ASSERT_SOME(slave);
 
   AWAIT_READY(slaveRegistered);
@@ -567,7 +566,7 @@ TEST_F(OversubscriptionTest, FixedResourceEstimator)
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, framework, master.get(), DEFAULT_CREDENTIAL);
+      &sched, framework, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(_, _, _));
 
@@ -615,8 +614,6 @@ TEST_F(OversubscriptionTest, FixedResourceEstimator)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
@@ -625,7 +622,7 @@ TEST_F(OversubscriptionTest, FixedResourceEstimator)
 // the ResourceMonitor.
 TEST_F(OversubscriptionTest, QoSFetchResourceUsageFromMonitor)
 {
-  Try<PID<Master>> master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
@@ -645,16 +642,18 @@ TEST_F(OversubscriptionTest, QoSFetchResourceUsageFromMonitor)
   EXPECT_CALL(controller, initialize(_))
     .WillOnce(DoAll(FutureArg<0>(&usageCallback), Return(Nothing())));
 
-  Try<PID<Slave>> slave = StartSlave(
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  Try<Owned<cluster::Slave>> slave = StartSlave(
+      detector.get(),
       &containerizer,
       &controller,
       CreateSlaveFlags());
-
   ASSERT_SOME(slave);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(&driver, _, _));
 
@@ -696,10 +695,11 @@ TEST_F(OversubscriptionTest, QoSFetchResourceUsageFromMonitor)
             DEFAULT_EXECUTOR_ID);
   ASSERT_EQ(usage.get().executors(0).statistics(), statistics);
 
+  EXPECT_CALL(exec, shutdown(_))
+    .Times(AtMost(1));
+
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
@@ -717,7 +717,7 @@ TEST_F(OversubscriptionTest, Reregistration)
 
   StandaloneMasterDetector detector;
 
-  Try<PID<Slave>> slave = StartSlave(&detector, flags);
+  Try<Owned<cluster::Slave>> slave = StartSlave(&detector, flags);
   ASSERT_SOME(slave);
 
   AWAIT_READY(slaveRecover);
@@ -729,7 +729,7 @@ TEST_F(OversubscriptionTest, Reregistration)
 
   // Start a master, we expect the slave to send the update
   // message after registering!
-  Try<PID<Master>> master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   Future<SlaveRegisteredMessage> slaveRegistered =
@@ -738,7 +738,7 @@ TEST_F(OversubscriptionTest, Reregistration)
   Future<UpdateSlaveMessage> update =
     FUTURE_PROTOBUF(UpdateSlaveMessage(), _, _);
 
-  detector.appoint(master.get());
+  detector.appoint(master.get()->pid);
 
   AWAIT_READY(slaveRegistered);
   AWAIT_READY(update);
@@ -752,14 +752,10 @@ TEST_F(OversubscriptionTest, Reregistration)
 
   update = FUTURE_PROTOBUF(UpdateSlaveMessage(), _, _);
 
-  detector.appoint(master.get());
+  detector.appoint(master.get()->pid);
 
   AWAIT_READY(slaveReregistered);
   AWAIT_READY(update);
-
-  // Need to shutdown explicitly because the slave holds
-  // a pointer to the detector on our test stack!
-  Shutdown();
 }
 
 
@@ -807,7 +803,7 @@ TEST_F(OversubscriptionTest, ReceiveQoSCorrection)
 // framework.
 TEST_F(OversubscriptionTest, QoSCorrectionKill)
 {
-  Try<PID<Master>> master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   MockQoSController controller;
@@ -825,7 +821,10 @@ TEST_F(OversubscriptionTest, QoSCorrectionKill)
   EXPECT_CALL(controller, initialize(_))
     .WillOnce(DoAll(FutureArg<0>(&usageCallback), Return(Nothing())));
 
-  Try<PID<Slave>> slave = StartSlave(&controller, CreateSlaveFlags());
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  Try<Owned<cluster::Slave>> slave =
+    StartSlave(detector.get(), &controller, CreateSlaveFlags());
   ASSERT_SOME(slave);
 
   // Verify presence and initial value of counter for preempted
@@ -836,7 +835,7 @@ TEST_F(OversubscriptionTest, QoSCorrectionKill)
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
   Future<FrameworkID> frameworkId;
   EXPECT_CALL(sched, registered(&driver, _, _))
@@ -898,8 +897,6 @@ TEST_F(OversubscriptionTest, QoSCorrectionKill)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
@@ -914,10 +911,11 @@ TEST_F(OversubscriptionTest, QoSCorrectionKill)
 //   5. Check if revocable offers are being sent to the framework.
 TEST_F(OversubscriptionTest, UpdateAllocatorOnSchedulerFailover)
 {
-  Try<PID<Master>> master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer(&exec);
 
   MockResourceEstimator resourceEstimator;
 
@@ -929,7 +927,10 @@ TEST_F(OversubscriptionTest, UpdateAllocatorOnSchedulerFailover)
 
   slave::Flags flags = CreateSlaveFlags();
 
-  Try<PID<Slave>> slave = StartSlave(&exec, &resourceEstimator, flags);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  Try<Owned<cluster::Slave>> slave =
+    StartSlave(detector.get(), &containerizer, &resourceEstimator, flags);
   ASSERT_SOME(slave);
 
   // Launch the first (i.e., failing) scheduler and wait until
@@ -940,7 +941,7 @@ TEST_F(OversubscriptionTest, UpdateAllocatorOnSchedulerFailover)
 
   MockScheduler sched1;
   MesosSchedulerDriver driver1(
-      &sched1, framework1, master.get(), DEFAULT_CREDENTIAL);
+      &sched1, framework1, master.get()->pid, DEFAULT_CREDENTIAL);
 
   Future<FrameworkID> frameworkId;
   EXPECT_CALL(sched1, registered(&driver1, _, _))
@@ -972,7 +973,7 @@ TEST_F(OversubscriptionTest, UpdateAllocatorOnSchedulerFailover)
   framework2.add_capabilities()->set_type(capabilityType);
 
   MesosSchedulerDriver driver2(
-      &sched2, framework2, master.get(), DEFAULT_CREDENTIAL);
+      &sched2, framework2, master.get()->pid, DEFAULT_CREDENTIAL);
 
   Future<Nothing> sched2Registered;
   EXPECT_CALL(sched2, registered(&driver2, frameworkId.get(), _))
@@ -1021,18 +1022,17 @@ TEST_F(OversubscriptionTest, UpdateAllocatorOnSchedulerFailover)
 
   EXPECT_EQ(DRIVER_ABORTED, driver1.stop());
   EXPECT_EQ(DRIVER_STOPPED, driver1.join());
-
-  Shutdown();
 }
 
 TEST_F(OversubscriptionTest, RemoveCapabilitiesOnSchedulerFailover)
 {
   // Start the master.
-  Try<PID<Master>> master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   // Start the slave with mock executor and test resource estimator.
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer(&exec);
 
   MockResourceEstimator resourceEstimator;
 
@@ -1044,7 +1044,10 @@ TEST_F(OversubscriptionTest, RemoveCapabilitiesOnSchedulerFailover)
 
   slave::Flags flags = CreateSlaveFlags();
 
-  Try<PID<Slave>> slave = StartSlave(&exec, &resourceEstimator, flags);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  Try<Owned<cluster::Slave>> slave =
+    StartSlave(detector.get(), &containerizer, &resourceEstimator, flags);
   ASSERT_SOME(slave);
 
   // Start the framework which accepts revocable resources.
@@ -1054,7 +1057,7 @@ TEST_F(OversubscriptionTest, RemoveCapabilitiesOnSchedulerFailover)
 
   MockScheduler sched1;
   MesosSchedulerDriver driver1(
-      &sched1, framework1, master.get(), DEFAULT_CREDENTIAL);
+      &sched1, framework1, master.get()->pid, DEFAULT_CREDENTIAL);
 
   Future<FrameworkID> frameworkId;
   EXPECT_CALL(sched1, registered(&driver1, _, _))
@@ -1094,7 +1097,7 @@ TEST_F(OversubscriptionTest, RemoveCapabilitiesOnSchedulerFailover)
 
   MockScheduler sched2;
   MesosSchedulerDriver driver2(
-      &sched2, framework2, master.get(), DEFAULT_CREDENTIAL);
+      &sched2, framework2, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched2, registered(&driver2, _, _));
 
@@ -1121,7 +1124,8 @@ TEST_F(OversubscriptionTest, RemoveCapabilitiesOnSchedulerFailover)
   driver1.stop();
   driver1.join();
 
-  Shutdown();
+  driver2.stop();
+  driver2.join();
 }
 
 

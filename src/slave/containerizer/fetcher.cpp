@@ -145,12 +145,31 @@ Try<Nothing> Fetcher::validateUri(const string& uri)
 }
 
 
+Try<Nothing> Fetcher::validateFilename(const string& filename)
+{
+  Try<string> result = Path(filename).basename();
+  if (result.isError()) {
+    return Error(result.error());
+  }
+
+  return Nothing();
+}
+
+
 static Try<Nothing> validateUris(const CommandInfo& commandInfo)
 {
   foreach (const CommandInfo::URI& uri, commandInfo.uris()) {
-    Try<Nothing> validation = Fetcher::validateUri(uri.value());
-    if (validation.isError()) {
-      return Error(validation.error());
+    Try<Nothing> uriValidation = Fetcher::validateUri(uri.value());
+    if (uriValidation.isError()) {
+      return Error(uriValidation.error());
+    }
+
+    if (uri.has_filename()) {
+      Try<Nothing> filenameValidation =
+          Fetcher::validateFilename(uri.filename());
+      if (filenameValidation.isError()) {
+        return Error(filenameValidation.error());
+      }
     }
   }
 
@@ -198,7 +217,7 @@ Result<string> Fetcher::uriToLocalPath(
 }
 
 
-bool Fetcher::isNetUri(const std::string& uri)
+bool Fetcher::isNetUri(const string& uri)
 {
   return strings::startsWith(uri, "http://")  ||
          strings::startsWith(uri, "https://") ||
@@ -752,6 +771,11 @@ Future<Nothing> FetcherProcess::run(
   // environment variable.
   map<string, string> environment = os::environment();
 
+  // The libprocess port is explicitly removed because this will conflict
+  // with the already-running agent.
+  environment.erase("LIBPROCESS_PORT");
+  environment.erase("LIBPROCESS_ADVERTISE_PORT");
+
   environment["MESOS_FETCHER_INFO"] = stringify(JSON::protobuf(info));
 
   if (!flags.hadoop_home.empty()) {
@@ -763,13 +787,11 @@ Future<Nothing> FetcherProcess::run(
   Try<Subprocess> fetcherSubprocess = subprocess(
       command,
       Subprocess::PIPE(),
-      Subprocess::FD(out.get()),
-      Subprocess::FD(err.get()),
+      Subprocess::FD(out.get(), Subprocess::IO::OWNED),
+      Subprocess::FD(err.get(), Subprocess::IO::OWNED),
       environment);
 
   if (fetcherSubprocess.isError()) {
-    os::close(out.get());
-    os::close(err.get());
     return Failure("Failed to execute mesos-fetcher: " +
                    fetcherSubprocess.error());
   }
@@ -811,9 +833,6 @@ Future<Nothing> FetcherProcess::run(
     .onAny(defer(self(), [=](const Future<Nothing>&) {
       // Clear the subprocess PID remembered from running mesos-fetcher.
       subprocessPids.erase(containerId);
-
-      os::close(out.get());
-      os::close(err.get());
     }));
 }
 

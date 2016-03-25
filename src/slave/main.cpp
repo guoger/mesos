@@ -39,6 +39,10 @@
 
 #include "hook/manager.hpp"
 
+#ifdef __linux__
+#include "linux/systemd.hpp"
+#endif // __linux__
+
 #include "logging/logging.hpp"
 
 #include "master/detector.hpp"
@@ -94,44 +98,50 @@ int main(int argc, char** argv)
   // have one instance of libprocess per execution, we only want to
   // advertise the IP and port option once, here).
   Option<string> ip;
-  flags.add(&ip, "ip", "IP address to listen on");
+  flags.add(&ip,
+            "ip",
+            "IP address to listen on. This cannot be used in conjunction\n"
+            "with `--ip_discovery_command`.");
 
   uint16_t port;
-  flags.add(&port, "port", "Port to listen on", SlaveInfo().port());
+  flags.add(&port,
+            "port",
+            "Port to listen on.",
+            SlaveInfo().port());
 
   Option<string> advertise_ip;
   flags.add(&advertise_ip,
             "advertise_ip",
-            "IP address advertised to reach mesos slave.\n"
-            "Mesos slave does not bind using this IP address.\n"
-            "However, this IP address may be used to access Mesos slave.");
+            "IP address advertised to reach this Mesos slave.\n"
+            "The slave does not bind to this IP address.\n"
+            "However, this IP address may be used to access this slave.");
 
   Option<string> advertise_port;
   flags.add(&advertise_port,
             "advertise_port",
-            "Port advertised to reach mesos slave (alongwith advertise_ip).\n"
-            "Mesos slave does not bind using this port.\n"
-            "However, this port (alongwith advertise_ip) may be used to\n"
-            "access Mesos slave.");
+            "Port advertised to reach this Mesos slave (along with\n"
+            "`advertise_ip`). The slave does not bind to this port.\n"
+            "However, this port (along with `advertise_ip`) may be used to\n"
+            "access this slave.");
 
   Option<string> master;
   flags.add(&master,
             "master",
             "May be one of:\n"
-            "  host:port\n"
-            "  zk://host1:port1,host2:port2,.../path\n"
-            "  zk://username:password@host1:port1,host2:port2,.../path\n"
-            "  file:///path/to/file (where file contains one of the above)");
+            "  `host:port`\n"
+            "  `zk://host1:port1,host2:port2,.../path`\n"
+            "  `zk://username:password@host1:port1,host2:port2,.../path`\n"
+            "  `file:///path/to/file` (where file contains one of the above)");
 
 
   // Optional IP discover script that will set the slave's IP.
   // If set, its output is expected to be a valid parseable IP string.
   Option<string> ip_discovery_command;
   flags.add(&ip_discovery_command,
-      "ip_discovery_command",
-      "Optional IP discovery binary: if set, it is expected to emit\n"
-      "the IP address which slave will try to bind to.\n"
-      "Cannot be used in conjunction with --ip.");
+            "ip_discovery_command",
+            "Optional IP discovery binary: if set, it is expected to emit\n"
+            "the IP address which the slave will try to bind to.\n"
+            "Cannot be used in conjunction with `--ip`.");
 
   Try<Nothing> load = flags.load("MESOS_", argc, argv);
 
@@ -153,7 +163,7 @@ int main(int argc, char** argv)
   }
 
   if (master.isNone()) {
-    cerr << flags.usage("Missing required option --master") << endl;
+    cerr << flags.usage("Missing required option `--master`") << endl;
     return EXIT_FAILURE;
   }
 
@@ -177,7 +187,7 @@ int main(int argc, char** argv)
   // Initialize libprocess.
   if (ip_discovery_command.isSome() && ip.isSome()) {
     EXIT(EXIT_FAILURE) << flags.usage(
-        "Only one of --ip or --ip_discovery_command should be specified");
+        "Only one of `--ip` or `--ip_discovery_command` should be specified");
   }
 
   if (ip_discovery_command.isSome()) {
@@ -202,7 +212,9 @@ int main(int argc, char** argv)
     os::setenv("LIBPROCESS_ADVERTISE_PORT", advertise_port.get());
   }
 
-  process::initialize("slave(1)");
+  const string id = process::ID::generate("slave"); // Process ID.
+
+  process::initialize(id);
 
   logging::initialize(argv[0], flags, true); // Catch signals.
 
@@ -221,6 +233,24 @@ int main(int argc, char** argv)
   }
 
   Fetcher fetcher;
+
+#ifdef __linux__
+  // Initialize systemd if it exists.
+  if (systemd::exists() && flags.systemd_enable_support) {
+    LOG(INFO) << "Inializing systemd state";
+
+    systemd::Flags systemdFlags;
+    systemdFlags.enabled = flags.systemd_enable_support;
+    systemdFlags.runtime_directory = flags.systemd_runtime_directory;
+    systemdFlags.cgroups_hierarchy = flags.cgroups_hierarchy;
+
+    Try<Nothing> initialize = systemd::initialize(systemdFlags);
+    if (initialize.isError()) {
+      EXIT(EXIT_FAILURE)
+        << "Failed to initialize systemd: " + initialize.error();
+    }
+  }
+#endif // __linux__
 
   Try<Containerizer*> containerizer =
     Containerizer::create(flags, false, &fetcher);
@@ -298,6 +328,7 @@ int main(int argc, char** argv)
   LOG(INFO) << "Starting Mesos slave";
 
   Slave* slave = new Slave(
+      id,
       flags,
       detector.get(),
       containerizer.get(),

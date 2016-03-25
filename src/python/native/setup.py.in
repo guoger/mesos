@@ -16,8 +16,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import ext_modules
-
 config = {
     'name': 'mesos.native',
     'version': '@PACKAGE_VERSION@',
@@ -28,13 +26,12 @@ config = {
     'namespace_packages': [ 'mesos' ],
     'packages': [ 'mesos', 'mesos.native' ],
     'package_dir': { '': 'src' },
-    'install_requires': [ 'mesos.interface == @PACKAGE_VERSION@' ],
+    'install_requires': [ 'mesos.executor == @PACKAGE_VERSION@',
+                          'mesos.scheduler == @PACKAGE_VERSION@'],
     'license': 'Apache 2.0',
     'keywords': 'mesos',
-    'classifiers': [ ],
-    'ext_modules': [ ext_modules.mesos_module ]
+    'classifiers': [ ]
 }
 
 from setuptools import setup
-
 setup(**config)

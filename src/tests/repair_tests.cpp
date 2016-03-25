@@ -20,6 +20,7 @@
 #include <process/future.hpp>
 #include <process/gtest.hpp>
 #include <process/http.hpp>
+#include <process/owned.hpp>
 #include <process/pid.hpp>
 #include <process/process.hpp>
 
@@ -30,11 +31,13 @@
 using mesos::internal::master::Master;
 
 using process::Future;
+using process::Owned;
 using process::PID;
 
 using process::http::BadRequest;
 using process::http::OK;
 using process::http::Response;
+using process::http::Unauthorized;
 
 using std::string;
 using std::vector;
@@ -91,53 +94,70 @@ string stringify(const JsonResponse& response)
 
 TEST_F(HealthTest, ObserveEndpoint)
 {
-  Try<PID<Master>> master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   // Empty get to the observe endpoint.
-  Future<Response> response = process::http::get(master.get(), "observe");
+  Future<Response> response = process::http::get(
+      master.get()->pid,
+      "observe",
+      None(),
+      createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+
   VALIDATE_BAD_RESPONSE(response, "Missing value for 'monitor'");
 
   // Empty post to the observe endpoint.
-  response = process::http::post(master.get(), "observe");
+  response = process::http::post(
+      master.get()->pid,
+      "observe",
+      createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+
   VALIDATE_BAD_RESPONSE(response, "Missing value for 'monitor'");
 
   // Query string is ignored.
-  response = process::http::post(master.get(), "observe?monitor=foo");
+  response = process::http::post(
+      master.get()->pid,
+      "observe?monitor=foo",
+      createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+
   VALIDATE_BAD_RESPONSE(response, "Missing value for 'monitor'");
 
   // Malformed value causes error.
   response = process::http::post(
-      master.get(),
+      master.get()->pid,
       "observe",
-      None(),
+      createBasicAuthHeaders(DEFAULT_CREDENTIAL),
       "monitor=foo%");
+
   VALIDATE_BAD_RESPONSE(
       response,
       "Unable to decode query string: Malformed % escape in 'foo%': '%'");
 
   // Empty value causes error.
   response = process::http::post(
-      master.get(),
+      master.get()->pid,
       "observe",
-      None(),
+      createBasicAuthHeaders(DEFAULT_CREDENTIAL),
       "monitor=");
+
   VALIDATE_BAD_RESPONSE(response, "Empty string for 'monitor'");
 
   // Missing hosts.
   response = process::http::post(
-      master.get(),
+      master.get()->pid,
       "observe",
-      None(),
+      createBasicAuthHeaders(DEFAULT_CREDENTIAL),
       "monitor=a");
+
   VALIDATE_BAD_RESPONSE(response, "Missing value for 'hosts'");
 
   // Missing level.
   response = process::http::post(
-      master.get(),
+      master.get()->pid,
       "observe",
-      None(),
+      createBasicAuthHeaders(DEFAULT_CREDENTIAL),
       "monitor=a&hosts=b");
+
   VALIDATE_BAD_RESPONSE(response, "Missing value for 'level'");
 
   // Good request is successful.
@@ -147,54 +167,114 @@ TEST_F(HealthTest, ObserveEndpoint)
   expected.isHealthy = true;
 
   response = process::http::post(
-      master.get(),
+      master.get()->pid,
       "observe",
-      None(),
+      createBasicAuthHeaders(DEFAULT_CREDENTIAL),
       "monitor=a&hosts=b&level=ok");
+
   VALIDATE_GOOD_RESPONSE(response, stringify(expected));
 
   // ok is case-insensitive.
   response = process::http::post(
-      master.get(),
+      master.get()->pid,
       "observe",
-      None(),
+      createBasicAuthHeaders(DEFAULT_CREDENTIAL),
       "monitor=a&hosts=b&level=Ok");
+
   VALIDATE_GOOD_RESPONSE(response, stringify(expected));
 
   response = process::http::post(
-      master.get(),
+      master.get()->pid,
       "observe",
-      None(),
+      createBasicAuthHeaders(DEFAULT_CREDENTIAL),
       "monitor=a&hosts=b&level=oK");
+
   VALIDATE_GOOD_RESPONSE(response, stringify(expected));
 
   response = process::http::post(
-      master.get(),
+      master.get()->pid,
       "observe",
-      None(),
+      createBasicAuthHeaders(DEFAULT_CREDENTIAL),
       "monitor=a&hosts=b&level=OK");
+
   VALIDATE_GOOD_RESPONSE(response, stringify(expected));
 
   // level != OK  is unhealthy.
   expected.isHealthy = false;
   response =
     process::http::post(
-      master.get(),
+      master.get()->pid,
       "observe",
-      None(),
+      createBasicAuthHeaders(DEFAULT_CREDENTIAL),
       "monitor=a&hosts=b&level=true");
+
   VALIDATE_GOOD_RESPONSE(response, stringify(expected));
 
   // Comma-separated hosts are parsed into an array.
   expected.hosts.push_back("e");
   response = process::http::post(
-      master.get(),
+      master.get()->pid,
       "observe",
-      None(),
+      createBasicAuthHeaders(DEFAULT_CREDENTIAL),
       "monitor=a&hosts=b,e&level=true");
-  VALIDATE_GOOD_RESPONSE(response, stringify(expected));
 
-  Shutdown();
+  VALIDATE_GOOD_RESPONSE(response, stringify(expected));
+}
+
+
+// Testing get without authentication and with bad credentials.
+TEST_F(HealthTest, ObserveEndpointBadAuthentication)
+{
+  // Set up a master with authentication required.
+  // Note that the default master test flags enable HTTP authentication.
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  // Headers for POSTs to maintenance endpoints without authentication.
+  process::http::Headers unauthenticatedHeaders;
+  unauthenticatedHeaders["Content-Type"] = "application/json";
+
+  // Bad credentials which should fail authentication.
+  Credential badCredential;
+  badCredential.set_principal("badPrincipal");
+  badCredential.set_secret("badSecret");
+
+  // Headers for POSTs to maintenance endpoints with bad authentication.
+  process::http::Headers badAuthenticationHeaders;
+  badAuthenticationHeaders = createBasicAuthHeaders(badCredential);
+  badAuthenticationHeaders["Content-Type"] = "application/json";
+
+  // Post to observe without authentication.
+  Future<Response> response = process::http::post(
+      master.get()->pid,
+      "observe",
+      unauthenticatedHeaders,
+      "monitor=a&hosts=b&level=Ok");
+
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(Unauthorized({}).status, response);
+
+  // Get request without authentication.
+  response = process::http::get(master.get()->pid, "observe");
+
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(Unauthorized({}).status, response);
+
+  // Post to observe with bad authentication.
+  response = process::http::post(
+      master.get()->pid,
+      "observe",
+      badAuthenticationHeaders,
+      "monitor=a&hosts=b&level=Ok");
+
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(Unauthorized({}).status, response);
+
+  // Get request with bad authentication.
+  response = process::http::get(
+    master.get()->pid,
+    "observe",
+    None(),
+    createBasicAuthHeaders(badCredential));
+
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(Unauthorized({}).status, response);
 }
 
 } // namespace tests {

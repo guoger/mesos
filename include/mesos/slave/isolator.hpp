@@ -55,9 +55,8 @@ public:
   // will be run by the Launcher.
   // TODO(idownes): Any URIs or Environment in the CommandInfo will be
   // ignored; only the command value is used.
-  virtual process::Future<Option<ContainerPrepareInfo>> prepare(
+  virtual process::Future<Option<ContainerLaunchInfo>> prepare(
       const ContainerID& containerId,
-      const ExecutorInfo& executorInfo,
       const ContainerConfig& containerConfig) = 0;
 
   // Isolate the executor.
@@ -79,6 +78,14 @@ public:
   // Gather resource usage statistics for the container.
   virtual process::Future<ResourceStatistics> usage(
       const ContainerID& containerId) = 0;
+
+  // Get the run-time status of isolator specific properties
+  // associated with the container.
+  virtual process::Future<ContainerStatus> status(
+      const ContainerID& containerId)
+  {
+    return ContainerStatus();
+  };
 
   // Clean up a terminated container. This is called after the
   // executor and all processes in the container have terminated.

@@ -16,6 +16,7 @@
 #include <stdint.h>
 #include <stdlib.h> // For abort.
 
+#include <process/pid.hpp>
 #include <process/timeout.hpp>
 
 #include <stout/duration.hpp>
@@ -62,7 +63,7 @@ private:
   Timer(long _id,
         const Timeout& _t,
         const process::UPID& _pid,
-        const lambda::function<void(void)>& _thunk)
+        const lambda::function<void()>& _thunk)
     : id(_id), t(_t), pid(_pid), thunk(_thunk)
   {}
 
@@ -77,7 +78,7 @@ private:
   // valid and get a refernce to it.)
   process::UPID pid;
 
-  lambda::function<void(void)> thunk;
+  lambda::function<void()> thunk;
 };
 
 } // namespace process {

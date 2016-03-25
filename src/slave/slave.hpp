@@ -75,6 +75,12 @@
 #include "slave/paths.hpp"
 #include "slave/state.hpp"
 
+// `REGISTERING` is used as an enum value, but it's actually defined as a
+// constant in the Windows SDK.
+#ifdef __WINDOWS__
+#undef REGISTERING
+#endif // __WINDOWS__
+
 namespace mesos {
 namespace internal {
 
@@ -93,7 +99,8 @@ struct HttpConnection;
 class Slave : public ProtobufProcess<Slave>
 {
 public:
-  Slave(const Flags& flags,
+  Slave(const std::string& id,
+        const Flags& flags,
         MasterDetector* detector,
         Containerizer* containerizer,
         Files* files,
@@ -208,9 +215,18 @@ public:
   // to ensure source field is set.
   void statusUpdate(StatusUpdate update, const Option<process::UPID>& pid);
 
+  // Called when the slave receives a `StatusUpdate` from an executor
+  // and the slave needs to retrieve the container status for the
+  // container associated with the executor.
+  void _statusUpdate(
+      StatusUpdate update,
+      const Option<process::UPID>& pid,
+      const ExecutorID& executorId,
+      const Future<ContainerStatus>& containerStatus);
+
   // Continue handling the status update after optionally updating the
   // container's resources.
-  void _statusUpdate(
+  void __statusUpdate(
       const Option<Future<Nothing>>& future,
       const StatusUpdate& update,
       const Option<process::UPID>& pid,
@@ -221,7 +237,7 @@ public:
   // This is called when the status update manager finishes
   // handling the update. If the handling is successful, an
   // acknowledgment is sent to the executor.
-  void __statusUpdate(
+  void ___statusUpdate(
       const process::Future<Nothing>& future,
       const StatusUpdate& update,
       const Option<process::UPID>& pid);
@@ -382,6 +398,13 @@ public:
   // Returns the resource usage information for all executors.
   process::Future<ResourceUsage> usage();
 
+  // Handle the second phase of shutting down an executor for those
+  // executors that have not properly shutdown within a timeout.
+  void shutdownExecutorTimeout(
+      const FrameworkID& frameworkId,
+      const ExecutorID& executorId,
+      const ContainerID& containerId);
+
 private:
   void _authenticate();
   void authenticationTimeout(process::Future<bool> future);
@@ -392,13 +415,6 @@ private:
   // (kill phase, via the isolator) if the executor has not
   // exited.
   void _shutdownExecutor(Framework* framework, Executor* executor);
-
-  // Handle the second phase of shutting down an executor for those
-  // executors that have not properly shutdown within a timeout.
-  void shutdownExecutorTimeout(
-      const FrameworkID& frameworkId,
-      const ExecutorID& executorId,
-      const ContainerID& containerId);
 
   // Inner class used to namespace HTTP route handlers (see
   // slave/http.cpp for implementations).
@@ -417,7 +433,8 @@ private:
 
     // /slave/flags
     process::Future<process::http::Response> flags(
-        const process::http::Request& request) const;
+        const process::http::Request& request,
+        const Option<std::string>& /* principal */) const;
 
     // /slave/health
     process::Future<process::http::Response> health(
@@ -425,7 +442,8 @@ private:
 
     // /slave/state
     process::Future<process::http::Response> state(
-        const process::http::Request& request) const;
+        const process::http::Request& request,
+        const Option<std::string>& /* principal */) const;
 
     static std::string EXECUTOR_HELP();
     static std::string FLAGS_HELP();
@@ -462,6 +480,7 @@ private:
   double _tasks_staging();
   double _tasks_starting();
   double _tasks_running();
+  double _tasks_killing();
 
   double _executors_registering();
   double _executors_running();

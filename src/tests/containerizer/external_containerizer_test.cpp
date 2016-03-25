@@ -25,6 +25,7 @@
 #include <mesos/resources.hpp>
 
 #include <process/future.hpp>
+#include <process/owned.hpp>
 
 #include <stout/os.hpp>
 #include <stout/path.hpp>
@@ -79,8 +80,8 @@ public:
           const ContainerID&,
           const TaskInfo&,
           const ExecutorInfo&,
-          const std::string&,
-          const Option<std::string>&,
+          const string&,
+          const Option<string>&,
           const SlaveID&,
           const process::PID<slave::Slave>&,
           bool checkpoint));
@@ -122,7 +123,7 @@ public:
 // This test has been temporarily disabled due to MESOS-1257.
 TEST_F(ExternalContainerizerTest, DISABLED_Launch)
 {
-  Try<PID<Master> > master = this->StartMaster();
+  Try<Owned<cluster::Master>> master = this->StartMaster();
   ASSERT_SOME(master);
 
   Flags testFlags;
@@ -135,12 +136,15 @@ TEST_F(ExternalContainerizerTest, DISABLED_Launch)
 
   MockExternalContainerizer containerizer(flags);
 
-  Try<PID<Slave> > slave = this->StartSlave(&containerizer, flags);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  Try<Owned<cluster::Slave>> slave =
+    this->StartSlave(detector.get(), &containerizer, flags);
   ASSERT_SOME(slave);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
   Future<FrameworkID> frameworkId;
   EXPECT_CALL(sched, registered(&driver, _, _))
@@ -170,7 +174,7 @@ TEST_F(ExternalContainerizerTest, DISABLED_Launch)
   Option<double> cpus = resources.cpus();
   ASSERT_SOME(cpus);
 
-  const std::string& file = path::join(flags.work_dir, "ready");
+  const string& file = path::join(flags.work_dir, "ready");
 
   // This task induces user/system load in a child process by
   // running top in a child process for ten seconds.
@@ -253,8 +257,6 @@ TEST_F(ExternalContainerizerTest, DISABLED_Launch)
 
   driver.stop();
   driver.join();
-
-  this->Shutdown();
 }
 
 #endif // MESOS_HAS_PYTHON

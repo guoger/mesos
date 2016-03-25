@@ -68,23 +68,35 @@ message ContainerState
  * during `prepare`.
  */
 message ContainerConfig {
-  // The root filesystem for the container.
-  optional string rootfs = 1;
+  required ExecutorInfo executor_info = 8;
+  optional TaskInfo task_info = 9;
 
   // The work directory for the container in the host filesystem.
-  required string directory = 2;
+  required string directory = 3;
 
   // The user the task will be run as.
-  optional string user = 3;
+  optional string user = 4;
+
+  // NOTE: 'rootfs' and 'docker' below are for the executor in custom
+  // executor case, and they are for the task in command task case.
+
+  // The root filesystem for the container.
+  optional string rootfs = 5;
 
   // Docker v1 image manifest.
   message Docker {
     optional docker.spec.v1.ImageManifest manifest = 1;
   }
 
-  optional Docker docker = 4;
+  optional Docker docker = 7;
 
   // TODO(gilbert): Add appc image manifest.
+
+  // The following two fields are deprecated. Please do NOT use them
+  // in your isolator. Use 'executor_info' and 'task_info' instead.
+  // TODO(gilbert): Remove them in 0.29.
+  required ExecutorInfo executorInfo = 1;
+  optional TaskInfo taskInfo = 2;
 }
 
 
@@ -95,7 +107,7 @@ message ContainerConfig {
  * ignored; only the command value is used. Further, we only accept
  * shell commands for the preparation commands.
  */
-message ContainerPrepareInfo
+message ContainerLaunchInfo
 {
   repeated CommandInfo commands = 1;
   optional Environment environment = 2;
@@ -106,4 +118,13 @@ message ContainerPrepareInfo
   // (Linux only) The namespaces required for the container.
   // The namespaces are created while launching the executor.
   optional uint32 namespaces = 4 [default = 0];
+
+  // If specified, it'll become the launch command for the custom
+  // executor, or the launch command for the user task in the case of
+  // a command task.
+  optional CommandInfo command = 5;
+
+  // The working directory for the container.
+  // NOTE: This is different than Mesos sandbox.
+  optional string working_directory = 6;
 }

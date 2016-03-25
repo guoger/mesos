@@ -152,6 +152,10 @@ namespace mesos {
 namespace internal {
 namespace fs {
 
+// Detect whether the given file system is supported by the kernel.
+Try<bool> supported(const std::string& fsname);
+
+
 // TODO(idownes): These three variations on mount information should
 // be consolidated and moved to stout, along with mount and umount.
 
@@ -334,6 +338,13 @@ Try<Nothing> mount(const Option<std::string>& source,
 // @param   flags     Unmount flags.
 // @return  Whether the unmount operation succeeds.
 Try<Nothing> unmount(const std::string& target, int flags = 0);
+
+
+// Unmount a file system and all mounts under that file system.
+// @param   target    The (topmost) directory where the file system attaches.
+// @param   flags     Unmount flags.
+// @return  Whether the unmountAll operation succeeds.
+Try<Nothing> unmountAll(const std::string& target, int flags = 0);
 
 
 // Change the root filesystem.

@@ -17,6 +17,10 @@
 #include "authorizer/local/authorizer.hpp"
 
 #include <string>
+#include <vector>
+
+#include <mesos/mesos.hpp>
+#include <mesos/authorizer/acls.hpp>
 
 #include <process/dispatch.hpp>
 #include <process/future.hpp>
@@ -24,17 +28,30 @@
 #include <process/process.hpp>
 #include <process/protobuf.hpp>
 
+#include <stout/foreach.hpp>
+#include <stout/option.hpp>
+#include <stout/path.hpp>
 #include <stout/protobuf.hpp>
 #include <stout/try.hpp>
+
+#include "common/parse.hpp"
 
 using process::Failure;
 using process::Future;
 using process::dispatch;
 
 using std::string;
+using std::vector;
 
 namespace mesos {
 namespace internal {
+
+struct GenericACL
+{
+  ACL::Entity subjects;
+  ACL::Entity objects;
+};
+
 
 class LocalAuthorizerProcess : public ProtobufProcess<LocalAuthorizerProcess>
 {
@@ -42,144 +59,184 @@ public:
   LocalAuthorizerProcess(const ACLs& _acls)
     : ProcessBase(process::ID::generate("authorizer")), acls(_acls) {}
 
-  Future<bool> authorize(const ACL::RegisterFramework& request)
+  virtual void initialize()
   {
-    foreach (const ACL::RegisterFramework& acl, acls.register_frameworks()) {
-      // ACL matches if both subjects and objects match.
-      if (matches(request.principals(), acl.principals()) &&
-          matches(request.roles(), acl.roles())) {
-        // ACL is allowed if both subjects and objects are allowed.
-        return allows(request.principals(), acl.principals()) &&
-               allows(request.roles(), acl.roles());
-      }
+    // TODO(arojas): Remove the following two if blocks once
+    // ShutdownFramework reaches the end of deprecation cycle
+    // which started with 0.27.0.
+    if (acls.shutdown_frameworks_size() > 0 &&
+        acls.teardown_frameworks_size() > 0) {
+      LOG(WARNING) << "ACLs defined for both ShutdownFramework and "
+                   << "TeardownFramework; only the latter will be used";
+      return;
     }
 
-    return acls.permissive(); // None of the ACLs match.
+    // Move contents of `acls.shutdown_frameworks` to
+    // `acls.teardown_frameworks`
+    if (acls.shutdown_frameworks_size() > 0) {
+      LOG(WARNING) << "ShutdownFramework ACL is deprecated; please use "
+                   << "TeardownFramework";
+      foreach (const ACL::ShutdownFramework& acl, acls.shutdown_frameworks()) {
+        ACL::TeardownFramework* teardown = acls.add_teardown_frameworks();
+        teardown->mutable_principals()->CopyFrom(acl.principals());
+        teardown->mutable_framework_principals()->CopyFrom(
+            acl.framework_principals());
+      }
+    }
+    acls.clear_shutdown_frameworks();
   }
 
-  Future<bool> authorize(const ACL::RunTask& request)
+  Future<bool> authorized(const authorization::Request& request)
   {
-    foreach (const ACL::RunTask& acl, acls.run_tasks()) {
-      // ACL matches if both subjects and objects match.
-      if (matches(request.principals(), acl.principals()) &&
-          matches(request.users(), acl.users())) {
-        // ACL is allowed if both subjects and objects are allowed.
-        return allows(request.principals(), acl.principals()) &&
-               allows(request.users(), acl.users());
-      }
+    vector<GenericACL> acls_;
+
+    switch (request.action()) {
+      case authorization::REGISTER_FRAMEWORK_WITH_ROLE:
+        for (const ACL::RegisterFramework& acl : acls.register_frameworks()) {
+          GenericACL acl_;
+          acl_.subjects = acl.principals();
+          acl_.objects = acl.roles();
+
+          acls_.push_back(acl_);
+        }
+
+        return authorized(request, acls_);
+        break;
+      case authorization::TEARDOWN_FRAMEWORK_WITH_PRINCIPAL:
+        for (const ACL::TeardownFramework& acl : acls.teardown_frameworks()) {
+          GenericACL acl_;
+          acl_.subjects = acl.principals();
+          acl_.objects = acl.framework_principals();
+
+          acls_.push_back(acl_);
+        }
+
+        return authorized(request, acls_);
+        break;
+      case authorization::RUN_TASK_WITH_USER:
+        for (const ACL::RunTask& acl : acls.run_tasks()) {
+          GenericACL acl_;
+          acl_.subjects = acl.principals();
+          acl_.objects = acl.users();
+
+          acls_.push_back(acl_);
+        }
+
+        return authorized(request, acls_);
+        break;
+      case authorization::RESERVE_RESOURCES_WITH_ROLE:
+        for (const ACL::ReserveResources& acl : acls.reserve_resources()) {
+          GenericACL acl_;
+          acl_.subjects = acl.principals();
+          acl_.objects = acl.roles();
+
+          acls_.push_back(acl_);
+        }
+
+        return authorized(request, acls_);
+        break;
+      case authorization::UNRESERVE_RESOURCES_WITH_PRINCIPAL:
+        for (const ACL::UnreserveResources& acl : acls.unreserve_resources()) {
+          GenericACL acl_;
+          acl_.subjects = acl.principals();
+          acl_.objects = acl.reserver_principals();
+
+          acls_.push_back(acl_);
+        }
+
+        return authorized(request, acls_);
+        break;
+      case authorization::CREATE_VOLUME_WITH_ROLE:
+        for (const ACL::CreateVolume& acl : acls.create_volumes()) {
+          GenericACL acl_;
+          acl_.subjects = acl.principals();
+          acl_.objects = acl.roles();
+
+          acls_.push_back(acl_);
+        }
+
+        return authorized(request, acls_);
+        break;
+      case authorization::DESTROY_VOLUME_WITH_PRINCIPAL:
+        for (const ACL::DestroyVolume& acl : acls.destroy_volumes()) {
+          GenericACL acl_;
+          acl_.subjects = acl.principals();
+          acl_.objects = acl.creator_principals();
+
+          acls_.push_back(acl_);
+        }
+
+        return authorized(request, acls_);
+        break;
+      case authorization::SET_QUOTA_WITH_ROLE:
+        for (const ACL::SetQuota& acl : acls.set_quotas()) {
+          GenericACL acl_;
+          acl_.subjects = acl.principals();
+          acl_.objects = acl.roles();
+
+          acls_.push_back(acl_);
+        }
+
+        return authorized(request, acls_);
+        break;
+      case authorization::DESTROY_QUOTA_WITH_PRINCIPAL:
+        for (const ACL::RemoveQuota& acl : acls.remove_quotas()) {
+          GenericACL acl_;
+          acl_.subjects = acl.principals();
+          acl_.objects = acl.quota_principals();
+
+          acls_.push_back(acl_);
+        }
+
+        return authorized(request, acls_);
+        break;
+      case authorization::UPDATE_WEIGHTS_WITH_ROLE:
+        for (const ACL::UpdateWeights& acl : acls.update_weights()) {
+          GenericACL acl_;
+          acl_.subjects = acl.principals();
+          acl_.objects = acl.roles();
+
+          acls_.push_back(acl_);
+        }
+
+        return authorized(request, acls_);
+        break;
     }
-
-    return acls.permissive(); // None of the ACLs match.
-  }
-
-  Future<bool> authorize(const ACL::ShutdownFramework& request)
-  {
-    foreach (const ACL::ShutdownFramework& acl, acls.shutdown_frameworks()) {
-      // ACL matches if both subjects and objects match.
-      if (matches(request.principals(), acl.principals()) &&
-          matches(request.framework_principals(),
-                  acl.framework_principals())) {
-        // ACL is allowed if both subjects and objects are allowed.
-        return allows(request.principals(), acl.principals()) &&
-               allows(request.framework_principals(),
-                      acl.framework_principals());
-      }
-    }
-
-    return acls.permissive(); // None of the ACLs match.
-  }
-
-  Future<bool> authorize(const ACL::ReserveResources& request)
-  {
-    foreach (const ACL::ReserveResources& acl, acls.reserve_resources()) {
-      // ACL matches if both subjects and objects match.
-      if (matches(request.principals(), acl.principals()) &&
-          matches(request.resources(), acl.resources())) {
-        // ACL is allowed if both subjects and objects are allowed.
-        return allows(request.principals(), acl.principals()) &&
-               allows(request.resources(), acl.resources());
-      }
-    }
-
-    return acls.permissive(); // None of the ACLs match.
-  }
-
-  Future<bool> authorize(const ACL::UnreserveResources& request)
-  {
-    foreach (const ACL::UnreserveResources& acl, acls.unreserve_resources()) {
-      // ACL matches if both subjects and objects match.
-      if (matches(request.principals(), acl.principals()) &&
-          matches(request.reserver_principals(), acl.reserver_principals())) {
-        // ACL is allowed if both subjects and objects are allowed.
-        return allows(request.principals(), acl.principals()) &&
-               allows(request.reserver_principals(), acl.reserver_principals());
-      }
-    }
-
-    return acls.permissive(); // None of the ACLs match.
-  }
-
-  Future<bool> authorize(const ACL::CreateVolume& request)
-  {
-    foreach (const ACL::CreateVolume& acl, acls.create_volumes()) {
-      // ACL matches if both subjects and objects match.
-      if (matches(request.principals(), acl.principals()) &&
-          matches(request.volume_types(), acl.volume_types())) {
-        // ACL is allowed if both subjects and objects are allowed.
-        return allows(request.principals(), acl.principals()) &&
-               allows(request.volume_types(), acl.volume_types());
-      }
-    }
-
-    return acls.permissive(); // None of the ACLs match.
-  }
-
-  Future<bool> authorize(const ACL::DestroyVolume& request)
-  {
-    foreach (const ACL::DestroyVolume& acl, acls.destroy_volumes()) {
-      // ACL matches if both subjects and objects match.
-      if (matches(request.principals(), acl.principals()) &&
-          matches(request.creator_principals(), acl.creator_principals())) {
-        // ACL is allowed if both subjects and objects are allowed.
-        return allows(request.principals(), acl.principals()) &&
-               allows(request.creator_principals(), acl.creator_principals());
-      }
-    }
-
-    return acls.permissive(); // None of the ACLs match.
-  }
-
-  Future<bool> authorize(const ACL::SetQuota& request)
-  {
-    foreach (const ACL::SetQuota& acl, acls.set_quotas()) {
-      // ACL matches if both subjects and objects match.
-      if (matches(request.principals(), acl.principals()) &&
-          matches(request.roles(), acl.roles())) {
-        // ACL is allowed if both subjects and objects are allowed.
-        return allows(request.principals(), acl.principals()) &&
-               allows(request.roles(), acl.roles());
-      }
-    }
-
-    return acls.permissive(); // None of the ACLs match.
-  }
-
-  Future<bool> authorize(const ACL::RemoveQuota& request)
-  {
-    foreach (const ACL::RemoveQuota& acl, acls.remove_quotas()) {
-      // ACL matches if both subjects and objects match.
-      if (matches(request.principals(), acl.principals()) &&
-          matches(request.quota_principals(), acl.quota_principals())) {
-        // ACL is allowed if both subjects and objects are allowed.
-        return allows(request.principals(), acl.principals()) &&
-               allows(request.quota_principals(), acl.quota_principals());
-      }
-    }
-
-    return acls.permissive(); // None of the ACLs match.
+    UNREACHABLE();
   }
 
 private:
+  Future<bool> authorized(
+      const authorization::Request& request,
+      const vector<GenericACL>& acls)
+  {
+    ACL::Entity subject;
+    if (request.subject().has_value()) {
+      subject.add_values(request.subject().value());
+      subject.set_type(mesos::ACL::Entity::SOME);
+    } else {
+      subject.set_type(mesos::ACL::Entity::ANY);
+    }
+
+    ACL::Entity object;
+    if (request.object().has_value()) {
+      object.add_values(request.object().value());
+      object.set_type(mesos::ACL::Entity::SOME);
+    } else {
+      object.set_type(mesos::ACL::Entity::ANY);
+    }
+
+    for (const GenericACL& acl : acls) {
+      if (matches(subject, acl.subjects) &&
+          matches(object, acl.objects)) {
+        return allows(subject, acl.subjects) &&
+            allows(object, acl.objects);
+      }
+    }
+
+    return this->acls.permissive(); // None of the ACLs match.
+  }
+
   // Match matrix:
   //
   //                  -----------ACL----------
@@ -291,16 +348,41 @@ private:
 };
 
 
-Try<Authorizer*> LocalAuthorizer::create()
+Try<Authorizer*> LocalAuthorizer::create(const ACLs& acls)
 {
-  Authorizer* local = new LocalAuthorizer;
+  Authorizer* local = new LocalAuthorizer(acls);
 
   return local;
 }
 
 
-LocalAuthorizer::LocalAuthorizer() : process(NULL)
+Try<Authorizer*> LocalAuthorizer::create(const Parameters& parameters)
 {
+  Option<string> acls;
+  foreach (const Parameter& parameter, parameters.parameter()) {
+    if (parameter.key() == "acls") {
+      acls = parameter.value();
+    }
+  }
+
+  if (acls.isNone()) {
+    return Error("No ACLs for default authorizer provided");
+  }
+
+  Try<ACLs> acls_ = flags::parse<ACLs>(acls.get());
+  if (acls_.isError()) {
+    return Error("Contents of 'acls' parameter could not be parsed into a "
+                 "valid ACLs object");
+  }
+
+  return LocalAuthorizer::create(acls_.get());
+}
+
+
+LocalAuthorizer::LocalAuthorizer(const ACLs& acls)
+    : process(new LocalAuthorizerProcess(acls))
+{
+  spawn(process);
 }
 
 
@@ -314,157 +396,16 @@ LocalAuthorizer::~LocalAuthorizer()
 }
 
 
-Try<Nothing> LocalAuthorizer::initialize(const Option<ACLs>& acls)
+process::Future<bool> LocalAuthorizer::authorized(
+  const authorization::Request& request)
 {
-  if (!acls.isSome()) {
-    return Error("ACLs need to be specified for local authorizer");
-  }
-
-  if (!initialized.once()) {
-    if (process != NULL) {
-      return Error("Authorizer already initialized");
-    }
-
-    // Process initialization needs to be done here because default
-    // implementations of modules need to be default constructible. So
-    // actual construction is delayed until initialization.
-    process = new LocalAuthorizerProcess(acls.get());
-    spawn(process);
-
-    initialized.done();
-  }
-
-  return Nothing();
-}
-
-
-Future<bool> LocalAuthorizer::authorize(const ACL::RegisterFramework& request)
-{
-  if (process == NULL) {
-    return Failure("Authorizer not initialized");
-  }
-
-  // Necessary to disambiguate.
-  typedef Future<bool>(LocalAuthorizerProcess::*F)(
-      const ACL::RegisterFramework&);
+  typedef Future<bool> (LocalAuthorizerProcess::*F)(
+      const authorization::Request&);
 
   return dispatch(
-      process, static_cast<F>(&LocalAuthorizerProcess::authorize), request);
-}
-
-
-Future<bool> LocalAuthorizer::authorize(const ACL::RunTask& request)
-{
-  if (process == NULL) {
-    return Failure("Authorizer not initialized");
-  }
-
-  // Necessary to disambiguate.
-  typedef Future<bool>(LocalAuthorizerProcess::*F)(const ACL::RunTask&);
-
-  return dispatch(
-      process, static_cast<F>(&LocalAuthorizerProcess::authorize), request);
-}
-
-
-Future<bool> LocalAuthorizer::authorize(const ACL::ShutdownFramework& request)
-{
-  if (process == NULL) {
-    return Failure("Authorizer not initialized");
-  }
-
-  // Necessary to disambiguate.
-  typedef Future<bool>(LocalAuthorizerProcess::*F)(
-      const ACL::ShutdownFramework&);
-
-  return dispatch(
-      process, static_cast<F>(&LocalAuthorizerProcess::authorize), request);
-}
-
-
-Future<bool> LocalAuthorizer::authorize(const ACL::ReserveResources& request)
-{
-  if (process == NULL) {
-    return Failure("Authorizer not initialized");
-  }
-
-  // Necessary to disambiguate.
-  typedef Future<bool>(
-      LocalAuthorizerProcess::*F)(const ACL::ReserveResources&);
-
-  return dispatch(
-      process, static_cast<F>(&LocalAuthorizerProcess::authorize), request);
-}
-
-
-Future<bool> LocalAuthorizer::authorize(const ACL::UnreserveResources& request)
-{
-  if (process == NULL) {
-    return Failure("Authorizer not initialized");
-  }
-
-  // Necessary to disambiguate.
-  typedef Future<bool>(
-      LocalAuthorizerProcess::*F)(const ACL::UnreserveResources&);
-
-  return dispatch(
-      process, static_cast<F>(&LocalAuthorizerProcess::authorize), request);
-}
-
-
-Future<bool> LocalAuthorizer::authorize(const ACL::CreateVolume& request)
-{
-  if (process == NULL) {
-    return Failure("Authorizer not initialized");
-  }
-
-  // Necessary to disambiguate.
-  typedef Future<bool>(LocalAuthorizerProcess::*F)(const ACL::CreateVolume&);
-
-  return dispatch(
-      process, static_cast<F>(&LocalAuthorizerProcess::authorize), request);
-}
-
-
-Future<bool> LocalAuthorizer::authorize(const ACL::DestroyVolume& request)
-{
-  if (process == NULL) {
-    return Failure("Authorizer not initialized");
-  }
-
-  // Necessary to disambiguate.
-  typedef Future<bool>(LocalAuthorizerProcess::*F)(const ACL::DestroyVolume&);
-
-  return dispatch(
-      process, static_cast<F>(&LocalAuthorizerProcess::authorize), request);
-}
-
-
-Future<bool> LocalAuthorizer::authorize(const ACL::SetQuota& request)
-{
-  if (process == NULL) {
-    return Failure("Authorizer not initialized");
-  }
-
-  // Necessary to disambiguate.
-  typedef Future<bool>(LocalAuthorizerProcess::*F)(const ACL::SetQuota&);
-
-  return dispatch(
-      process, static_cast<F>(&LocalAuthorizerProcess::authorize), request);
-}
-
-
-Future<bool> LocalAuthorizer::authorize(const ACL::RemoveQuota& request)
-{
-  if (process == NULL) {
-    return Failure("Authorizer not initialized");
-  }
-
-  // Necessary to disambiguate.
-  typedef Future<bool>(LocalAuthorizerProcess::*F)(const ACL::RemoveQuota&);
-
-  return dispatch(
-      process, static_cast<F>(&LocalAuthorizerProcess::authorize), request);
+      process,
+      static_cast<F>(&LocalAuthorizerProcess::authorized),
+      request);
 }
 
 } // namespace internal {

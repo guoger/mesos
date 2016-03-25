@@ -566,6 +566,31 @@ OK::OK(const JSON::Value& value, const Option<string>& jsonp)
   body = out.str().data();
 }
 
+
+OK::OK(JSON::Proxy&& value, const Option<string>& jsonp)
+  : Response(Status::OK)
+{
+  type = BODY;
+
+  std::ostringstream out;
+
+  if (jsonp.isSome()) {
+    out << jsonp.get() << "(";
+  }
+
+  out << std::move(value);
+
+  if (jsonp.isSome()) {
+    out << ");";
+    headers["Content-Type"] = "text/javascript";
+  } else {
+    headers["Content-Type"] = "application/json";
+  }
+
+  body = out.str();
+  headers["Content-Length"] = stringify(body.size());
+}
+
 namespace path {
 
 Try<hashmap<string, string>> parse(const string& pattern, const string& path)
@@ -693,26 +718,55 @@ Try<string> decode(const string& s)
 }
 
 
+Try<vector<Response>> decodeResponses(const string& s)
+{
+  ResponseDecoder decoder;
+
+  deque<http::Response*> responses = decoder.decode(s.data(), s.length());
+
+  if (decoder.failed()) {
+    foreach (Response* response, responses) {
+      delete response;
+    }
+
+    return Error("Decoding failed");
+  }
+
+  if (responses.empty()) {
+    return Error("No response decoded");
+  }
+
+  vector<Response> result;
+
+  foreach (Response* response, responses) {
+    result.push_back(*response);
+    delete response;
+  }
+
+  return result;
+}
+
+
 namespace query {
 
-Try<hashmap<std::string, std::string>> decode(const std::string& query)
+Try<hashmap<string, string>> decode(const string& query)
 {
-  hashmap<std::string, std::string> result;
+  hashmap<string, string> result;
 
-  const std::vector<std::string> tokens = strings::tokenize(query, ";&");
-  foreach (const std::string& token, tokens) {
-    const std::vector<std::string> pairs = strings::split(token, "=", 2);
+  const vector<string> tokens = strings::tokenize(query, ";&");
+  foreach (const string& token, tokens) {
+    const vector<string> pairs = strings::split(token, "=", 2);
     if (pairs.size() == 0) {
       continue;
     }
 
-    Try<std::string> key = http::decode(pairs[0]);
+    Try<string> key = http::decode(pairs[0]);
     if (key.isError()) {
       return Error(key.error());
     }
 
     if (pairs.size() == 2) {
-      Try<std::string> value = http::decode(pairs[1]);
+      Try<string> value = http::decode(pairs[1]);
       if (value.isError()) {
         return Error(value.error());
       }
@@ -727,11 +781,11 @@ Try<hashmap<std::string, std::string>> decode(const std::string& query)
 }
 
 
-std::string encode(const hashmap<std::string, std::string>& query)
+string encode(const hashmap<string, string>& query)
 {
-  std::string output;
+  string output;
 
-  foreachpair (const std::string& key, const std::string& value, query) {
+  foreachpair (const string& key, const string& value, query) {
     output += http::encode(key);
     if (!value.empty()) {
       output += "=" + http::encode(value);
@@ -945,7 +999,7 @@ public:
     return response;
   }
 
-  Future<Nothing> disconnect(const Option<std::string>& message = None())
+  Future<Nothing> disconnect(const Option<string>& message = None())
   {
     Try<Nothing> shutdown = socket.shutdown();
 
@@ -1212,7 +1266,53 @@ Future<Connection> connect(const URL& url)
 }
 
 
-namespace internal {
+Request createRequest(
+    const URL& url,
+    const string& method,
+    const Option<Headers>& headers,
+    const Option<string>& body,
+    const Option<string>& contentType)
+{
+  Request request;
+  request.method = method;
+  request.url = url;
+  request.keepAlive = false;
+
+  if (headers.isSome()) {
+    request.headers = headers.get();
+  }
+
+  if (body.isSome()) {
+    request.body = body.get();
+  }
+
+  if (contentType.isSome()) {
+    request.headers["Content-Type"] = contentType.get();
+  }
+
+  return request;
+}
+
+
+Request createRequest(
+  const UPID& upid,
+  const string& method,
+  bool enableSSL,
+  const Option<string>& path,
+  const Option<Headers>& headers,
+  const Option<string>& body,
+  const Option<string>& contentType)
+{
+  string scheme = enableSSL ? "https" : "http";
+  URL url(scheme, net::IP(upid.address.ip), upid.address.port, upid.id);
+
+  if (path.isSome()) {
+    url.path = strings::join("/", url.path, path.get());
+  }
+
+  return createRequest(url, method, headers, body, contentType);
+}
+
 
 Future<Response> request(const Request& request, bool streamedResponse)
 {
@@ -1238,23 +1338,21 @@ Future<Response> request(const Request& request, bool streamedResponse)
     });
 }
 
-} // namespace internal {
-
 
 Future<Response> get(
     const URL& url,
     const Option<Headers>& headers)
 {
-  Request request;
-  request.method = "GET";
-  request.url = url;
-  request.keepAlive = false;
+  Request _request;
+  _request.method = "GET";
+  _request.url = url;
+  _request.keepAlive = false;
 
   if (headers.isSome()) {
-    request.headers = headers.get();
+    _request.headers = headers.get();
   }
 
-  return internal::request(request, false);
+  return request(_request, false);
 }
 
 
@@ -1296,24 +1394,24 @@ Future<Response> post(
     return Failure("Attempted to do a POST with a Content-Type but no body");
   }
 
-  Request request;
-  request.method = "POST";
-  request.url = url;
-  request.keepAlive = false;
+  Request _request;
+  _request.method = "POST";
+  _request.url = url;
+  _request.keepAlive = false;
 
   if (headers.isSome()) {
-    request.headers = headers.get();
+    _request.headers = headers.get();
   }
 
   if (body.isSome()) {
-    request.body = body.get();
+    _request.body = body.get();
   }
 
   if (contentType.isSome()) {
-    request.headers["Content-Type"] = contentType.get();
+    _request.headers["Content-Type"] = contentType.get();
   }
 
-  return internal::request(request, false);
+  return request(_request, false);
 }
 
 
@@ -1339,16 +1437,16 @@ Future<Response> requestDelete(
     const URL& url,
     const Option<Headers>& headers)
 {
-  Request request;
-  request.method = "DELETE";
-  request.url = url;
-  request.keepAlive = false;
+  Request _request;
+  _request.method = "DELETE";
+  _request.url = url;
+  _request.keepAlive = false;
 
   if (headers.isSome()) {
-    request.headers = headers.get();
+    _request.headers = headers.get();
   }
 
-  return internal::request(request, false);
+  return request(_request, false);
 }
 
 
@@ -1376,16 +1474,16 @@ Future<Response> get(
     const URL& url,
     const Option<Headers>& headers)
 {
-  Request request;
-  request.method = "GET";
-  request.url = url;
-  request.keepAlive = false;
+  Request _request;
+  _request.method = "GET";
+  _request.url = url;
+  _request.keepAlive = false;
 
   if (headers.isSome()) {
-    request.headers = headers.get();
+    _request.headers = headers.get();
   }
 
-  return internal::request(request, true);
+  return request(_request, true);
 }
 
 
@@ -1427,24 +1525,24 @@ Future<Response> post(
     return Failure("Attempted to do a POST with a Content-Type but no body");
   }
 
-  Request request;
-  request.method = "POST";
-  request.url = url;
-  request.keepAlive = false;
+  Request _request;
+  _request.method = "POST";
+  _request.url = url;
+  _request.keepAlive = false;
 
   if (body.isSome()) {
-    request.body = body.get();
+    _request.body = body.get();
   }
 
   if (headers.isSome()) {
-    request.headers = headers.get();
+    _request.headers = headers.get();
   }
 
   if (contentType.isSome()) {
-    request.headers["Content-Type"] = contentType.get();
+    _request.headers["Content-Type"] = contentType.get();
   }
 
-  return internal::request(request, true);
+  return request(_request, true);
 }
 
 

@@ -26,6 +26,7 @@
 #include <process/clock.hpp>
 #include <process/future.hpp>
 #include <process/gmock.hpp>
+#include <process/owned.hpp>
 #include <process/pid.hpp>
 
 #include <stout/none.hpp>
@@ -43,6 +44,7 @@
 
 #include "messages/messages.hpp"
 
+#include "tests/containerizer.hpp"
 #include "tests/mesos.hpp"
 
 using mesos::internal::master::Master;
@@ -51,6 +53,7 @@ using mesos::internal::slave::Slave;
 
 using process::Clock;
 using process::Future;
+using process::Owned;
 using process::PID;
 
 using std::list;
@@ -90,24 +93,27 @@ class StatusUpdateManagerTest: public MesosTest {};
 
 TEST_F(StatusUpdateManagerTest, CheckpointStatusUpdate)
 {
-  Try<PID<Master> > master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer(&exec);
 
   // Require flags to retrieve work_dir when recovering
   // the checkpointed data.
   slave::Flags flags = CreateSlaveFlags();
 
-  Try<PID<Slave> > slave = StartSlave(&exec, flags);
-  ASSERT_SOME(slave);
+  Owned<MasterDetector> detector = master.get()->createDetector();
 
+  Try<Owned<cluster::Slave>> slave =
+    StartSlave(detector.get(), &containerizer, flags);
+  ASSERT_SOME(slave);
   FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo.set_checkpoint(true); // Enable checkpointing.
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, frameworkInfo, master.get(), DEFAULT_CREDENTIAL);
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
 
   Future<FrameworkID> frameworkId;
   EXPECT_CALL(sched, registered(_, _, _))
@@ -135,7 +141,7 @@ TEST_F(StatusUpdateManagerTest, CheckpointStatusUpdate)
     .WillOnce(FutureArg<1>(&status));
 
   Future<Nothing> _statusUpdateAcknowledgement =
-    FUTURE_DISPATCH(slave.get(), &Slave::_statusUpdateAcknowledgement);
+    FUTURE_DISPATCH(slave.get()->pid, &Slave::_statusUpdateAcknowledgement);
 
   driver.launchTasks(offers.get()[0].id(), createTasks(offers.get()[0]));
 
@@ -177,29 +183,30 @@ TEST_F(StatusUpdateManagerTest, CheckpointStatusUpdate)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
 TEST_F(StatusUpdateManagerTest, RetryStatusUpdate)
 {
-  Try<PID<Master> > master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer(&exec);
 
   slave::Flags flags = CreateSlaveFlags();
 
-  Try<PID<Slave> > slave = StartSlave(&exec, flags);
-  ASSERT_SOME(slave);
+  Owned<MasterDetector> detector = master.get()->createDetector();
 
+  Try<Owned<cluster::Slave>> slave =
+    StartSlave(detector.get(), &containerizer, flags);
+  ASSERT_SOME(slave);
   FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo.set_checkpoint(true); // Enable checkpointing.
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, frameworkInfo, master.get(), DEFAULT_CREDENTIAL);
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(_, _, _))
     .Times(1);
@@ -221,7 +228,7 @@ TEST_F(StatusUpdateManagerTest, RetryStatusUpdate)
     .WillOnce(SendStatusUpdateFromTask(TASK_RUNNING));
 
   Future<StatusUpdateMessage> statusUpdateMessage =
-    DROP_PROTOBUF(StatusUpdateMessage(), master.get(), _);
+    DROP_PROTOBUF(StatusUpdateMessage(), master.get()->pid, _);
 
   Clock::pause();
 
@@ -246,8 +253,6 @@ TEST_F(StatusUpdateManagerTest, RetryStatusUpdate)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
@@ -257,12 +262,14 @@ TEST_F(StatusUpdateManagerTest, RetryStatusUpdate)
 // duplicate ACK is for a retried update.
 TEST_F(StatusUpdateManagerTest, IgnoreDuplicateStatusUpdateAck)
 {
-  Try<PID<Master> > master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer(&exec);
 
-  Try<PID<Slave> > slave = StartSlave(&exec);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
   ASSERT_SOME(slave);
 
   FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
@@ -270,7 +277,7 @@ TEST_F(StatusUpdateManagerTest, IgnoreDuplicateStatusUpdateAck)
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, frameworkInfo, master.get(), DEFAULT_CREDENTIAL);
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
 
   FrameworkID frameworkId;
   EXPECT_CALL(sched, registered(_, _, _))
@@ -296,7 +303,7 @@ TEST_F(StatusUpdateManagerTest, IgnoreDuplicateStatusUpdateAck)
   // Drop the first update, so that status update manager
   // resends the update.
   Future<StatusUpdateMessage> statusUpdateMessage =
-    DROP_PROTOBUF(StatusUpdateMessage(), master.get(), _);
+    DROP_PROTOBUF(StatusUpdateMessage(), master.get()->pid, _);
 
   Clock::pause();
 
@@ -324,7 +331,7 @@ TEST_F(StatusUpdateManagerTest, IgnoreDuplicateStatusUpdateAck)
   // Now send TASK_FINISHED update so that the status update manager
   // is waiting for its ACK, which it never gets because we drop the
   // update.
-  DROP_PROTOBUFS(StatusUpdateMessage(), master.get(), _);
+  DROP_PROTOBUFS(StatusUpdateMessage(), master.get()->pid, _);
 
   Future<Nothing> update2 = FUTURE_DISPATCH(_, &Slave::_statusUpdate);
 
@@ -341,9 +348,9 @@ TEST_F(StatusUpdateManagerTest, IgnoreDuplicateStatusUpdateAck)
 
   // Now send a duplicate ACK for the TASK_RUNNING update.
   process::dispatch(
-      slave.get(),
+      slave.get()->pid,
       &Slave::statusUpdateAcknowledgement,
-      master.get(),
+      master.get()->pid,
       update.slave_id(),
       frameworkId,
       update.status().task_id(),
@@ -358,8 +365,6 @@ TEST_F(StatusUpdateManagerTest, IgnoreDuplicateStatusUpdateAck)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
@@ -369,12 +374,14 @@ TEST_F(StatusUpdateManagerTest, IgnoreDuplicateStatusUpdateAck)
 // for the original update and sending a random ACK to the slave.
 TEST_F(StatusUpdateManagerTest, IgnoreUnexpectedStatusUpdateAck)
 {
-  Try<PID<Master> > master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer(&exec);
 
-  Try<PID<Slave> > slave = StartSlave(&exec);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
   ASSERT_SOME(slave);
 
   FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
@@ -382,7 +389,7 @@ TEST_F(StatusUpdateManagerTest, IgnoreUnexpectedStatusUpdateAck)
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, frameworkInfo, master.get(), DEFAULT_CREDENTIAL);
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
 
   FrameworkID frameworkId;
   EXPECT_CALL(sched, registered(_, _, _))
@@ -410,14 +417,14 @@ TEST_F(StatusUpdateManagerTest, IgnoreUnexpectedStatusUpdateAck)
     .WillOnce(SendStatusUpdateFromTask(TASK_RUNNING));
 
   Future<StatusUpdateMessage> statusUpdateMessage =
-    FUTURE_PROTOBUF(StatusUpdateMessage(), master.get(), _);
+    FUTURE_PROTOBUF(StatusUpdateMessage(), master.get()->pid, _);
 
   // Drop the ACKs, so that status update manager
   // retries the update.
   DROP_CALLS(mesos::scheduler::Call(),
              mesos::scheduler::Call::ACKNOWLEDGE,
              _,
-             master.get());
+             master.get()->pid);
 
   driver.launchTasks(offers.get()[0].id(), createTasks(offers.get()[0]));
 
@@ -433,9 +440,9 @@ TEST_F(StatusUpdateManagerTest, IgnoreUnexpectedStatusUpdateAck)
 
   // Now send an ACK with a random UUID.
   process::dispatch(
-      slave.get(),
+      slave.get()->pid,
       &Slave::statusUpdateAcknowledgement,
-      master.get(),
+      master.get()->pid,
       update.slave_id(),
       frameworkId,
       update.status().task_id(),
@@ -448,8 +455,6 @@ TEST_F(StatusUpdateManagerTest, IgnoreUnexpectedStatusUpdateAck)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
@@ -460,12 +465,14 @@ TEST_F(StatusUpdateManagerTest, IgnoreUnexpectedStatusUpdateAck)
 // drop the duplicate update.
 TEST_F(StatusUpdateManagerTest, DuplicateTerminalUpdateBeforeAck)
 {
-  Try<PID<Master> > master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer(&exec);
 
-  Try<PID<Slave> > slave = StartSlave(&exec);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
   ASSERT_SOME(slave);
 
   FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
@@ -473,7 +480,7 @@ TEST_F(StatusUpdateManagerTest, DuplicateTerminalUpdateBeforeAck)
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, frameworkInfo, master.get(), DEFAULT_CREDENTIAL);
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
 
   FrameworkID frameworkId;
   EXPECT_CALL(sched, registered(_, _, _))
@@ -503,10 +510,10 @@ TEST_F(StatusUpdateManagerTest, DuplicateTerminalUpdateBeforeAck)
 
   // Drop the first ACK from the scheduler to the slave.
   Future<StatusUpdateAcknowledgementMessage> statusUpdateAckMessage =
-    DROP_PROTOBUF(StatusUpdateAcknowledgementMessage(), _, slave.get());
+    DROP_PROTOBUF(StatusUpdateAcknowledgementMessage(), _, slave.get()->pid);
 
-  Future<Nothing> __statusUpdate =
-    FUTURE_DISPATCH(slave.get(), &Slave::__statusUpdate);
+  Future<Nothing> ___statusUpdate =
+    FUTURE_DISPATCH(slave.get()->pid, &Slave::___statusUpdate);
 
   Clock::pause();
 
@@ -520,10 +527,10 @@ TEST_F(StatusUpdateManagerTest, DuplicateTerminalUpdateBeforeAck)
 
   // At this point the status update manager has enqueued
   // TASK_FINISHED update.
-  AWAIT_READY(__statusUpdate);
+  AWAIT_READY(___statusUpdate);
 
-  Future<Nothing> __statusUpdate2 =
-    FUTURE_DISPATCH(slave.get(), &Slave::__statusUpdate);
+  Future<Nothing> ___statusUpdate2 =
+    FUTURE_DISPATCH(slave.get()->pid, &Slave::___statusUpdate);
 
   // Now send a TASK_KILLED update for the same task.
   TaskStatus status2 = status.get();
@@ -532,7 +539,7 @@ TEST_F(StatusUpdateManagerTest, DuplicateTerminalUpdateBeforeAck)
 
   // At this point the status update manager has enqueued
   // TASK_FINISHED and TASK_KILLED updates.
-  AWAIT_READY(__statusUpdate2);
+  AWAIT_READY(___statusUpdate2);
 
   // After we advance the clock, the scheduler should receive
   // the retried TASK_FINISHED update and acknowledge it. The
@@ -556,8 +563,6 @@ TEST_F(StatusUpdateManagerTest, DuplicateTerminalUpdateBeforeAck)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
@@ -568,22 +573,25 @@ TEST_F(StatusUpdateManagerTest, DuplicateTerminalUpdateBeforeAck)
 // forward the duplicate update to the scheduler.
 TEST_F(StatusUpdateManagerTest, DuplicateTerminalUpdateAfterAck)
 {
-  Try<PID<Master> > master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer(&exec);
 
   slave::Flags flags = CreateSlaveFlags();
 
-  Try<PID<Slave> > slave = StartSlave(&exec, flags);
-  ASSERT_SOME(slave);
+  Owned<MasterDetector> detector = master.get()->createDetector();
 
+  Try<Owned<cluster::Slave>> slave =
+    StartSlave(detector.get(), &containerizer, flags);
+  ASSERT_SOME(slave);
   FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo.set_checkpoint(true); // Enable checkpointing.
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, frameworkInfo, master.get(), DEFAULT_CREDENTIAL);
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
 
   FrameworkID frameworkId;
   EXPECT_CALL(sched, registered(_, _, _))
@@ -612,7 +620,7 @@ TEST_F(StatusUpdateManagerTest, DuplicateTerminalUpdateAfterAck)
     .WillOnce(FutureArg<1>(&status));
 
   Future<Nothing> _statusUpdateAcknowledgement =
-    FUTURE_DISPATCH(slave.get(), &Slave::_statusUpdateAcknowledgement);
+    FUTURE_DISPATCH(slave.get()->pid, &Slave::_statusUpdateAcknowledgement);
 
   driver.launchTasks(offers.get()[0].id(), createTasks(offers.get()[0]));
 
@@ -627,7 +635,7 @@ TEST_F(StatusUpdateManagerTest, DuplicateTerminalUpdateAfterAck)
     .WillOnce(FutureArg<1>(&update));
 
   Future<Nothing> _statusUpdateAcknowledgement2 =
-    FUTURE_DISPATCH(slave.get(), &Slave::_statusUpdateAcknowledgement);
+    FUTURE_DISPATCH(slave.get()->pid, &Slave::_statusUpdateAcknowledgement);
 
   Clock::pause();
 
@@ -653,8 +661,6 @@ TEST_F(StatusUpdateManagerTest, DuplicateTerminalUpdateAfterAck)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
@@ -665,12 +671,14 @@ TEST_F(StatusUpdateManagerTest, DuplicateTerminalUpdateAfterAck)
 // manager to drop the duplicate update.
 TEST_F(StatusUpdateManagerTest, DuplicateUpdateBeforeAck)
 {
-  Try<PID<Master> > master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer(&exec);
 
-  Try<PID<Slave> > slave = StartSlave(&exec);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
   ASSERT_SOME(slave);
 
   FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
@@ -678,7 +686,7 @@ TEST_F(StatusUpdateManagerTest, DuplicateUpdateBeforeAck)
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, frameworkInfo, master.get(), DEFAULT_CREDENTIAL);
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
 
   FrameworkID frameworkId;
   EXPECT_CALL(sched, registered(_, _, _))
@@ -711,7 +719,7 @@ TEST_F(StatusUpdateManagerTest, DuplicateUpdateBeforeAck)
 
   // Drop the first ACK from the scheduler to the slave.
   Future<StatusUpdateAcknowledgementMessage> statusUpdateAckMessage =
-    DROP_PROTOBUF(StatusUpdateAcknowledgementMessage(), _, slave.get());
+    DROP_PROTOBUF(StatusUpdateAcknowledgementMessage(), _, slave.get()->pid);
 
   Clock::pause();
 
@@ -725,15 +733,15 @@ TEST_F(StatusUpdateManagerTest, DuplicateUpdateBeforeAck)
 
   AWAIT_READY(statusUpdateAckMessage);
 
-  Future<Nothing> __statusUpdate =
-    FUTURE_DISPATCH(slave.get(), &Slave::__statusUpdate);
+  Future<Nothing> ___statusUpdate =
+    FUTURE_DISPATCH(slave.get()->pid, &Slave::___statusUpdate);
 
   // Now resend the TASK_RUNNING update.
-  process::post(slave.get(), statusUpdateMessage.get());
+  process::post(slave.get()->pid, statusUpdateMessage.get());
 
   // At this point the status update manager has handled
   // the duplicate status update.
-  AWAIT_READY(__statusUpdate);
+  AWAIT_READY(___statusUpdate);
 
   // After we advance the clock, the status update manager should
   // retry the TASK_RUNNING update and the scheduler should receive
@@ -756,8 +764,6 @@ TEST_F(StatusUpdateManagerTest, DuplicateUpdateBeforeAck)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
@@ -765,17 +771,19 @@ TEST_F(StatusUpdateManagerTest, DuplicateUpdateBeforeAck)
 // the latest state of the task in status update.
 TEST_F(StatusUpdateManagerTest, LatestTaskState)
 {
-  Try<PID<Master> > master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer(&exec);
 
-  Try<PID<Slave> > slave = StartSlave(&exec);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
   ASSERT_SOME(slave);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(_, _, _));
 
@@ -792,9 +800,9 @@ TEST_F(StatusUpdateManagerTest, LatestTaskState)
 
   // Signal when the first update is dropped.
   Future<StatusUpdateMessage> statusUpdateMessage =
-    DROP_PROTOBUF(StatusUpdateMessage(), _, master.get());
+    DROP_PROTOBUF(StatusUpdateMessage(), _, master.get()->pid);
 
-  Future<Nothing> __statusUpdate = FUTURE_DISPATCH(_, &Slave::__statusUpdate);
+  Future<Nothing> ___statusUpdate = FUTURE_DISPATCH(_, &Slave::___statusUpdate);
 
   driver.start();
 
@@ -802,12 +810,13 @@ TEST_F(StatusUpdateManagerTest, LatestTaskState)
   AWAIT_READY(statusUpdateMessage);
 
   // Ensure the status update manager handles the TASK_RUNNING update.
-  AWAIT_READY(__statusUpdate);
+  AWAIT_READY(___statusUpdate);
 
   // Pause the clock to avoid status update manager from retrying.
   Clock::pause();
 
-  Future<Nothing> __statusUpdate2 = FUTURE_DISPATCH(_, &Slave::__statusUpdate);
+  Future<Nothing> ___statusUpdate2 =
+    FUTURE_DISPATCH(_, &Slave::___statusUpdate);
 
   // Now send TASK_FINISHED update.
   TaskStatus finishedStatus;
@@ -816,11 +825,11 @@ TEST_F(StatusUpdateManagerTest, LatestTaskState)
   execDriver->sendStatusUpdate(finishedStatus);
 
   // Ensure the status update manager handles the TASK_FINISHED update.
-  AWAIT_READY(__statusUpdate2);
+  AWAIT_READY(___statusUpdate2);
 
   // Signal when the second update is dropped.
   Future<StatusUpdateMessage> statusUpdateMessage2 =
-    DROP_PROTOBUF(StatusUpdateMessage(), _, master.get());
+    DROP_PROTOBUF(StatusUpdateMessage(), _, master.get()->pid);
 
   // Advance the clock for the status update manager to send a retry.
   Clock::advance(slave::STATUS_UPDATE_RETRY_INTERVAL_MIN);
@@ -834,10 +843,11 @@ TEST_F(StatusUpdateManagerTest, LatestTaskState)
   ASSERT_EQ(TASK_FINISHED,
             statusUpdateMessage2.get().update().latest_state());
 
+  EXPECT_CALL(exec, shutdown(_))
+    .Times(AtMost(1));
+
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
@@ -846,12 +856,14 @@ TEST_F(StatusUpdateManagerTest, LatestTaskState)
 // changing the state of the task.
 TEST_F(StatusUpdateManagerTest, DuplicatedTerminalStatusUpdate)
 {
-  Try<PID<Master> > master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer(&exec);
 
-  Try<PID<Slave>> slave = StartSlave(&exec);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
   ASSERT_SOME(slave);
 
   FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
@@ -859,7 +871,7 @@ TEST_F(StatusUpdateManagerTest, DuplicatedTerminalStatusUpdate)
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, frameworkInfo, master.get(), DEFAULT_CREDENTIAL);
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
 
   FrameworkID frameworkId;
   EXPECT_CALL(sched, registered(_, _, _))
@@ -888,7 +900,7 @@ TEST_F(StatusUpdateManagerTest, DuplicatedTerminalStatusUpdate)
     .WillOnce(FutureArg<1>(&status));
 
   Future<Nothing> _statusUpdateAcknowledgement =
-    FUTURE_DISPATCH(slave.get(), &Slave::_statusUpdateAcknowledgement);
+    FUTURE_DISPATCH(slave.get()->pid, &Slave::_statusUpdateAcknowledgement);
 
   driver.launchTasks(offers.get()[0].id(), createTasks(offers.get()[0]));
 
@@ -903,7 +915,7 @@ TEST_F(StatusUpdateManagerTest, DuplicatedTerminalStatusUpdate)
     .WillOnce(FutureArg<1>(&update));
 
   Future<Nothing> _statusUpdateAcknowledgement2 =
-    FUTURE_DISPATCH(slave.get(), &Slave::_statusUpdateAcknowledgement);
+    FUTURE_DISPATCH(slave.get()->pid, &Slave::_statusUpdateAcknowledgement);
 
   Clock::pause();
 
@@ -922,8 +934,11 @@ TEST_F(StatusUpdateManagerTest, DuplicatedTerminalStatusUpdate)
   AWAIT_READY(_statusUpdateAcknowledgement2);
 
   // Verify the latest task status.
-  Future<process::http::Response> tasks =
-    process::http::get(master.get(), "tasks");
+  Future<process::http::Response> tasks = process::http::get(
+      master.get()->pid,
+      "tasks",
+      None(),
+      createBasicAuthHeaders(DEFAULT_CREDENTIAL));
 
   AWAIT_EXPECT_RESPONSE_STATUS_EQ(process::http::OK().status, tasks);
   AWAIT_EXPECT_RESPONSE_HEADER_EQ(APPLICATION_JSON, "Content-Type", tasks);
@@ -942,8 +957,6 @@ TEST_F(StatusUpdateManagerTest, DuplicatedTerminalStatusUpdate)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 } // namespace tests {

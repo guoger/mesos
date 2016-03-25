@@ -40,10 +40,13 @@ public:
 
   Option(T&& _t) : state(SOME), t(std::move(_t)) {}
 
-  template <typename U>
+  template <
+    typename U,
+    typename = typename std::enable_if<
+        std::is_constructible<T, const U&>::value>::type>
   Option(const U& u) : state(SOME), t(u) {}
 
-  Option(const None& none) : state(NONE) {}
+  Option(const None&) : state(NONE) {}
 
   template <typename U>
   Option(const _Some<U>& some) : state(SOME), t(some.t) {}
@@ -105,8 +108,10 @@ public:
   bool isSome() const { return state == SOME; }
   bool isNone() const { return state == NONE; }
 
-  const T& get() const { assert(isSome()); return t; }
-  T& get() { assert(isSome()); return t; }
+  const T& get() const & { assert(isSome()); return t; }
+  T& get() & { assert(isSome()); return t; }
+  T&& get() && { assert(isSome()); return std::move(t); }
+  const T&& get() const && { assert(isSome()); return std::move(t); }
 
   const T* operator->() const { return &get(); }
   T* operator->() { return &get(); }

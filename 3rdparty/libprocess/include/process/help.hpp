@@ -40,13 +40,17 @@ namespace process {
 //     ### DESCRIPTION ###
 //     description
 //
+//     ### AUTHENTICATION ###
+//     authentication requirements
+//
 //     references
 //
-// See the 'USAGE', 'TLDR', 'DESCRIPTION', and 'REFERENCES' helpers
-// below to more easily construct your help pages.
+// See the 'USAGE', 'TLDR', 'DESCRIPTION', 'AUTHENTICATION', and
+// 'REFERENCES' helpers below to more easily construct your help pages.
 std::string HELP(
     const std::string& tldr,
     const Option<std::string>& description = None(),
+    const Option<std::string>& authentication = None(),
     const Option<std::string>& references = None());
 
 // Helper for single-line usage that puts it in a blockquote as code
@@ -70,6 +74,16 @@ inline std::string DESCRIPTION(T&&... args)
   return strings::join("\n", std::forward<T>(args)..., "\n");
 }
 
+// Helper for description of Authentication requirements.
+inline std::string AUTHENTICATION(bool required)
+{
+  if (required) {
+    return "This endpoint requires authentication iff HTTP authentication is\n"
+           "enabled.\n";
+  }
+  return "This endpoint does not require authentication.\n";
+}
+
 
 template <typename... T>
 inline std::string REFERENCES(T&&... args)
@@ -83,7 +97,7 @@ inline std::string REFERENCES(T&&... args)
 class Help : public Process<Help>
 {
 public:
-  Help();
+  Help(const Option<std::string>& delegate);
 
   // Adds 'help' for the route 'name' of the process with the
   // specified 'id' (i.e., 'http://ip:port/id/name'). It's expected
@@ -96,6 +110,16 @@ public:
   void add(const std::string& id,
            const std::string& name,
            const Option<std::string>& help);
+
+  // Remove a previously installed 'help' string for '/id/name'.
+  bool remove(const std::string& id, const std::string& name);
+
+  // Remove all previously installed 'help' strings for '/id/*'.
+  bool remove(const std::string& id);
+
+  // Allow the global json function to dump this object to its
+  // canonical JSON representation.
+  friend void json(JSON::ObjectWriter* writer, const Help& help);
 
 protected:
   virtual void initialize();
@@ -117,6 +141,9 @@ private:
 
   // Helper function to get usage path by process id and endpoint name.
   std::string getUsagePath(const std::string& id, const std::string& name);
+
+  // Delegate process name to receive root HTTP requests.
+  const Option<std::string> delegate;
 
   std::map<std::string, std::map<std::string, std::string>> helps;
 };

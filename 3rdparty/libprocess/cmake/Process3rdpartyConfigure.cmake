@@ -36,9 +36,12 @@ elseif (WIN32)
   # require 0.3.4.
   EXTERNAL("glog" "0.3.4" "${PROCESS_3RD_BIN}")
 
-  # NOTE: We expect cURL exists on Unix (usually pulled in with a package
-  # manager), but Windows has no package manager, so we have to go get it.
+  # NOTE: We expect cURL and zlib exist on Unix (usually pulled in with a
+  # package manager), but Windows has no package manager, so we have to go
+  # get it.
   EXTERNAL("curl" ${CURL_VERSION} "${PROCESS_3RD_BIN}")
+
+  EXTERNAL("zlib" ${ZLIB_VERSION} "${PROCESS_3RD_BIN}")
 endif (NOT WIN32)
 
 # Intermediate convenience variables for oddly-structured directories.
@@ -55,31 +58,37 @@ set(BOOST_INCLUDE_DIR       ${BOOST_ROOT})
 set(GPERFTOOLS_INCLUDE_DIR  ${GPERFTOOLS}/src)
 set(HTTP_PARSER_INCLUDE_DIR ${HTTP_PARSER_ROOT})
 set(LIBEV_INCLUDE_DIR       ${LIBEV_ROOT})
-set(LIBEVENT_INCLUDE_DIR    ${LIBEVENT_LIB_ROOT}/include)
 set(PICOJSON_INCLUDE_DIR    ${PICOJSON_ROOT})
 
 if (WIN32)
   set(CURL_INCLUDE_DIR     ${CURL_ROOT}/include)
   set(GLOG_INCLUDE_DIR     ${GLOG_ROOT}/src/windows)
   set(PROTOBUF_INCLUDE_DIR ${PROTOBUF_ROOT}/src)
+  set(LIBEVENT_INCLUDE_DIR
+    ${LIBEVENT_ROOT}/include
+    ${LIBEVENT_ROOT}-build/include)
+  set(ZLIB_INCLUDE_DIR     ${ZLIB_ROOT} ${ZLIB_ROOT}-build)
 else (WIN32)
   set(GLOG_INCLUDE_DIR     ${GLOG_LIB_ROOT}/include)
   set(PROTOBUF_INCLUDE_DIR ${PROTOBUF_LIB_ROOT}/include)
+  set(LIBEVENT_INCLUDE_DIR ${LIBEVENT_LIB_ROOT}/include)
 endif (WIN32)
 
 # Convenience variables for `lib` directories of built third-party dependencies.
-set(HTTP_PARSER_LIB_DIR ${HTTP_PARSER_ROOT}-build)
 set(LIBEV_LIB_DIR       ${LIBEV_ROOT}-build/.libs)
 
 if (WIN32)
-  set(CURL_LIB_DIR     ${CURL_ROOT}/lib)
-  set(GLOG_LIB_DIR     ${GLOG_ROOT}/${CMAKE_BUILD_TYPE})
-  set(LIBEVENT_LIB_DIR ${LIBEVENT_ROOT}-build/lib)
-  set(PROTOBUF_LIB_DIR ${PROTOBUF_ROOT}/vsprojects/${CMAKE_BUILD_TYPE})
+  set(HTTP_PARSER_LIB_DIR ${HTTP_PARSER_ROOT}-build/${CMAKE_BUILD_TYPE})
+  set(CURL_LIB_DIR        ${CURL_ROOT}-build/lib/${CMAKE_BUILD_TYPE})
+  set(GLOG_LIB_DIR        ${GLOG_ROOT}-build/${CMAKE_BUILD_TYPE})
+  set(LIBEVENT_LIB_DIR    ${LIBEVENT_ROOT}-build/lib)
+  set(PROTOBUF_LIB_DIR    ${PROTOBUF_ROOT}-build/${CMAKE_BUILD_TYPE})
+  set(ZLIB_LIB_DIR        ${ZLIB_ROOT}-build/${CMAKE_BUILD_TYPE})
 else (WIN32)
-  set(GLOG_LIB_DIR     ${GLOG_LIB_ROOT}/lib)
-  set(LIBEVENT_LIB_DIR ${LIBEVENT_LIB_ROOT}/lib)
-  set(PROTOBUF_LIB_DIR ${PROTOBUF_LIB_ROOT}/lib)
+  set(HTTP_PARSER_LIB_DIR ${HTTP_PARSER_ROOT}-build)
+  set(GLOG_LIB_DIR        ${GLOG_LIB_ROOT}/lib)
+  set(LIBEVENT_LIB_DIR    ${LIBEVENT_LIB_ROOT}/lib)
+  set(PROTOBUF_LIB_DIR    ${PROTOBUF_LIB_ROOT}/lib)
 endif (WIN32)
 
 # Convenience variables for "lflags", the symbols we pass to CMake to generate
@@ -87,20 +96,22 @@ endif (WIN32)
 set(HTTP_PARSER_LFLAG http_parser)
 set(LIBEV_LFLAG       ev)
 set(LIBEVENT_LFLAG    event)
+set(GLOG_LFLAG        glog)
 
 if (WIN32)
-  # Necessary because the lib names for (e.g.) glog are generated incorrectly
-  # on Windows. That is, on *nix, the glog binary should be (e.g.) libglog.so,
-  # and on Windows it should be glog.lib. But on Windows, it's actually
-  # libglog.lib. Hence, we have to special case it here because CMake assumes
+  # Necessary because the lib names for (e.g.) curl are generated incorrectly
+  # on Windows. That is, on *nix, the curl binary should be (e.g.) libcurl.so,
+  # and on Windows it should be curl.lib. But on Windows, it's actually
+  # libcurl.lib. Hence, we have to special case it here because CMake assumes
   # the library names are generated correctly.
-  set(CURL_LFLAG     libcurl_a)
-  set(GLOG_LFLAG     libglog)
-  set(PROTOBUF_LFLAG libprotobuf)
+  set(CURL_LFLAG     libcurl)
+  set(PROTOBUF_LFLAG libprotobufd)
+
+  # Windows requires a static build of zlib.
+  set(ZLIB_LFLAG     zlibstaticd)
 else (WIN32)
   set(CURL_LFLAG     curl)
   set(DL_LFLAG       dl)
-  set(GLOG_LFLAG     glog)
   set(PROTOBUF_LFLAG protobuf)
   set(SASL_LFLAG     sasl2)
 endif (WIN32)
@@ -109,11 +120,12 @@ endif (WIN32)
 if (NOT WIN32)
   set(PROTOC ${PROTOBUF_LIB_ROOT}/bin/protoc)
 else (NOT WIN32)
-  set(PROTOC ${PROTOBUF_ROOT}/vsprojects/${CMAKE_BUILD_TYPE}/protoc.exe)
+  set(PROTOC ${PROTOBUF_ROOT}-build/${CMAKE_BUILD_TYPE}/protoc.exe)
 endif (NOT WIN32)
 
 # Configure the process library, the last of our third-party libraries.
 #######################################################################
+include(StoutConfigure)
 include(ProcessConfigure)
 
 # Define target for AGENT.

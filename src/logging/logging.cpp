@@ -35,6 +35,15 @@
 
 #include "logging/logging.hpp"
 
+#ifdef __linux__
+// Declare FLAGS_drop_log_memory flag for glog. This declaration is based on the
+// the DECLARE_XXX macros from glog/logging.h.
+namespace fLB {
+  extern GOOGLE_GLOG_DLL_DECL bool FLAGS_drop_log_memory;
+}
+using fLB::FLAGS_drop_log_memory;
+#endif
+
 using process::Once;
 
 using std::string;
@@ -122,9 +131,10 @@ void initialize(
   if (flags.logging_level != "INFO" &&
       flags.logging_level != "WARNING" &&
       flags.logging_level != "ERROR") {
-    EXIT(1) << "'" << flags.logging_level << "' is not a valid logging level."
-               " Possible values for 'logging_level' flag are: "
-               " 'INFO', 'WARNING', 'ERROR'.";
+    EXIT(EXIT_FAILURE)
+      << "'" << flags.logging_level
+      << "' is not a valid logging level. Possible values for"
+      << " 'logging_level' flag are: 'INFO', 'WARNING', 'ERROR'.";
   }
 
   FLAGS_minloglevel = getLogSeverity(flags.logging_level);
@@ -132,8 +142,9 @@ void initialize(
   if (flags.log_dir.isSome()) {
     Try<Nothing> mkdir = os::mkdir(flags.log_dir.get());
     if (mkdir.isError()) {
-      EXIT(1) << "Could not initialize logging: Failed to create directory "
-              << flags.log_dir.get() << ": " << mkdir.error();
+      EXIT(EXIT_FAILURE)
+        << "Could not initialize logging: Failed to create directory "
+        << flags.log_dir.get() << ": " << mkdir.error();
     }
     FLAGS_log_dir = flags.log_dir.get();
     // Do not log to stderr instead of log files.
@@ -158,6 +169,18 @@ void initialize(
   }
 
   FLAGS_logbufsecs = flags.logbufsecs;
+
+#ifdef __linux__
+  // Do not drop in-memory buffers of log contents. When set to true, this flag
+  // can significantly slow down the master. The slow down is attributed to
+  // several hundred `posix_fadvise(..., POSIX_FADV_DONTNEED)` calls per second
+  // to advise the kernel to drop in-memory buffers related to log contents.
+  // We set this flag to 'false' only if the corresponding environment variable
+  // is not set.
+  if (os::getenv("GLOG_drop_log_memory").isNone()) {
+    FLAGS_drop_log_memory = false;
+  }
+#endif
 
   google::InitGoogleLogging(argv0.c_str());
   if (flags.log_dir.isSome()) {

@@ -74,7 +74,7 @@ static Try<bool> extract(
     string filename = Path(pathWithoutExtension).basename();
     command = "gzip -dc > '" + destinationDirectory + "/" + filename + "' <";
   } else if (strings::endsWith(sourcePath, ".zip")) {
-    command = "unzip -d '" + destinationDirectory + "'";
+    command = "unzip -o -d '" + destinationDirectory + "'";
   } else {
     return false;
   }
@@ -249,7 +249,10 @@ static Try<string> fetchBypassingCache(
 {
   LOG(INFO) << "Fetching directly into the sandbox directory";
 
-  Try<string> basename = Fetcher::basename(uri.value());
+  Try<string> basename = uri.has_filename()
+      ? uri.filename()
+      : Fetcher::basename(uri.value());
+
   if (basename.isError()) {
     return Error("Failed to determine the basename of the URI '" +
                  uri.value() + "' with error: " + basename.error());
@@ -288,7 +291,10 @@ static Try<string> fetchFromCache(
 {
   LOG(INFO) << "Fetching from cache";
 
-  Try<string> basename = Fetcher::basename(item.uri().value());
+  Try<string> basename = item.uri().has_filename()
+      ? item.uri().filename()
+      : Fetcher::basename(item.uri().value());
+
   if (basename.isError()) {
     return Error(basename.error());
   }
@@ -417,7 +423,7 @@ int main(int argc, char* argv[])
 
   logging::initialize(argv[0], flags, true); // Catch signals.
 
-  const Option<std::string> jsonFetcherInfo = os::getenv("MESOS_FETCHER_INFO");
+  const Option<string> jsonFetcherInfo = os::getenv("MESOS_FETCHER_INFO");
   CHECK_SOME(jsonFetcherInfo)
     << "Missing MESOS_FETCHER_INFO environment variable";
 
@@ -450,8 +456,8 @@ int main(int argc, char* argv[])
     Try<string> fetched =
       fetch(item, cacheDirectory, sandboxDirectory, frameworksHome);
     if (fetched.isError()) {
-      EXIT(1) << "Failed to fetch '" << item.uri().value()
-              << "': " + fetched.error();
+      EXIT(EXIT_FAILURE)
+        << "Failed to fetch '" << item.uri().value() << "': " + fetched.error();
     } else {
       LOG(INFO) << "Fetched '" << item.uri().value()
                 << "' to '" << fetched.get() << "'";
@@ -464,8 +470,8 @@ int main(int argc, char* argv[])
         fetcherInfo.get().user(),
         sandboxDirectory);
     if (chowned.isError()) {
-      EXIT(1) << "Failed to chown " << sandboxDirectory
-              << ": " << chowned.error();
+      EXIT(EXIT_FAILURE)
+        << "Failed to chown " << sandboxDirectory << ": " << chowned.error();
     }
   }
 

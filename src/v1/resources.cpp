@@ -25,6 +25,8 @@
 
 #include <google/protobuf/repeated_field.h>
 
+#include <mesos/roles.hpp>
+
 #include <mesos/v1/mesos.hpp>
 #include <mesos/v1/resources.hpp>
 #include <mesos/v1/values.hpp>
@@ -36,11 +38,6 @@
 #include <stout/protobuf.hpp>
 #include <stout/strings.hpp>
 
-// TODO(bernd-mesos): Remove this interim dependency in the course of
-// solving MESOS-3997.
-#include <master/constants.hpp>
-
-
 using std::map;
 using std::ostream;
 using std::set;
@@ -48,9 +45,6 @@ using std::string;
 using std::vector;
 
 using google::protobuf::RepeatedPtrField;
-
-using mesos::internal::master::MIN_CPUS;
-
 
 namespace mesos {
 namespace v1 {
@@ -63,7 +57,23 @@ bool operator==(
     const Resource::ReservationInfo& left,
     const Resource::ReservationInfo& right)
 {
-  return left.principal() == right.principal();
+  if (left.has_principal() != right.has_principal()) {
+    return false;
+  }
+
+  if (left.has_principal() && left.principal() != right.principal()) {
+    return false;
+  }
+
+  if (left.has_labels() != right.has_labels()) {
+    return false;
+  }
+
+  if (left.has_labels() && left.labels() != right.labels()) {
+    return false;
+  }
+
+  return true;
 }
 
 
@@ -75,8 +85,76 @@ bool operator!=(
 }
 
 
+bool operator==(
+    const Resource::DiskInfo::Source::Path& left,
+    const Resource::DiskInfo::Source::Path& right)
+{
+  return left.root() == right.root();
+}
+
+
+bool operator==(
+    const Resource::DiskInfo::Source::Mount& left,
+    const Resource::DiskInfo::Source::Mount& right)
+{
+  return left.root() == right.root();
+}
+
+
+bool operator!=(
+    const Resource::DiskInfo::Source::Path& left,
+    const Resource::DiskInfo::Source::Path& right)
+{
+  return !(left == right);
+}
+
+
+bool operator!=(
+    const Resource::DiskInfo::Source::Mount& left,
+    const Resource::DiskInfo::Source::Mount& right)
+{
+  return !(left == right);
+}
+
+
+bool operator==(
+    const Resource::DiskInfo::Source& left,
+    const Resource::DiskInfo::Source& right)
+{
+  if (left.type() != right.type()) {
+    return false;
+  }
+
+  if (left.has_path() && left.path() != right.path()) {
+    return false;
+  }
+
+  if (left.has_mount() && left.mount() != right.mount()) {
+    return false;
+  }
+
+  return true;
+}
+
+
+bool operator!=(
+    const Resource::DiskInfo::Source& left,
+    const Resource::DiskInfo::Source& right)
+{
+  return !(left == right);
+}
+
+
 bool operator==(const Resource::DiskInfo& left, const Resource::DiskInfo& right)
 {
+  if (left.has_source() != right.has_source()) {
+    return false;
+  }
+
+  if (left.has_source() && left.source() != right.source()) {
+    return false;
+  }
+
   // NOTE: We ignore 'volume' inside DiskInfo when doing comparison
   // because it describes how this resource will be used which has
   // nothing to do with the Resource object itself. A framework can
@@ -172,20 +250,26 @@ static bool addable(const Resource& left, const Resource& right)
   }
 
   // Check DiskInfo.
-  if (left.has_disk() != right.has_disk()) {
-    return false;
-  }
+  if (left.has_disk() != right.has_disk()) { return false; }
 
-  if (left.has_disk() && left.disk() != right.disk()) {
-    return false;
-  }
+  if (left.has_disk()) {
+    if (left.disk() != right.disk()) { return false; }
 
-  // TODO(jieyu): Even if two Resource objects with DiskInfo have the
-  // same persistence ID, they cannot be added together. In fact, this
-  // shouldn't happen if we do not add resources from different
-  // namespaces (e.g., across slave). Consider adding a warning.
-  if (left.has_disk() && left.disk().has_persistence()) {
-    return false;
+    // Two Resources that represent exclusive 'MOUNT' disks cannot be
+    // added together; this would defeat the exclusivity.
+    if (left.disk().has_source() &&
+        left.disk().source().type() == Resource::DiskInfo::Source::MOUNT) {
+      return false;
+    }
+
+    // TODO(jieyu): Even if two Resource objects with DiskInfo have
+    // the same persistence ID, they cannot be added together. In
+    // fact, this shouldn't happen if we do not add resources from
+    // different namespaces (e.g., across slave). Consider adding a
+    // warning.
+    if (left.disk().has_persistence()) {
+      return false;
+    }
   }
 
   // Check RevocableInfo.
@@ -223,18 +307,25 @@ static bool subtractable(const Resource& left, const Resource& right)
   }
 
   // Check DiskInfo.
-  if (left.has_disk() != right.has_disk()) {
-    return false;
-  }
+  if (left.has_disk() != right.has_disk()) { return false; }
 
-  if (left.has_disk() && left.disk() != right.disk()) {
-    return false;
-  }
+  if (left.has_disk()) {
+    if (left.disk() != right.disk()) { return false; }
 
-  // NOTE: For Resource objects that have DiskInfo, we can only do
-  // subtraction if they are equal.
-  if (left.has_disk() && left.disk().has_persistence() && left != right) {
-    return false;
+    // Two Resources that represent exclusive 'MOUNT' disks cannot be
+    // subtracted from eachother if they are not the exact same mount;
+    // this would defeat the exclusivity.
+    if (left.disk().has_source() &&
+        left.disk().source().type() == Resource::DiskInfo::Source::MOUNT &&
+        left != right) {
+      return false;
+    }
+
+    // NOTE: For Resource objects that have DiskInfo, we can only do
+    // subtraction if they are equal.
+    if (left.disk().has_persistence() && left != right) {
+      return false;
+    }
   }
 
   // Check RevocableInfo.
@@ -519,6 +610,7 @@ Try<Resources> Resources::parse(
     }
   }
 
+  // TODO(jmlvanre): Move this up into `Containerizer::resources`.
   Option<Error> error = internal::validateCommandLineResources(result);
   if (error.isSome()) {
     return error.get();
@@ -594,15 +686,41 @@ Option<Error> Resources::validate(const Resource& resource)
   }
 
   // Checks for 'disk' resource.
-  if (resource.has_disk() && resource.name() != "disk") {
-    return Error(
-        "DiskInfo should not be set for " + resource.name() + " resource");
+  if (resource.has_disk()) {
+    if (resource.name() != "disk") {
+      return Error(
+          "DiskInfo should not be set for " + resource.name() + " resource");
+    }
+
+    const Resource::DiskInfo& disk = resource.disk();
+
+    if (disk.has_source()) {
+      const Resource::DiskInfo::Source& source = disk.source();
+
+      if (source.type() == Resource::DiskInfo::Source::PATH &&
+          !source.has_path()) {
+        return Error(
+            "DiskInfo::Source 'type' set to 'PATH' but missing 'path' data");
+      }
+
+      if (source.type() == Resource::DiskInfo::Source::MOUNT &&
+          !source.has_mount()) {
+        return Error(
+            "DiskInfo::Source 'type' set to 'MOUNT' but missing 'mount' data");
+      }
+    }
   }
 
   // Checks for the invalid state of (role, reservation) pair.
   if (resource.role() == "*" && resource.has_reservation()) {
     return Error(
         "Invalid reservation: role \"*\" cannot be dynamically reserved");
+  }
+
+  // Check role name.
+  Option<Error> error = roles::validate(resource.role());
+  if (error.isSome()) {
+    return error;
   }
 
   return None();
@@ -744,7 +862,7 @@ Resources Resources::filter(
 }
 
 
-hashmap<string, Resources> Resources::reserved() const
+hashmap<string, Resources> Resources::reservations() const
 {
   hashmap<string, Resources> result;
 
@@ -758,7 +876,7 @@ hashmap<string, Resources> Resources::reserved() const
 }
 
 
-Resources Resources::reserved(const string& role) const
+Resources Resources::reserved(const Option<string>& role) const
 {
   return filter(lambda::bind(isReserved, lambda::_1, role));
 }
@@ -806,6 +924,23 @@ Resources Resources::flatten(
   }
 
   return flattened;
+}
+
+
+Resources Resources::createStrippedScalarQuantity() const
+{
+  Resources stripped;
+
+  foreach (const Resource& resource, resources) {
+    if (resource.type() == Value::SCALAR) {
+      Resource scalar = resource;
+      scalar.clear_reservation();
+      scalar.clear_disk();
+      stripped += scalar;
+    }
+  }
+
+  return stripped;
 }
 
 
@@ -902,14 +1037,20 @@ Try<Resources> Resources::apply(const Offer::Operation& operation) const
           return Error("Invalid CREATE Operation: Missing 'persistence'");
         }
 
-        // Strip the disk info so that we can subtract it from the
-        // original resources.
+        // Strip persistence and volume from the disk info so that we
+        // can subtract it from the original resources.
         // TODO(jieyu): Non-persistent volumes are not supported for
         // now. Persistent volumes can only be be created from regular
         // disk resources. Revisit this once we start to support
         // non-persistent volumes.
         Resource stripped = volume;
-        stripped.clear_disk();
+
+        if (stripped.disk().has_source()) {
+          stripped.mutable_disk()->clear_persistence();
+          stripped.mutable_disk()->clear_volume();
+        } else {
+          stripped.clear_disk();
+        }
 
         if (!result.contains(stripped)) {
           return Error("Invalid CREATE Operation: Insufficient disk resources");
@@ -939,8 +1080,16 @@ Try<Resources> Resources::apply(const Offer::Operation& operation) const
               "Invalid DESTROY Operation: Persistent volume does not exist");
         }
 
+        // Strip persistence and volume from the disk info so that we
+        // can subtract it from the original resources.
         Resource stripped = volume;
-        stripped.clear_disk();
+
+        if (stripped.disk().has_source()) {
+          stripped.mutable_disk()->clear_persistence();
+          stripped.mutable_disk()->clear_volume();
+        } else {
+          stripped.clear_disk();
+        }
 
         result -= volume;
         result += stripped;
@@ -957,17 +1106,10 @@ Try<Resources> Resources::apply(const Offer::Operation& operation) const
   // TODO(jieyu): Currently, we only check known resource types like
   // cpus, mem, disk, ports, etc. We should generalize this.
 
-  CHECK(result.mem() == mem() &&
-        result.disk() == disk() &&
-        result.ports() == ports());
-
-  // This comparison is an interim fix - see MESOS-3552. We are making it
-  // reasonably certain that almost equal values are correctly regarded as
-  // equal. Small, usually acceptable, differences occur due to numeric
-  // operations such as unparsing and then parsing a floating point number.
-  // TODO(bernd-mesos): Of course, they might also accumulate, so we need a
-  // better long-term fix. Apply one here when solving MESOS-3997.
-  CHECK_NEAR(result.cpus().getOrElse(0.0), cpus().getOrElse(0.0), MIN_CPUS);
+  CHECK(result.cpus() == cpus());
+  CHECK(result.mem() == mem());
+  CHECK(result.disk() == disk());
+  CHECK(result.ports() == ports());
 
   return result;
 }
@@ -1286,7 +1428,12 @@ Resources& Resources::operator-=(const Resource& that)
         // to do the validation because we want to strip negative
         // scalar Resource object.
         if (validate(*resource).isSome() || isEmpty(*resource)) {
-          resources.DeleteSubrange(i, 1);
+          // As `resources` is not ordered, and erasing an element
+          // from the middle using `DeleteSubrange` is expensive, we
+          // swap with the last element and then shrink the
+          // 'RepeatedPtrField' by one.
+          resources.Mutable(i)->Swap(resources.Mutable(resources.size() - 1));
+          resources.RemoveLast();
         }
 
         break;
@@ -1346,6 +1493,30 @@ ostream& operator<<(ostream& stream, const Resource::DiskInfo& disk)
 }
 
 
+ostream& operator<<(ostream& stream, const Labels& labels)
+{
+  stream << "{";
+
+  for (int i = 0; i < labels.labels().size(); i++) {
+    const Label& label = labels.labels().Get(i);
+
+    stream << label.key();
+
+    if (label.has_value()) {
+      stream << ": " << label.value();
+    }
+
+    if (i + 1 < labels.labels().size()) {
+      stream << ", ";
+    }
+  }
+
+  stream << "}";
+
+  return stream;
+}
+
+
 ostream& operator<<(ostream& stream, const Resource& resource)
 {
   stream << resource.name();
@@ -1353,7 +1524,15 @@ ostream& operator<<(ostream& stream, const Resource& resource)
   stream << "(" << resource.role();
 
   if (resource.has_reservation()) {
-    stream << ", " << resource.reservation().principal();
+    const Resource::ReservationInfo& reservation = resource.reservation();
+
+    if (reservation.has_principal()) {
+      stream << ", " << reservation.principal();
+    }
+
+    if (reservation.has_labels()) {
+      stream << ", " << reservation.labels();
+    }
   }
 
   stream << ")";

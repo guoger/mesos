@@ -14,7 +14,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <string>
 #include <vector>
 
 #include <gmock/gmock.h>
@@ -22,6 +21,7 @@
 #include <process/future.hpp>
 #include <process/gmock.hpp>
 #include <process/message.hpp>
+#include <process/owned.hpp>
 
 #include <stout/option.hpp>
 #include <stout/try.hpp>
@@ -37,9 +37,9 @@ using mesos::internal::master::Master;
 using mesos::internal::slave::Slave;
 
 using process::Future;
+using process::Owned;
 using process::PID;
 
-using std::string;
 using std::vector;
 
 using testing::_;
@@ -59,19 +59,19 @@ class RegistrarZooKeeperTest : public MesosZooKeeperTest {};
 // storage with ZooKeeper can successfully launch a task.
 TEST_F(RegistrarZooKeeperTest, TaskRunning)
 {
-  Try<PID<Master> > master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
-
   TestContainerizer containerizer(&exec);
 
-  Try<PID<Slave> > slave = StartSlave(&containerizer);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
   ASSERT_SOME(slave);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(&driver, _, _))
     .Times(1);
@@ -116,8 +116,6 @@ TEST_F(RegistrarZooKeeperTest, TaskRunning)
 
   driver.stop();
   driver.join();
-
-  Shutdown(); // Must shutdown before 'containerizer' gets deallocated.
 }
 
 } // namespace tests {

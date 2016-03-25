@@ -24,8 +24,40 @@
 #include <BaseTsd.h> // For `SSIZE_T`.
 // We include `Winsock2.h` before `Windows.h` explicitly to avoid symbold
 // re-definitions. This is a known pattern in the windows community.
+#include <WS2tcpip.h>
 #include <Winsock2.h>
 #include <Windows.h>
+
+#include <memory>
+
+
+#ifdef _UNICODE
+// Much of the core Windows API is available both in `string` and `wstring`
+// varieties. To avoid polluting the namespace with two versions of every
+// function, a common pattern in the Windows headers is to offer a single macro
+// that expands to the `string` or `wstring` version, depending on whether the
+// `_UNICODE` preprocessor symbol is set. For example, `GetMessage` will expand
+// to either `GetMessageA` (the `string` version) or `GetMessageW` (the
+// `wstring` version) depending on whether this symbol is defined.
+//
+// The downside of this is that it makes POSIX interop really hard. Hence, we
+// refuse to compile if such a symbol is passed in during compilation.
+#error "Mesos doesn't currently support the `_UNICODE` Windows header constant"
+#endif // _UNICODE
+
+// An RAII `HANDLE`.
+class SharedHandle : public std::shared_ptr<void>
+{
+  static_assert(std::is_same<HANDLE, void*>::value,
+                "Expected `HANDLE` to be of type `void*`.");
+
+public:
+  template <typename Deleter>
+  SharedHandle(HANDLE handle, Deleter deleter)
+      : std::shared_ptr<void>(handle, deleter) {}
+
+  HANDLE get_handle() const { return this->get(); }
+};
 
 
 // Definitions and constants used for Windows compat.
@@ -81,7 +113,20 @@ inline BOOL GetMessage(
 {
   return GetMessageWindows(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax);
 }
-#endif
+#endif // GetMessage
+
+
+// Zookeeper's native `winconfig.h` defines a macro `random` to point at
+// `rand`. This inteferes with `UUID::rand`, so we redfine it as a global
+// function in a manner similar to the `GetMessage` macro above. See the
+// accompanying comment for rationale.
+#ifdef random
+#undef random
+inline int random()
+{
+  return rand();
+}
+#endif // random
 
 
 // Define constants used for Windows compat. Allows a lot of code on
@@ -136,15 +181,46 @@ typedef SSIZE_T ssize_t;
 // the Windows versions of these flags to their POSIX equivalents so we don't
 // have to change any socket code.
 constexpr int SHUT_RD = SD_RECEIVE;
+constexpr int MSG_NOSIGNAL = 0; // `SIGPIPE` signal does not exist on Windows.
 
-// Macros that test whether a `stat` struct represents a directory or a file.
-#define S_ISDIR(mode)  (((mode) & S_IFMT) == S_IFDIR)  // Directory.
-#define S_ISREG(mode)  (((mode) & S_IFMT) == S_IFREG)  // File.
-#define S_ISCHR(mode)  (((mode) & S_IFMT) == S_IFCHR)  // Character device.
-#define S_ISFIFO(mode) (((mode) & S_IFMT) == _S_IFIFO) // Pipe.
-#define S_ISBLK(mode)  0                               // Block special device.
-#define S_ISSOCK(mode) 0                               // Socket.
-#define S_ISLNK(mode)  0                               // Symbolic link.
+// The following functions are usually macros on POSIX; we provide them here as
+// functions to avoid having global macros lying around. Note that these
+// operate on the `_stat` struct (a Windows version of the standard POSIX
+// `stat` struct), of which the `st_mode` field is known to be an `int`.
+inline bool S_ISDIR(const int mode)
+{
+  return (mode & S_IFMT) == S_IFDIR; // Directory.
+}
+
+inline bool S_ISREG(const int mode)
+{
+  return (mode & S_IFMT) == S_IFREG;  // File.
+}
+
+inline bool S_ISCHR(const int mode)
+{
+  return (mode & S_IFMT) == S_IFCHR;  // Character device.
+}
+
+inline bool S_ISFIFO(const int mode)
+{
+  return (mode & S_IFMT) == _S_IFIFO; // Pipe.
+}
+
+inline bool S_ISBLK(const int mode)
+{
+  return false;                       // Block special device.
+}
+
+inline bool S_ISSOCK(const int mode)
+{
+  return false;                       // Socket.
+}
+
+inline bool S_ISLNK(const int mode)
+{
+  return false;                       // Symbolic link.
+}
 
 // Permissions API. (cf. MESOS-3176 to track ongoing permissions work.)
 //
@@ -236,6 +312,10 @@ const mode_t S_IRWXO = S_IROTH | S_IWOTH | S_IXOTH;
 const mode_t S_ISUID = 0x08000000;        // No-op.
 const mode_t S_ISGID = 0x04000000;        // No-op.
 const mode_t S_ISVTX = 0x02000000;        // No-op.
+
+
+// Flags not supported by Windows.
+const mode_t O_SYNC = 0x00000000;         // No-op.
 
 
 inline auto strerror_r(int errnum, char* buffer, size_t length) ->
@@ -332,5 +412,14 @@ decltype(_access(fileName, accessMode))
   return _access(fileName, accessMode);
 }
 
+// `os::system` returns -1 if the processor cannot be started
+// therefore any return value indicates the process has been started
+#ifndef WIFEXITED
+  #define WIFEXITED(x) ((x) != -1)
+#endif // WIFWXITED
+
+#ifndef WEXITSTATUS
+  #define WEXITSTATUS(x) (x)
+#endif // WEXITSTATUS
 
 #endif // __STOUT_WINDOWS_HPP__

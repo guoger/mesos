@@ -29,6 +29,8 @@
 #include "slave/paths.hpp"
 #include "slave/state.hpp"
 
+#include "tests/mesos.hpp"
+
 namespace mesos {
 namespace internal {
 namespace slave {
@@ -54,12 +56,17 @@ public:
     CHECK_SOME(path) << "Failed to mkdtemp";
     rootDir = path.get();
 
+    path = os::mkdtemp();
+    CHECK_SOME(path) << "Failed to mkdtemp";
+    diskSourceDir = path.get();
+
     imageType = Image::APPC;
   }
 
   virtual void TearDown()
   {
      os::rmdir(rootDir);
+     os::rmdir(diskSourceDir);
   }
 
 protected:
@@ -71,6 +78,7 @@ protected:
   string role;
   string persistenceId;
   string rootDir;
+  string diskSourceDir;
   Image::Type imageType;
 };
 
@@ -93,6 +101,57 @@ TEST_F(PathsTest, CreateExecutorDirectory)
       containerId.value());
 
   ASSERT_EQ(dir, result);
+}
+
+
+TEST_F(PathsTest, ParseExecutorRunPath)
+{
+  string goodDir = paths::getExecutorRunPath(
+      rootDir,
+      slaveId,
+      frameworkId,
+      executorId,
+      containerId);
+
+  string badDir1 = paths::getExecutorPath(
+      "/some/other/root",
+      slaveId,
+      frameworkId,
+      executorId);
+
+  string badDir2 = paths::getExecutorPath(
+      rootDir,
+      slaveId,
+      frameworkId,
+      executorId);
+
+  string badDir3 = path::join(
+      rootDir,
+      "notslaves",
+      slaveId.value(),
+      "notframeworks",
+      frameworkId.value(),
+      "notexecutors",
+      executorId.value(),
+      "notruns",
+      containerId.value());
+
+  Try<ExecutorRunPath> path = paths::parseExecutorRunPath(rootDir, goodDir);
+  ASSERT_SOME(path);
+
+  EXPECT_EQ(slaveId, path->slaveId);
+  EXPECT_EQ(frameworkId, path->frameworkId);
+  EXPECT_EQ(executorId, path->executorId);
+  EXPECT_EQ(containerId, path->containerId);
+
+  path = paths::parseExecutorRunPath(rootDir, badDir1);
+  ASSERT_ERROR(path);
+
+  path = paths::parseExecutorRunPath(rootDir, badDir2);
+  ASSERT_ERROR(path);
+
+  path = paths::parseExecutorRunPath(rootDir, badDir3);
+  ASSERT_ERROR(path);
 }
 
 
@@ -221,6 +280,36 @@ TEST_F(PathsTest, PersistentVolume)
   string dir = path::join(rootDir, "volumes", "roles", role, persistenceId);
 
   EXPECT_EQ(dir, paths::getPersistentVolumePath(rootDir, role, persistenceId));
+
+  dir = path::join(diskSourceDir, "volumes", "roles", role, persistenceId);
+
+  Resource disk = tests::createPersistentVolume(
+      Megabytes(1024),
+      "role1",
+      persistenceId,
+      "path1",
+      None());
+
+  disk.mutable_disk()->mutable_source()->set_type(
+      Resource::DiskInfo::Source::PATH);
+
+  disk.mutable_disk()->mutable_source()->mutable_path()->set_root(
+      diskSourceDir);
+
+  EXPECT_EQ(
+      dir,
+      paths::getPersistentVolumePath(rootDir, disk));
+
+  disk.mutable_disk()->mutable_source()->set_type(
+      Resource::DiskInfo::Source::MOUNT);
+
+  disk.mutable_disk()->mutable_source()->clear_path();
+  disk.mutable_disk()->mutable_source()->mutable_mount()->set_root(
+      diskSourceDir);
+
+  EXPECT_EQ(
+      diskSourceDir,
+      paths::getPersistentVolumePath(rootDir, disk));
 }
 
 

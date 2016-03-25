@@ -24,8 +24,8 @@ using std::string;
 using std::list;
 
 using mesos::slave::ContainerConfig;
+using mesos::slave::ContainerLaunchInfo;
 using mesos::slave::ContainerLimitation;
-using mesos::slave::ContainerPrepareInfo;
 using mesos::slave::ContainerState;
 
 namespace mesos {
@@ -57,15 +57,13 @@ Future<Nothing> MesosIsolator::recover(
 }
 
 
-Future<Option<ContainerPrepareInfo>> MesosIsolator::prepare(
+Future<Option<ContainerLaunchInfo>> MesosIsolator::prepare(
     const ContainerID& containerId,
-    const ExecutorInfo& executorInfo,
     const ContainerConfig& containerConfig)
 {
   return dispatch(process.get(),
                   &MesosIsolatorProcess::prepare,
                   containerId,
-                  executorInfo,
                   containerConfig);
 }
 
@@ -106,6 +104,15 @@ Future<ResourceStatistics> MesosIsolator::usage(
 {
   return dispatch(process.get(),
                   &MesosIsolatorProcess::usage,
+                  containerId);
+}
+
+
+Future<ContainerStatus> MesosIsolator::status(
+    const ContainerID& containerId)
+{
+  return dispatch(process.get(),
+                  &MesosIsolatorProcess::status,
                   containerId);
 }
 

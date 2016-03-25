@@ -23,7 +23,6 @@
 
 #include <stout/gtest.hpp>
 #include <stout/json.hpp>
-#include <stout/stringify.hpp>
 
 #include "common/http.hpp"
 #include "common/protobuf_utils.hpp"
@@ -41,8 +40,7 @@ using mesos::internal::protobuf::createTask;
 // TODO(bmahler): Add tests for other JSON models.
 
 // This test ensures we don't break the API when it comes to JSON
-// representation of tasks. Also, we want to ensure that tasks are
-// modeled the same way when using 'Task' vs. 'TaskInfo'.
+// representation of tasks.
 TEST(HTTPTest, ModelTask)
 {
   TaskID taskId;
@@ -83,18 +81,17 @@ TEST(HTTPTest, ModelTask)
   discovery.set_name("discover");
   discovery.mutable_ports()->CopyFrom(ports);
 
-  TaskInfo task;
-  task.set_name("task");
-  task.mutable_task_id()->CopyFrom(taskId);
-  task.mutable_slave_id()->CopyFrom(slaveId);
-  task.mutable_command()->set_value("echo hello");
-  task.mutable_discovery()->CopyFrom(discovery);
+  TaskInfo taskInfo;
+  taskInfo.set_name("task");
+  taskInfo.mutable_task_id()->CopyFrom(taskId);
+  taskInfo.mutable_slave_id()->CopyFrom(slaveId);
+  taskInfo.mutable_command()->set_value("echo hello");
+  taskInfo.mutable_discovery()->CopyFrom(discovery);
 
-  Task task_ = createTask(task, state, frameworkId);
-  task_.add_statuses()->CopyFrom(statuses[0]);
+  Task task = createTask(taskInfo, state, frameworkId);
+  task.add_statuses()->CopyFrom(statuses[0]);
 
-  JSON::Value object = model(task, frameworkId, state, statuses);
-  JSON::Value object_ = model(task_);
+  JSON::Value object = model(task);
 
   Try<JSON::Value> expected = JSON::parse(
       "{"
@@ -146,10 +143,6 @@ TEST(HTTPTest, ModelTask)
   ASSERT_SOME(expected);
 
   EXPECT_EQ(expected.get(), object);
-  EXPECT_EQ(expected.get(), object_);
-
-  // Ensure both are modeled the same.
-  EXPECT_EQ(object, object_);
 }
 
 

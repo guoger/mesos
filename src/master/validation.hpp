@@ -78,6 +78,9 @@ namespace internal {
 // Validates resources of the task and executor (if present).
 Option<Error> validateResources(const TaskInfo& task);
 
+// Validates the kill policy of the task.
+Option<Error> validateKillPolicy(const TaskInfo& task);
+
 } // namespace internal {
 
 } // namespace task {
@@ -105,14 +108,11 @@ namespace operation {
 // Validates the RESERVE operation.
 Option<Error> validate(
     const Offer::Operation::Reserve& reserve,
-    const Option<std::string>& role,
     const Option<std::string>& principal);
 
 
 // Validates the UNRESERVE operation.
-Option<Error> validate(
-    const Offer::Operation::Unreserve& unreserve,
-    bool hasPrincipal);
+Option<Error> validate(const Offer::Operation::Unreserve& unreserve);
 
 
 // Validates the CREATE operation. We need slave's checkpointed

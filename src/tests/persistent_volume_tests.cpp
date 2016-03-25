@@ -25,6 +25,7 @@
 #include <process/clock.hpp>
 #include <process/gmock.hpp>
 #include <process/gtest.hpp>
+#include <process/owned.hpp>
 
 #include <stout/foreach.hpp>
 #include <stout/format.hpp>
@@ -43,9 +44,12 @@
 #include "slave/slave.hpp"
 
 #include "tests/containerizer.hpp"
+#include "tests/environment.hpp"
 #include "tests/mesos.hpp"
 
 using namespace process;
+
+using google::protobuf::RepeatedPtrField;
 
 using mesos::internal::master::Master;
 
@@ -55,44 +59,90 @@ using std::string;
 using std::vector;
 
 using testing::_;
-using testing::Return;
 using testing::DoAll;
+using testing::Return;
+using testing::WithParamInterface;
 
 namespace mesos {
 namespace internal {
 namespace tests {
 
-class PersistentVolumeTest : public MesosTest
+enum PersistentVolumeSourceType
+{
+  NONE,
+  PATH
+};
+
+
+class PersistentVolumeTest
+  : public MesosTest,
+    public WithParamInterface<PersistentVolumeSourceType>
 {
 protected:
-  master::Flags MasterFlags(const vector<FrameworkInfo>& frameworks)
+  virtual void SetUp()
   {
-    master::Flags flags = CreateMasterFlags();
+    MesosTest::SetUp();
+    Try<string> path = environment->mkdtemp();
+    ASSERT_SOME(path) << "Failed to mkdtemp";
+    diskPath = path.get();
+  }
 
-    ACLs acls;
-    hashset<string> roles;
+  Resource getDiskResource(const Megabytes& mb)
+  {
+    Resource diskResource;
 
-    foreach (const FrameworkInfo& framework, frameworks) {
-      mesos::ACL::RegisterFramework* acl = acls.add_register_frameworks();
-      acl->mutable_principals()->add_values(framework.principal());
-      acl->mutable_roles()->add_values(framework.role());
+    switch (GetParam()) {
+      case NONE: {
+        diskResource = createDiskResource(
+            stringify(mb.megabytes()),
+            "role1",
+            None(),
+            None());
 
-      roles.insert(framework.role());
+        break;
+      }
+      case PATH: {
+        diskResource = createDiskResource(
+            stringify(mb.megabytes()),
+            "role1",
+            None(),
+            None(),
+            createDiskSourcePath(diskPath));
+
+        break;
+      }
     }
 
-    flags.acls = acls;
-    flags.roles = strings::join(",", roles);
-
-    return flags;
+    return diskResource;
   }
+
+  string getSlaveResources()
+  {
+    Resources resources = Resources::parse("cpus:2;mem:2048").get() +
+      getDiskResource(Megabytes(2048));
+
+    return stringify(JSON::protobuf(
+        static_cast<const RepeatedPtrField<Resource>&>(resources)));
+  }
+
+  string diskPath;
 };
+
+
+// The PersistentVolumeTest tests are parameterized by the disk source.
+INSTANTIATE_TEST_CASE_P(
+    DiskResource,
+    PersistentVolumeTest,
+    ::testing::Values(
+        PersistentVolumeSourceType::NONE,
+        PersistentVolumeSourceType::PATH));
 
 
 // This test verifies that CheckpointResourcesMessages are sent to the
 // slave when the framework creates/destroys persistent volumes, and
 // the resources in the messages correctly reflect the resources that
 // need to be checkpointed on the slave.
-TEST_F(PersistentVolumeTest, SendingCheckpointResourcesMessage)
+TEST_P(PersistentVolumeTest, SendingCheckpointResourcesMessage)
 {
   FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
   frameworkInfo.set_role("role1");
@@ -102,18 +152,19 @@ TEST_F(PersistentVolumeTest, SendingCheckpointResourcesMessage)
   masterFlags.allocation_interval = Milliseconds(50);
   masterFlags.roles = frameworkInfo.role();
 
-  Try<PID<Master>> master = StartMaster(masterFlags);
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
   ASSERT_SOME(master);
 
   slave::Flags slaveFlags = CreateSlaveFlags();
-  slaveFlags.resources = "disk(role1):1024";
+  slaveFlags.resources = getSlaveResources();
 
-  Try<PID<Slave>> slave = StartSlave(slaveFlags);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), slaveFlags);
   ASSERT_SOME(slave);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, frameworkInfo, master.get(), DEFAULT_CREDENTIAL);
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(&driver, _, _));
 
@@ -138,20 +189,20 @@ TEST_F(PersistentVolumeTest, SendingCheckpointResourcesMessage)
   Future<CheckpointResourcesMessage> message1 =
     FUTURE_PROTOBUF(CheckpointResourcesMessage(), _, _);
 
-  Resources volume1 = createPersistentVolume(
-      Megabytes(64),
-      "role1",
+  Resource volume1 = createPersistentVolume(
+      getDiskResource(Megabytes(64)),
       "id1",
-      "path1");
+      "path1",
+      None());
 
-  Resources volume2 = createPersistentVolume(
-      Megabytes(128),
-      "role1",
+  Resource volume2 = createPersistentVolume(
+      getDiskResource(Megabytes(128)),
       "id2",
-      "path2");
+      "path2",
+      None());
 
   // We use the filter explicitly here so that the resources will not
-  // be filtered for 5 seconds (by default).
+  // be filtered for 5 seconds (the default).
   Filters filters;
   filters.set_refuse_seconds(0);
 
@@ -175,7 +226,8 @@ TEST_F(PersistentVolumeTest, SendingCheckpointResourcesMessage)
   // Await the `CheckpointResourcesMessage` and ensure that it contains
   // both volume1 and volume2.
   AWAIT_READY(message2);
-  EXPECT_EQ(Resources(message2.get().resources()), volume1 + volume2);
+  EXPECT_EQ(Resources(message2.get().resources()),
+            Resources(volume1) + Resources(volume2));
 
   AWAIT_READY(offers);
   EXPECT_FALSE(offers.get().empty());
@@ -199,31 +251,30 @@ TEST_F(PersistentVolumeTest, SendingCheckpointResourcesMessage)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
 // This test verifies that the slave checkpoints the resources for
 // persistent volumes to the disk, recovers them upon restart, and
 // sends them to the master during re-registration.
-TEST_F(PersistentVolumeTest, ResourcesCheckpointing)
+TEST_P(PersistentVolumeTest, ResourcesCheckpointing)
 {
-  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
-  frameworkInfo.set_role("role1");
-
-  Try<PID<Master>> master = StartMaster(MasterFlags({frameworkInfo}));
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   slave::Flags slaveFlags = CreateSlaveFlags();
-  slaveFlags.resources = "disk(role1):1024";
+  slaveFlags.resources = getSlaveResources();
 
-  Try<PID<Slave>> slave = StartSlave(slaveFlags);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), slaveFlags);
   ASSERT_SOME(slave);
+
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.set_role("role1");
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, frameworkInfo, master.get(), DEFAULT_CREDENTIAL);
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(&driver, _, _));
 
@@ -240,13 +291,13 @@ TEST_F(PersistentVolumeTest, ResourcesCheckpointing)
   Offer offer = offers.get()[0];
 
   Future<CheckpointResourcesMessage> checkpointResources =
-    FUTURE_PROTOBUF(CheckpointResourcesMessage(), _, slave.get());
+    FUTURE_PROTOBUF(CheckpointResourcesMessage(), _, slave.get()->pid);
 
-  Resources volume = createPersistentVolume(
-      Megabytes(64),
-      "role1",
+  Resource volume = createPersistentVolume(
+      getDiskResource(Megabytes(64)),
       "id1",
-      "path1");
+      "path1",
+      None());
 
   driver.acceptOffers(
       {offer.id()},
@@ -255,12 +306,12 @@ TEST_F(PersistentVolumeTest, ResourcesCheckpointing)
   AWAIT_READY(checkpointResources);
 
   // Restart the slave.
-  Stop(slave.get());
+  slave.get()->terminate();
 
   Future<ReregisterSlaveMessage> reregisterSlave =
     FUTURE_PROTOBUF(ReregisterSlaveMessage(), _, _);
 
-  slave = StartSlave(slaveFlags);
+  slave = StartSlave(detector.get(), slaveFlags);
   ASSERT_SOME(slave);
 
   AWAIT_READY(reregisterSlave);
@@ -268,28 +319,27 @@ TEST_F(PersistentVolumeTest, ResourcesCheckpointing)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
-TEST_F(PersistentVolumeTest, PreparePersistentVolume)
+TEST_P(PersistentVolumeTest, PreparePersistentVolume)
 {
-  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
-  frameworkInfo.set_role("role1");
-
-  Try<PID<Master>> master = StartMaster(MasterFlags({frameworkInfo}));
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   slave::Flags slaveFlags = CreateSlaveFlags();
-  slaveFlags.resources = "disk(role1):1024";
+  slaveFlags.resources = getSlaveResources();
 
-  Try<PID<Slave>> slave = StartSlave(slaveFlags);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), slaveFlags);
   ASSERT_SOME(slave);
+
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.set_role("role1");
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, frameworkInfo, master.get(), DEFAULT_CREDENTIAL);
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(&driver, _, _));
 
@@ -305,14 +355,14 @@ TEST_F(PersistentVolumeTest, PreparePersistentVolume)
 
   Offer offer = offers.get()[0];
 
-  Resources volume = createPersistentVolume(
-      Megabytes(64),
-      "role1",
+  Resource volume = createPersistentVolume(
+      getDiskResource(Megabytes(64)),
       "id1",
-      "path1");
+      "path1",
+      None());
 
   Future<CheckpointResourcesMessage> checkpointResources =
-    FUTURE_PROTOBUF(CheckpointResourcesMessage(), _, slave.get());
+    FUTURE_PROTOBUF(CheckpointResourcesMessage(), _, slave.get()->pid);
 
   driver.acceptOffers(
       {offer.id()},
@@ -325,39 +375,35 @@ TEST_F(PersistentVolumeTest, PreparePersistentVolume)
   Clock::settle();
   Clock::resume();
 
-  EXPECT_TRUE(
-      os::exists(slave::paths::getPersistentVolumePath(
-          slaveFlags.work_dir,
-          "role1",
-          "id1")));
+  EXPECT_TRUE(os::exists(slave::paths::getPersistentVolumePath(
+      slaveFlags.work_dir,
+      volume)));
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
 // This test verifies the case where a slave that has checkpointed
 // persistent volumes reregisters with a failed over master, and the
 // persistent volumes are later correctly offered to the framework.
-TEST_F(PersistentVolumeTest, MasterFailover)
+TEST_P(PersistentVolumeTest, MasterFailover)
 {
-  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
-  frameworkInfo.set_role("role1");
+  master::Flags masterFlags = CreateMasterFlags();
 
-  master::Flags masterFlags = MasterFlags({frameworkInfo});
-
-  Try<PID<Master>> master = StartMaster(masterFlags);
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
   ASSERT_SOME(master);
 
-  StandaloneMasterDetector detector(master.get());
+  StandaloneMasterDetector detector(master.get()->pid);
 
   slave::Flags slaveFlags = CreateSlaveFlags();
-  slaveFlags.resources = "disk(role1):1024";
+  slaveFlags.resources = getSlaveResources();
 
-  Try<PID<Slave>> slave = StartSlave(&detector, slaveFlags);
+  Try<Owned<cluster::Slave>> slave = StartSlave(&detector, slaveFlags);
   ASSERT_SOME(slave);
+
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.set_role("role1");
 
   MockScheduler sched;
   TestingMesosSchedulerDriver driver(&sched, &detector, frameworkInfo);
@@ -376,14 +422,14 @@ TEST_F(PersistentVolumeTest, MasterFailover)
 
   Offer offer1 = offers1.get()[0];
 
-  Resources volume = createPersistentVolume(
-      Megabytes(64),
-      "role1",
+  Resource volume = createPersistentVolume(
+      getDiskResource(Megabytes(64)),
       "id1",
-      "path1");
+      "path1",
+      None());
 
   Future<CheckpointResourcesMessage> checkpointResources =
-    FUTURE_PROTOBUF(CheckpointResourcesMessage(), _, slave.get());
+    FUTURE_PROTOBUF(CheckpointResourcesMessage(), _, slave.get()->pid);
 
   driver.acceptOffers(
       {offer1.id()},
@@ -397,7 +443,7 @@ TEST_F(PersistentVolumeTest, MasterFailover)
   Clock::resume();
 
   // Simulate failed over master by restarting the master.
-  Stop(master.get());
+  master->reset();
 
   EXPECT_CALL(sched, disconnected(&driver));
 
@@ -416,7 +462,7 @@ TEST_F(PersistentVolumeTest, MasterFailover)
 
   // Simulate a new master detected event on the slave so that the
   // slave will do a re-registration.
-  detector.appoint(master.get());
+  detector.appoint(master.get()->pid);
 
   AWAIT_READY(slaveReregistered);
 
@@ -429,35 +475,33 @@ TEST_F(PersistentVolumeTest, MasterFailover)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
 // This test verifies that a slave will refuse to start if the
 // checkpointed resources it recovers are not compatible with the
 // slave resources specified using the '--resources' flag.
-TEST_F(PersistentVolumeTest, IncompatibleCheckpointedResources)
+TEST_P(PersistentVolumeTest, IncompatibleCheckpointedResources)
 {
-  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
-  frameworkInfo.set_role("role1");
-
-  Try<PID<Master>> master = StartMaster(MasterFlags({frameworkInfo}));
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   slave::Flags slaveFlags = CreateSlaveFlags();
-  slaveFlags.resources = "disk(role1):1024";
+  slaveFlags.resources = getSlaveResources();
 
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
   TestContainerizer containerizer(&exec);
-  StandaloneMasterDetector detector(master.get());
+  StandaloneMasterDetector detector(master.get()->pid);
 
   MockSlave slave1(slaveFlags, &detector, &containerizer);
   spawn(slave1);
 
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.set_role("role1");
+
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, frameworkInfo, master.get(), DEFAULT_CREDENTIAL);
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(&driver, _, _));
 
@@ -473,11 +517,11 @@ TEST_F(PersistentVolumeTest, IncompatibleCheckpointedResources)
 
   Offer offer = offers.get()[0];
 
-  Resources volume = createPersistentVolume(
-      Megabytes(64),
-      "role1",
+  Resource volume = createPersistentVolume(
+      getDiskResource(Megabytes(64)),
       "id1",
-      "path1");
+      "path1",
+      None());
 
   Future<CheckpointResourcesMessage> checkpointResources =
     FUTURE_PROTOBUF(CheckpointResourcesMessage(), _, _);
@@ -516,32 +560,31 @@ TEST_F(PersistentVolumeTest, IncompatibleCheckpointedResources)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
 // This test verifies that a persistent volume is correctly linked by
 // the containerizer and the task is able to access it according to
 // the container path it specifies.
-TEST_F(PersistentVolumeTest, AccessPersistentVolume)
+TEST_P(PersistentVolumeTest, AccessPersistentVolume)
 {
-  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
-  frameworkInfo.set_role("role1");
-
-  Try<PID<Master>> master = StartMaster(MasterFlags({frameworkInfo}));
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   slave::Flags slaveFlags = CreateSlaveFlags();
 
-  slaveFlags.resources = "cpus:2;mem:1024;disk(role1):1024";
+  slaveFlags.resources = getSlaveResources();
 
-  Try<PID<Slave>> slave = StartSlave(slaveFlags);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), slaveFlags);
   ASSERT_SOME(slave);
+
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.set_role("role1");
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, frameworkInfo, master.get(), DEFAULT_CREDENTIAL);
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
 
   Future<FrameworkID> frameworkId;
   EXPECT_CALL(sched, registered(&driver, _, _))
@@ -561,15 +604,15 @@ TEST_F(PersistentVolumeTest, AccessPersistentVolume)
 
   Offer offer = offers.get()[0];
 
-  Resources volume = createPersistentVolume(
-      Megabytes(64),
-      "role1",
+  Resource volume = createPersistentVolume(
+      getDiskResource(Megabytes(64)),
       "id1",
-      "path1");
+      "path1",
+      None());
 
   // Create a task which writes a file in the persistent volume.
-  Resources taskResources =
-    Resources::parse("cpus:1;mem:128;disk(role1):32").get() + volume;
+  Resources taskResources = Resources::parse("cpus:1;mem:128").get() +
+    getDiskResource(Megabytes(32)) + volume;
 
   TaskInfo task = createTask(
       offer.slave_id(),
@@ -614,15 +657,12 @@ TEST_F(PersistentVolumeTest, AccessPersistentVolume)
 
   const string& volumePath = slave::paths::getPersistentVolumePath(
       slaveFlags.work_dir,
-      "role1",
-      "id1");
+      volume);
 
   EXPECT_SOME_EQ("abc\n", os::read(path::join(volumePath, "file")));
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
@@ -631,25 +671,26 @@ TEST_F(PersistentVolumeTest, AccessPersistentVolume)
 // keeps testing if the persistent volume exists, and fails if it does
 // not. So the framework should not receive a TASK_FAILED after the
 // slave finishes recovery.
-TEST_F(PersistentVolumeTest, SlaveRecovery)
+TEST_P(PersistentVolumeTest, SlaveRecovery)
 {
-  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
-  frameworkInfo.set_role("role1");
-  frameworkInfo.set_checkpoint(true);
-
-  Try<PID<Master>> master = StartMaster(MasterFlags({frameworkInfo}));
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   slave::Flags slaveFlags = CreateSlaveFlags();
 
-  slaveFlags.resources = "cpus:2;mem:1024;disk(role1):1024";
+  slaveFlags.resources = getSlaveResources();
 
-  Try<PID<Slave>> slave = StartSlave(slaveFlags);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), slaveFlags);
   ASSERT_SOME(slave);
+
+  FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
+  frameworkInfo.set_role("role1");
+  frameworkInfo.set_checkpoint(true);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, frameworkInfo, master.get(), DEFAULT_CREDENTIAL);
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
 
   Future<FrameworkID> frameworkId;
   EXPECT_CALL(sched, registered(&driver, _, _))
@@ -669,15 +710,15 @@ TEST_F(PersistentVolumeTest, SlaveRecovery)
 
   Offer offer = offers.get()[0];
 
-  Resources volume = createPersistentVolume(
-      Megabytes(64),
-      "role1",
+  Resource volume = createPersistentVolume(
+      getDiskResource(Megabytes(64)),
       "id1",
-      "path1");
+      "path1",
+      None());
 
   // Create a task which writes a file in the persistent volume.
-  Resources taskResources =
-    Resources::parse("cpus:1;mem:128;disk(role1):32").get() + volume;
+  Resources taskResources = Resources::parse("cpus:1;mem:128").get() +
+    getDiskResource(Megabytes(32)) + volume;
 
   TaskInfo task = createTask(
       offer.slave_id(),
@@ -705,7 +746,7 @@ TEST_F(PersistentVolumeTest, SlaveRecovery)
   AWAIT_READY(ack);
 
   // Restart the slave.
-  Stop(slave.get());
+  slave.get()->terminate();
 
   Future<SlaveReregisteredMessage> slaveReregisteredMessage =
     FUTURE_PROTOBUF(SlaveReregisteredMessage(), _, _);
@@ -713,7 +754,7 @@ TEST_F(PersistentVolumeTest, SlaveRecovery)
   Future<ReregisterExecutorMessage> reregisterExecutorMessage =
     FUTURE_PROTOBUF(ReregisterExecutorMessage(), _, _);
 
-  slave = StartSlave(slaveFlags);
+  slave = StartSlave(detector.get(), slaveFlags);
   ASSERT_SOME(slave);
 
   Clock::pause();
@@ -745,14 +786,12 @@ TEST_F(PersistentVolumeTest, SlaveRecovery)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
 // This test verifies that the `create` and `destroy` operations complete
 // successfully when authorization succeeds.
-TEST_F(PersistentVolumeTest, GoodACLCreateThenDestroy)
+TEST_P(PersistentVolumeTest, GoodACLCreateThenDestroy)
 {
   // Manipulate the clock manually in order to
   // control the timing of the offer cycle.
@@ -761,10 +800,10 @@ TEST_F(PersistentVolumeTest, GoodACLCreateThenDestroy)
   ACLs acls;
 
   // This ACL declares that the principal of `DEFAULT_CREDENTIAL`
-  // can create any persistent volumes.
+  // can create persistent volumes for any role.
   mesos::ACL::CreateVolume* create = acls.add_create_volumes();
   create->mutable_principals()->add_values(DEFAULT_CREDENTIAL.principal());
-  create->mutable_volume_types()->set_type(mesos::ACL::Entity::ANY);
+  create->mutable_roles()->set_type(mesos::ACL::Entity::ANY);
 
   // This ACL declares that the principal of `DEFAULT_CREDENTIAL`
   // can destroy its own persistent volumes.
@@ -774,7 +813,7 @@ TEST_F(PersistentVolumeTest, GoodACLCreateThenDestroy)
       DEFAULT_CREDENTIAL.principal());
 
   // We use the filter explicitly here so that the resources will not
-  // be filtered for 5 seconds (by default).
+  // be filtered for 5 seconds (the default).
   Filters filters;
   filters.set_refuse_seconds(0);
 
@@ -786,21 +825,22 @@ TEST_F(PersistentVolumeTest, GoodACLCreateThenDestroy)
   masterFlags.acls = acls;
   masterFlags.roles = frameworkInfo.role();
 
-  Try<PID<Master>> master = StartMaster(masterFlags);
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
   ASSERT_SOME(master);
 
   // Create a slave. Resources are being statically reserved because persistent
   // volume creation requires reserved resources.
   slave::Flags slaveFlags = CreateSlaveFlags();
-  slaveFlags.resources = "cpus:2;mem:1024;disk(role1):2048";
+  slaveFlags.resources = getSlaveResources();
 
-  Try<PID<Slave>> slave = StartSlave(slaveFlags);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), slaveFlags);
   ASSERT_SOME(slave);
 
   // Create a scheduler/framework.
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, frameworkInfo, master.get(), DEFAULT_CREDENTIAL);
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(&driver, _, _));
 
@@ -820,14 +860,14 @@ TEST_F(PersistentVolumeTest, GoodACLCreateThenDestroy)
 
   Offer offer = offers.get()[0];
 
-  Resources volume = createPersistentVolume(
-      Megabytes(128),
-      "role1",
+  Resource volume = createPersistentVolume(
+      getDiskResource(Megabytes(128)),
       "id1",
-      "path1");
+      "path1",
+      None());
 
   Future<CheckpointResourcesMessage> checkpointResources1 =
-    FUTURE_PROTOBUF(CheckpointResourcesMessage(), _, slave.get());
+    FUTURE_PROTOBUF(CheckpointResourcesMessage(), _, slave.get()->pid);
 
   // Create the persistent volume using `acceptOffers`.
   driver.acceptOffers(
@@ -855,14 +895,12 @@ TEST_F(PersistentVolumeTest, GoodACLCreateThenDestroy)
 
   // Check that the persistent volume was created successfully.
   EXPECT_TRUE(Resources(offer.resources()).contains(volume));
-  EXPECT_TRUE(
-      os::exists(slave::paths::getPersistentVolumePath(
-          slaveFlags.work_dir,
-          "role1",
-          "id1")));
+  EXPECT_TRUE(os::exists(slave::paths::getPersistentVolumePath(
+      slaveFlags.work_dir,
+      volume)));
 
   Future<CheckpointResourcesMessage> checkpointResources2 =
-    FUTURE_PROTOBUF(CheckpointResourcesMessage(), _, slave.get());
+    FUTURE_PROTOBUF(CheckpointResourcesMessage(), _, slave.get()->pid);
 
   // Destroy the persistent volume using `acceptOffers`.
   driver.acceptOffers(
@@ -891,14 +929,12 @@ TEST_F(PersistentVolumeTest, GoodACLCreateThenDestroy)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
 // This test verifies that the `create` and `destroy` operations complete
 // successfully when authorization succeeds and no principal is provided.
-TEST_F(PersistentVolumeTest, GoodACLNoPrincipal)
+TEST_P(PersistentVolumeTest, GoodACLNoPrincipal)
 {
   // Manipulate the clock manually in order to
   // control the timing of the offer cycle.
@@ -907,10 +943,10 @@ TEST_F(PersistentVolumeTest, GoodACLNoPrincipal)
   ACLs acls;
 
   // This ACL declares that any principal (and also frameworks without a
-  // principal) can create persistent volumes.
+  // principal) can create persistent volumes for any role.
   mesos::ACL::CreateVolume* create = acls.add_create_volumes();
   create->mutable_principals()->set_type(mesos::ACL::Entity::ANY);
-  create->mutable_volume_types()->set_type(mesos::ACL::Entity::ANY);
+  create->mutable_roles()->set_type(mesos::ACL::Entity::ANY);
 
   // This ACL declares that any principal (and also frameworks without a
   // principal) can destroy persistent volumes.
@@ -919,7 +955,7 @@ TEST_F(PersistentVolumeTest, GoodACLNoPrincipal)
   destroy->mutable_creator_principals()->set_type(mesos::ACL::Entity::ANY);
 
   // We use the filter explicitly here so that the resources will not be
-  // filtered for 5 seconds (by default).
+  // filtered for 5 seconds (the default).
   Filters filters;
   filters.set_refuse_seconds(0);
 
@@ -936,21 +972,22 @@ TEST_F(PersistentVolumeTest, GoodACLNoPrincipal)
   masterFlags.roles = frameworkInfo.role();
   masterFlags.authenticate_frameworks = false;
 
-  Try<PID<Master>> master = StartMaster(masterFlags);
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
   ASSERT_SOME(master);
 
   // Create a slave. Resources are being statically reserved because persistent
   // volume creation requires reserved resources.
   slave::Flags slaveFlags = CreateSlaveFlags();
-  slaveFlags.resources = "cpus:2;mem:1024;disk(role1):2048";
+  slaveFlags.resources = getSlaveResources();
 
-  Try<PID<Slave>> slave = StartSlave(slaveFlags);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), slaveFlags);
   ASSERT_SOME(slave);
 
   // Create a scheduler/framework.
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, frameworkInfo, master.get(), DEFAULT_CREDENTIAL);
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(&driver, _, _));
 
@@ -970,14 +1007,14 @@ TEST_F(PersistentVolumeTest, GoodACLNoPrincipal)
 
   Offer offer = offers.get()[0];
 
-  Resources volume = createPersistentVolume(
-      Megabytes(128),
-      "role1",
+  Resource volume = createPersistentVolume(
+      getDiskResource(Megabytes(128)),
       "id1",
-      "path1");
+      "path1",
+      None());
 
   Future<CheckpointResourcesMessage> checkpointResources1 =
-    FUTURE_PROTOBUF(CheckpointResourcesMessage(), _, slave.get());
+    FUTURE_PROTOBUF(CheckpointResourcesMessage(), _, slave.get()->pid);
 
   // Create the persistent volume using `acceptOffers`.
   driver.acceptOffers(
@@ -1005,14 +1042,12 @@ TEST_F(PersistentVolumeTest, GoodACLNoPrincipal)
 
   // Check that the persistent volume was successfully created.
   EXPECT_TRUE(Resources(offer.resources()).contains(volume));
-  EXPECT_TRUE(
-      os::exists(slave::paths::getPersistentVolumePath(
-          slaveFlags.work_dir,
-          "role1",
-          "id1")));
+  EXPECT_TRUE(os::exists(slave::paths::getPersistentVolumePath(
+      slaveFlags.work_dir,
+      volume)));
 
   Future<CheckpointResourcesMessage> checkpointResources2 =
-    FUTURE_PROTOBUF(CheckpointResourcesMessage(), _, slave.get());
+    FUTURE_PROTOBUF(CheckpointResourcesMessage(), _, slave.get()->pid);
 
   // Destroy the persistent volume using `acceptOffers`.
   driver.acceptOffers(
@@ -1041,14 +1076,12 @@ TEST_F(PersistentVolumeTest, GoodACLNoPrincipal)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
 // This test verifies that `create` and `destroy` operations fail as expected
 // when authorization fails and no principal is supplied.
-TEST_F(PersistentVolumeTest, BadACLNoPrincipal)
+TEST_P(PersistentVolumeTest, BadACLNoPrincipal)
 {
   // Manipulate the clock manually in order to
   // control the timing of the offer cycle.
@@ -1057,19 +1090,19 @@ TEST_F(PersistentVolumeTest, BadACLNoPrincipal)
   ACLs acls;
 
   // This ACL declares that the principal of `DEFAULT_FRAMEWORK_INFO`
-  // can create persistent volumes.
+  // can create persistent volumes for any role.
   mesos::ACL::CreateVolume* create1 = acls.add_create_volumes();
   create1->mutable_principals()->add_values(DEFAULT_FRAMEWORK_INFO.principal());
-  create1->mutable_volume_types()->set_type(mesos::ACL::Entity::ANY);
+  create1->mutable_roles()->set_type(mesos::ACL::Entity::ANY);
 
   // This ACL declares that any other principals
   // cannot create persistent volumes.
   mesos::ACL::CreateVolume* create2 = acls.add_create_volumes();
   create2->mutable_principals()->set_type(mesos::ACL::Entity::ANY);
-  create2->mutable_volume_types()->set_type(mesos::ACL::Entity::NONE);
+  create2->mutable_roles()->set_type(mesos::ACL::Entity::NONE);
 
   // We use this filter so that resources will not
-  // be filtered for 5 seconds (by default).
+  // be filtered for 5 seconds (the default).
   Filters filters;
   filters.set_refuse_seconds(0);
 
@@ -1090,19 +1123,20 @@ TEST_F(PersistentVolumeTest, BadACLNoPrincipal)
   masterFlags.roles = frameworkInfo1.role();
   masterFlags.authenticate_frameworks = false;
 
-  Try<PID<Master>> master = StartMaster(masterFlags);
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
   ASSERT_SOME(master);
 
   // Create a slave.
   slave::Flags slaveFlags = CreateSlaveFlags();
-  slaveFlags.resources = "cpus:2;mem:1024;disk(role1):2048";
+  slaveFlags.resources = getSlaveResources();
 
-  Try<PID<Slave>> slave = StartSlave(slaveFlags);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), slaveFlags);
   ASSERT_SOME(slave);
 
   // Create a scheduler/framework.
   MockScheduler sched1;
-  MesosSchedulerDriver driver1(&sched1, frameworkInfo1, master.get());
+  MesosSchedulerDriver driver1(&sched1, frameworkInfo1, master.get()->pid);
 
   EXPECT_CALL(sched1, registered(&driver1, _, _));
 
@@ -1122,11 +1156,11 @@ TEST_F(PersistentVolumeTest, BadACLNoPrincipal)
 
   Offer offer = offers.get()[0];
 
-  Resources volume = createPersistentVolume(
-      Megabytes(128),
-      "role1",
+  Resource volume = createPersistentVolume(
+      getDiskResource(Megabytes(128)),
       "id1",
-      "path1");
+      "path1",
+      None());
 
   // Attempt to create the persistent volume using `acceptOffers`.
   driver1.acceptOffers(
@@ -1156,7 +1190,7 @@ TEST_F(PersistentVolumeTest, BadACLNoPrincipal)
 
   // Create a second framework which can create volumes.
   MockScheduler sched2;
-  MesosSchedulerDriver driver2(&sched2, frameworkInfo2, master.get());
+  MesosSchedulerDriver driver2(&sched2, frameworkInfo2, master.get()->pid);
 
   EXPECT_CALL(sched2, registered(&driver2, _, _));
 
@@ -1241,14 +1275,12 @@ TEST_F(PersistentVolumeTest, BadACLNoPrincipal)
 
   driver2.stop();
   driver2.join();
-
-  Shutdown();
 }
 
 
 // This test verifies that `create` and `destroy` operations
 // get dropped if authorization fails.
-TEST_F(PersistentVolumeTest, BadACLDropCreateAndDestroy)
+TEST_P(PersistentVolumeTest, BadACLDropCreateAndDestroy)
 {
   // Manipulate the clock manually in order to
   // control the timing of the offer cycle.
@@ -1257,19 +1289,19 @@ TEST_F(PersistentVolumeTest, BadACLDropCreateAndDestroy)
   ACLs acls;
 
   // This ACL declares that the principal 'creator-principal'
-  // can create persistent volumes.
+  // can create persistent volumes for any role.
   mesos::ACL::CreateVolume* create1 = acls.add_create_volumes();
   create1->mutable_principals()->add_values("creator-principal");
-  create1->mutable_volume_types()->set_type(mesos::ACL::Entity::ANY);
+  create1->mutable_roles()->set_type(mesos::ACL::Entity::ANY);
 
   // This ACL declares that all other principals
   // cannot create any persistent volumes.
   mesos::ACL::CreateVolume* create = acls.add_create_volumes();
   create->mutable_principals()->set_type(mesos::ACL::Entity::ANY);
-  create->mutable_volume_types()->set_type(mesos::ACL::Entity::NONE);
+  create->mutable_roles()->set_type(mesos::ACL::Entity::NONE);
 
   // We use the filter explicitly here so that the resources will not
-  // be filtered for 5 seconds (by default).
+  // be filtered for 5 seconds (the default).
   Filters filters;
   filters.set_refuse_seconds(0);
 
@@ -1290,19 +1322,20 @@ TEST_F(PersistentVolumeTest, BadACLDropCreateAndDestroy)
   masterFlags.roles = frameworkInfo1.role();
   masterFlags.authenticate_frameworks = false;
 
-  Try<PID<Master>> master = StartMaster(masterFlags);
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
   ASSERT_SOME(master);
 
   // Create a slave.
   slave::Flags slaveFlags = CreateSlaveFlags();
-  slaveFlags.resources = "cpus:2;mem:1024;disk(role1):2048";
+  slaveFlags.resources = getSlaveResources();
 
-  Try<PID<Slave>> slave = StartSlave(slaveFlags);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), slaveFlags);
   ASSERT_SOME(slave);
 
   // Create a scheduler/framework.
   MockScheduler sched1;
-  MesosSchedulerDriver driver1(&sched1, frameworkInfo1, master.get());
+  MesosSchedulerDriver driver1(&sched1, frameworkInfo1, master.get()->pid);
 
   EXPECT_CALL(sched1, registered(&driver1, _, _));
 
@@ -1322,11 +1355,11 @@ TEST_F(PersistentVolumeTest, BadACLDropCreateAndDestroy)
 
   Offer offer = offers.get()[0];
 
-  Resources volume = createPersistentVolume(
-      Megabytes(128),
-      "role1",
+  Resource volume = createPersistentVolume(
+      getDiskResource(Megabytes(128)),
       "id1",
-      "path1");
+      "path1",
+      None());
 
   // Attempt to create a persistent volume using `acceptOffers`.
   driver1.acceptOffers(
@@ -1356,7 +1389,7 @@ TEST_F(PersistentVolumeTest, BadACLDropCreateAndDestroy)
 
   // Create a second framework which can create volumes.
   MockScheduler sched2;
-  MesosSchedulerDriver driver2(&sched2, frameworkInfo2, master.get());
+  MesosSchedulerDriver driver2(&sched2, frameworkInfo2, master.get()->pid);
 
   EXPECT_CALL(sched2, registered(&driver2, _, _));
 
@@ -1441,8 +1474,6 @@ TEST_F(PersistentVolumeTest, BadACLDropCreateAndDestroy)
 
   driver2.stop();
   driver2.join();
-
-  Shutdown();
 }
 
 } // namespace tests {

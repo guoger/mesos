@@ -28,10 +28,18 @@
 #include <mesos/executor.hpp>
 #include <mesos/scheduler.hpp>
 
+#include <mesos/v1/executor.hpp>
+#include <mesos/v1/scheduler.hpp>
+
+#include <mesos/v1/executor/executor.hpp>
+
+#include <mesos/v1/scheduler/scheduler.hpp>
+
 #include <mesos/authorizer/authorizer.hpp>
 
 #include <mesos/fetcher/fetcher.hpp>
 
+#include <mesos/slave/container_logger.hpp>
 #include <mesos/slave/qos_controller.hpp>
 #include <mesos/slave/resource_estimator.hpp>
 
@@ -56,6 +64,8 @@
 #include <stout/stringify.hpp>
 #include <stout/try.hpp>
 #include <stout/uuid.hpp>
+
+#include "common/http.hpp"
 
 #include "messages/messages.hpp" // For google::protobuf::Message.
 
@@ -99,8 +109,6 @@ class MesosTest : public SSLTemporaryDirectoryTest
 protected:
   MesosTest(const Option<zookeeper::URL>& url = None());
 
-  virtual void TearDown();
-
   // Returns the flags used to create masters.
   virtual master::Flags CreateMasterFlags();
 
@@ -108,23 +116,23 @@ protected:
   virtual slave::Flags CreateSlaveFlags();
 
   // Starts a master with the specified flags.
-  virtual Try<process::PID<master::Master> > StartMaster(
+  virtual Try<process::Owned<cluster::Master>> StartMaster(
       const Option<master::Flags>& flags = None());
 
   // Starts a master with the specified allocator process and flags.
-  virtual Try<process::PID<master::Master> > StartMaster(
+  virtual Try<process::Owned<cluster::Master>> StartMaster(
       mesos::master::allocator::Allocator* allocator,
       const Option<master::Flags>& flags = None());
 
   // Starts a master with the specified authorizer and flags.
-  // Waits for the master to detect a leader (could be itself) before
-  // returning if 'wait' is set to true.
-  virtual Try<process::PID<master::Master> > StartMaster(
+  virtual Try<process::Owned<cluster::Master>> StartMaster(
       Authorizer* authorizer,
       const Option<master::Flags>& flags = None());
 
   // Starts a master with a slave removal rate limiter and flags.
-  virtual Try<process::PID<master::Master> > StartMaster(
+  // NOTE: The `slaveRemovalLimiter` is a `shared_ptr` because the
+  // underlying `Master` process requires the pointer in this form.
+  virtual Try<process::Owned<cluster::Master>> StartMaster(
       const std::shared_ptr<MockRateLimiter>& slaveRemovalLimiter,
       const Option<master::Flags>& flags = None());
 
@@ -147,97 +155,59 @@ protected:
   // injections.gc = gc;
   // Try<PID<Slave> > slave = StartSlave(injections);
 
-  // Starts a slave with the specified flags.
-  virtual Try<process::PID<slave::Slave> > StartSlave(
-      const Option<slave::Flags>& flags = None());
-
-  // Starts a slave with the specified mock executor and flags.
-  virtual Try<process::PID<slave::Slave> > StartSlave(
-      MockExecutor* executor,
-      const Option<slave::Flags>& flags = None());
-
-  // Starts a slave with the specified containerizer and flags.
-  virtual Try<process::PID<slave::Slave> > StartSlave(
-      slave::Containerizer* containerizer,
-      const Option<slave::Flags>& flags = None());
-
-  // Starts a slave with the specified containerizer, detector and flags.
-  virtual Try<process::PID<slave::Slave> > StartSlave(
-      slave::Containerizer* containerizer,
+  // Starts a slave with the specified detector and flags.
+  virtual Try<process::Owned<cluster::Slave>> StartSlave(
       MasterDetector* detector,
       const Option<slave::Flags>& flags = None());
 
-  // Starts a slave with the specified MasterDetector and flags.
-  virtual Try<process::PID<slave::Slave> > StartSlave(
+  // Starts a slave with the specified detector, containerizer, and flags.
+  virtual Try<process::Owned<cluster::Slave>> StartSlave(
       MasterDetector* detector,
+      slave::Containerizer* containerizer,
       const Option<slave::Flags>& flags = None());
 
-  // Starts a slave with the specified MasterDetector, GC, and flags.
-  virtual Try<process::PID<slave::Slave> > StartSlave(
+  // Starts a slave with the specified detector, containerizer, id, and flags.
+  virtual Try<process::Owned<cluster::Slave>> StartSlave(
+      MasterDetector* detector,
+      slave::Containerizer* containerizer,
+      const std::string& id,
+      const Option<slave::Flags>& flags = None());
+
+  // Starts a slave with the specified detector, GC, and flags.
+  virtual Try<process::Owned<cluster::Slave>> StartSlave(
       MasterDetector* detector,
       slave::GarbageCollector* gc,
       const Option<slave::Flags>& flags = None());
 
-  // Starts a slave with the specified mock executor, MasterDetector
-  // and flags.
-  virtual Try<process::PID<slave::Slave> > StartSlave(
-      MockExecutor* executor,
+  // Starts a slave with the specified detector, resource estimator, and flags.
+  virtual Try<process::Owned<cluster::Slave>> StartSlave(
       MasterDetector* detector,
-      const Option<slave::Flags>& flags = None());
-
-  // Starts a slave with the specified resource estimator and flags.
-  virtual Try<process::PID<slave::Slave>> StartSlave(
       mesos::slave::ResourceEstimator* resourceEstimator,
       const Option<slave::Flags>& flags = None());
 
-  // Starts a slave with the specified mock executor, resource
-  // estimator and flags.
-  virtual Try<process::PID<slave::Slave>> StartSlave(
-      MockExecutor* executor,
-      mesos::slave::ResourceEstimator* resourceEstimator,
-      const Option<slave::Flags>& flags = None());
-
-  // Starts a slave with the specified resource estimator,
-  // containerizer and flags.
-  virtual Try<process::PID<slave::Slave>> StartSlave(
+  // Starts a slave with the specified detector, containerizer,
+  // resource estimator, and flags.
+  virtual Try<process::Owned<cluster::Slave>> StartSlave(
+      MasterDetector* detector,
       slave::Containerizer* containerizer,
       mesos::slave::ResourceEstimator* resourceEstimator,
       const Option<slave::Flags>& flags = None());
 
-  // Starts a slave with the specified QoS Controller and flags.
-  virtual Try<process::PID<slave::Slave>> StartSlave(
+  // Starts a slave with the specified detector, QoS Controller, and flags.
+  virtual Try<process::Owned<cluster::Slave>> StartSlave(
+      MasterDetector* detector,
       mesos::slave::QoSController* qosController,
       const Option<slave::Flags>& flags = None());
 
-  // Starts a slave with the specified QoS Controller,
-  // containerizer and flags.
-  virtual Try<process::PID<slave::Slave>> StartSlave(
+  // Starts a slave with the specified detector, containerizer,
+  // QoS Controller, and flags.
+  virtual Try<process::Owned<cluster::Slave>> StartSlave(
+      MasterDetector* detector,
       slave::Containerizer* containerizer,
       mesos::slave::QoSController* qosController,
       const Option<slave::Flags>& flags = None());
 
-  // Stop the specified master.
-  virtual void Stop(
-      const process::PID<master::Master>& pid);
-
-  // Stop the specified slave.
-  virtual void Stop(
-      const process::PID<slave::Slave>& pid,
-      bool shutdown = false);
-
-  // Stop all masters and slaves.
-  virtual void Shutdown();
-
-  // Stop all masters.
-  virtual void ShutdownMasters();
-
-  // Stop all slaves.
-  virtual void ShutdownSlaves();
-
-  Cluster cluster;
-
-  // Containerizer(s) created during test that we need to cleanup.
-  std::map<process::PID<slave::Slave>, slave::Containerizer*> containerizers;
+  Option<zookeeper::URL> zookeeperUrl;
 
   const std::string defaultAgentResourcesString{
     "cpus:2;mem:1024;disk:1024;ports:[31000-32000]"};
@@ -440,7 +410,7 @@ protected:
 inline TaskInfo createTask(
     const SlaveID& slaveId,
     const Resources& resources,
-    const std::string& command,
+    const CommandInfo& command,
     const Option<mesos::ExecutorID>& executorId = None(),
     const std::string& name = "test-task",
     const std::string& id = UUID::random().toString())
@@ -453,13 +423,31 @@ inline TaskInfo createTask(
   if (executorId.isSome()) {
     ExecutorInfo executor;
     executor.mutable_executor_id()->CopyFrom(executorId.get());
-    executor.mutable_command()->set_value(command);
+    executor.mutable_command()->CopyFrom(command);
     task.mutable_executor()->CopyFrom(executor);
   } else {
-    task.mutable_command()->set_value(command);
+    task.mutable_command()->CopyFrom(command);
   }
 
   return task;
+}
+
+
+inline TaskInfo createTask(
+    const SlaveID& slaveId,
+    const Resources& resources,
+    const std::string& command,
+    const Option<mesos::ExecutorID>& executorId = None(),
+    const std::string& name = "test-task",
+    const std::string& id = UUID::random().toString())
+{
+  return createTask(
+      slaveId,
+      resources,
+      CREATE_COMMAND_INFO(command),
+      executorId,
+      name,
+      id);
 }
 
 
@@ -471,16 +459,46 @@ inline TaskInfo createTask(
     const std::string& id = UUID::random().toString())
 {
   return createTask(
-      offer.slave_id(), offer.resources(), command, executorId, name, id);
+      offer.slave_id(),
+      offer.resources(),
+      command,
+      executorId,
+      name,
+      id);
 }
 
 
 inline Resource::ReservationInfo createReservationInfo(
-    const std::string& principal)
+    const Option<std::string>& principal = None(),
+    const Option<Labels>& labels = None())
 {
   Resource::ReservationInfo info;
-  info.set_principal(principal);
+
+  if (principal.isSome()) {
+    info.set_principal(principal.get());
+  }
+
+  if (labels.isSome()) {
+    info.mutable_labels()->CopyFrom(labels.get());
+  }
+
   return info;
+}
+
+
+inline Resource createReservedResource(
+    const std::string& name,
+    const std::string& value,
+    const std::string& role,
+    const Option<Resource::ReservationInfo>& reservation)
+{
+  Resource resource = Resources::parse(name, value, role).get();
+
+  if (reservation.isSome()) {
+    resource.mutable_reservation()->CopyFrom(reservation.get());
+  }
+
+  return resource;
 }
 
 
@@ -491,7 +509,8 @@ inline Resource::DiskInfo createDiskInfo(
     const Option<std::string>& persistenceId,
     const Option<std::string>& containerPath,
     const Option<Volume::Mode>& mode = None(),
-    const Option<std::string>& hostPath = None())
+    const Option<std::string>& hostPath = None(),
+    const Option<Resource::DiskInfo::Source>& source = None())
 {
   Resource::DiskInfo info;
 
@@ -511,7 +530,54 @@ inline Resource::DiskInfo createDiskInfo(
     info.mutable_volume()->CopyFrom(volume);
   }
 
+  if (source.isSome()) {
+    info.mutable_source()->CopyFrom(source.get());
+  }
+
   return info;
+}
+
+
+// Helper for creating a disk source with type `PATH`.
+inline Resource::DiskInfo::Source createDiskSourcePath(const std::string& root)
+{
+  Resource::DiskInfo::Source source;
+
+  source.set_type(Resource::DiskInfo::Source::PATH);
+  source.mutable_path()->set_root(root);
+
+  return source;
+}
+
+
+// Helper for creating a disk source with type `MOUNT`.
+inline Resource::DiskInfo::Source createDiskSourceMount(const std::string& root)
+{
+  Resource::DiskInfo::Source source;
+
+  source.set_type(Resource::DiskInfo::Source::MOUNT);
+  source.mutable_mount()->set_root(root);
+
+  return source;
+}
+
+
+// Helper for creating a disk resource.
+inline Resource createDiskResource(
+    const std::string& value,
+    const std::string& role,
+    const Option<std::string>& persistenceID,
+    const Option<std::string>& containerPath,
+    const Option<Resource::DiskInfo::Source>& source = None())
+{
+  Resource resource = Resources::parse("disk", value, role).get();
+
+  if (persistenceID.isSome() || containerPath.isSome() || source.isSome()) {
+    resource.mutable_disk()->CopyFrom(
+        createDiskInfo(persistenceID, containerPath, None(), None(), source));
+  }
+
+  return resource;
 }
 
 
@@ -522,7 +588,8 @@ inline Resource createPersistentVolume(
     const std::string& role,
     const std::string& persistenceId,
     const std::string& containerPath,
-    const Option<std::string>& reservationPrincipal = None())
+    const Option<std::string>& reservationPrincipal = None(),
+    const Option<Resource::DiskInfo::Source>& source = None())
 {
   Resource volume = Resources::parse(
       "disk",
@@ -530,7 +597,31 @@ inline Resource createPersistentVolume(
       role).get();
 
   volume.mutable_disk()->CopyFrom(
-      createDiskInfo(persistenceId, containerPath));
+      createDiskInfo(persistenceId, containerPath, None(), None(), source));
+
+  if (reservationPrincipal.isSome()) {
+    volume.mutable_reservation()->set_principal(reservationPrincipal.get());
+  }
+
+  return volume;
+}
+
+
+// Note that `reservationPrincipal` should be specified if and only if
+// the volume uses dynamically reserved resources.
+inline Resource createPersistentVolume(
+    Resource volume,
+    const std::string& persistenceId,
+    const std::string& containerPath,
+    const Option<std::string>& reservationPrincipal = None())
+{
+  Option<Resource::DiskInfo::Source> source = None();
+  if (volume.has_disk() && volume.disk().has_source()) {
+    source = volume.disk().source();
+  }
+
+  volume.mutable_disk()->CopyFrom(
+      createDiskInfo(persistenceId, containerPath, None(), None(), source));
 
   if (reservationPrincipal.isSome()) {
     volume.mutable_reservation()->set_principal(reservationPrincipal.get());
@@ -703,6 +794,20 @@ ACTION_P(DeclineOffers, filters)
 }
 
 
+// For use with a MockScheduler, for example:
+// process::Queue<Offer> offers;
+// EXPECT_CALL(sched, resourceOffers(_, _))
+//   .WillRepeatedly(EnqueueOffers(&offers));
+// Enqueues all received offers into the provided queue.
+ACTION_P(EnqueueOffers, queue)
+{
+  std::vector<Offer> offers = arg1;
+  foreach (const Offer& offer, offers) {
+    queue->put(offer);
+  }
+}
+
+
 // Definition of a mock Executor to be used in tests with gmock.
 class MockExecutor : public Executor
 {
@@ -739,7 +844,9 @@ public:
           true,
           DEFAULT_CREDENTIAL)
   {
-    detector = _detector;
+    // No-op destructor as _detector lives on the stack.
+    detector =
+      std::shared_ptr<MasterDetector>(_detector, [](MasterDetector*) {});
   }
 
   TestingMesosSchedulerDriver(
@@ -754,7 +861,9 @@ public:
           implicitAcknowledgements,
           DEFAULT_CREDENTIAL)
   {
-    detector = _detector;
+    // No-op destructor as _detector lives on the stack.
+    detector =
+      std::shared_ptr<MasterDetector>(_detector, [](MasterDetector*) {});
   }
 
   TestingMesosSchedulerDriver(
@@ -770,19 +879,288 @@ public:
           implicitAcknowledgements,
           credential)
   {
-    detector = _detector;
-  }
-
-  ~TestingMesosSchedulerDriver()
-  {
-    // This is necessary because in the base class the detector is
-    // internally created and deleted whereas in the testing driver
-    // it is injected and thus should not be deleted in the
-    // destructor. Setting it to null allows the detector to survive
-    // MesosSchedulerDriver::~MesosSchedulerDriver().
-    detector = NULL;
+    // No-op destructor as _detector lives on the stack.
+    detector =
+      std::shared_ptr<MasterDetector>(_detector, [](MasterDetector*) {});
   }
 };
+
+namespace scheduler {
+
+// A generic mock HTTP scheduler to be used in tests with gmock.
+template <typename Mesos, typename Event>
+class MockHTTPScheduler
+{
+public:
+  MOCK_METHOD1_T(connected, void(Mesos*));
+  MOCK_METHOD1_T(disconnected, void(Mesos*));
+  MOCK_METHOD1_T(heartbeat, void(Mesos*));
+  MOCK_METHOD2_T(subscribed, void(Mesos*, const typename Event::Subscribed&));
+  MOCK_METHOD2_T(offers, void(Mesos*, const typename Event::Offers&));
+  MOCK_METHOD2_T(rescind, void(Mesos*, const typename Event::Rescind&));
+  MOCK_METHOD2_T(update, void(Mesos*, const typename Event::Update&));
+  MOCK_METHOD2_T(message, void(Mesos*, const typename Event::Message&));
+  MOCK_METHOD2_T(failure, void(Mesos*, const typename Event::Failure&));
+  MOCK_METHOD2_T(error, void(Mesos*, const typename Event::Error&));
+
+  void event(Mesos* mesos, const Event& event)
+  {
+    switch (event.type()) {
+      case Event::SUBSCRIBED:
+        subscribed(mesos, event.subscribed());
+        break;
+      case Event::OFFERS:
+        offers(mesos, event.offers());
+        break;
+      case Event::RESCIND:
+        rescind(mesos, event.rescind());
+        break;
+      case Event::UPDATE:
+        update(mesos, event.update());
+        break;
+      case Event::MESSAGE:
+        message(mesos, event.message());
+        break;
+      case Event::FAILURE:
+        failure(mesos, event.failure());
+        break;
+      case Event::ERROR:
+        error(mesos, event.error());
+        break;
+      case Event::HEARTBEAT:
+        heartbeat(mesos);
+        break;
+    }
+  }
+};
+
+
+// A generic testing interface for the scheduler library that can be used to
+// test the library across various versions.
+template <typename Mesos, typename Event>
+class TestMesos : public Mesos
+{
+public:
+  TestMesos(
+      const std::string& master,
+      ContentType contentType,
+      const std::shared_ptr<MockHTTPScheduler<Mesos, Event>>& _scheduler,
+      const Option<std::shared_ptr<MasterDetector>>& detector = None())
+    : Mesos(
+          master,
+          contentType,
+          // We don't pass the `_scheduler` shared pointer as the library
+          // interface expects a `std::function` object.
+          lambda::bind(&MockHTTPScheduler<Mesos, Event>::connected,
+                       _scheduler.get(),
+                       this),
+          lambda::bind(&MockHTTPScheduler<Mesos, Event>::disconnected,
+                       _scheduler.get(),
+                       this),
+          lambda::bind(&TestMesos<Mesos, Event>::events,
+                       this,
+                       lambda::_1),
+          detector),
+      scheduler(_scheduler) {}
+
+  virtual ~TestMesos()
+  {
+    // Since the destructor for `TestMesos` is invoked first, the library can
+    // make more callbacks to the `scheduler` object before the `Mesos` (base
+    // class) destructor is invoked. To prevent this, we invoke `stop()` here
+    // to explicitly stop the library.
+    this->stop();
+
+    bool paused = process::Clock::paused();
+
+    // Need to settle the Clock to ensure that all the pending async callbacks
+    // with references to `this` and `scheduler` queued on libprocess are
+    // executed before the object is destructed.
+    process::Clock::pause();
+    process::Clock::settle();
+
+    // Return the Clock to its original state.
+    if (!paused) {
+      process::Clock::resume();
+    }
+  }
+
+protected:
+  void events(std::queue<Event> events)
+  {
+    while (!events.empty()) {
+      Event event = std::move(events.front());
+      events.pop();
+      scheduler->event(this, event);
+    }
+  }
+
+private:
+  std::shared_ptr<MockHTTPScheduler<Mesos, Event>> scheduler;
+};
+
+
+using TestV1Mesos =
+  TestMesos<mesos::v1::scheduler::Mesos, mesos::v1::scheduler::Event>;
+
+} // namespace scheduler {
+
+
+using MockV1HTTPScheduler =
+  scheduler::MockHTTPScheduler<
+    mesos::v1::scheduler::Mesos, mesos::v1::scheduler::Event>;
+
+
+namespace executor {
+
+// A generic mock HTTP executor to be used in tests with gmock.
+template <typename Mesos, typename Event>
+class MockHTTPExecutor
+{
+public:
+  MOCK_METHOD1_T(connected, void(Mesos*));
+  MOCK_METHOD1_T(disconnected, void(Mesos*));
+  MOCK_METHOD2_T(subscribed, void(Mesos*, const typename Event::Subscribed&));
+  MOCK_METHOD2_T(launch, void(Mesos*, const typename Event::Launch&));
+  MOCK_METHOD2_T(kill, void(Mesos*, const typename Event::Kill&));
+  MOCK_METHOD2_T(message, void(Mesos*, const typename Event::Message&));
+  MOCK_METHOD1_T(shutdown, void(Mesos*));
+  MOCK_METHOD2_T(error, void(Mesos*, const typename Event::Error&));
+  MOCK_METHOD2_T(acknowledged,
+                 void(Mesos*, const typename Event::Acknowledged&));
+
+  void event(Mesos* mesos, const Event& event)
+  {
+    switch (event.type()) {
+      case Event::SUBSCRIBED:
+        subscribed(mesos, event.subscribed());
+        break;
+      case Event::LAUNCH:
+        launch(mesos, event.launch());
+        break;
+      case Event::KILL:
+        kill(mesos, event.kill());
+        break;
+      case Event::ACKNOWLEDGED:
+        acknowledged(mesos, event.acknowledged());
+        break;
+      case Event::MESSAGE:
+        message(mesos, event.message());
+        break;
+      case Event::SHUTDOWN:
+        shutdown(mesos);
+        break;
+      case Event::ERROR:
+        error(mesos, event.error());
+        break;
+    }
+  }
+};
+
+
+// A generic testing interface for the executor library that can be used to
+// test the library across various versions.
+template <typename Mesos, typename Event>
+class TestMesos : public Mesos
+{
+public:
+  TestMesos(
+      ContentType contentType,
+      const std::shared_ptr<MockHTTPExecutor<Mesos, Event>>& _executor)
+    : Mesos(
+          contentType,
+          lambda::bind(&MockHTTPExecutor<Mesos, Event>::connected,
+                       _executor,
+                       this),
+          lambda::bind(&MockHTTPExecutor<Mesos, Event>::disconnected,
+                       _executor,
+                       this),
+          lambda::bind(&TestMesos<Mesos, Event>::events,
+                       this,
+                       lambda::_1)),
+      executor(_executor) {}
+
+protected:
+  void events(std::queue<Event> events)
+  {
+    while (!events.empty()) {
+      Event event = std::move(events.front());
+      events.pop();
+      executor->event(this, event);
+    }
+  }
+
+private:
+  std::shared_ptr<MockHTTPExecutor<Mesos, Event>> executor;
+};
+
+
+using TestV1Mesos =
+  TestMesos<mesos::v1::executor::Mesos, mesos::v1::executor::Event>;
+
+
+// TODO(anand): Move these actions to the `v1::executor` namespace.
+ACTION_P2(SendSubscribe, frameworkId, executorId)
+{
+  v1::executor::Call call;
+  call.mutable_framework_id()->CopyFrom(frameworkId);
+  call.mutable_executor_id()->CopyFrom(executorId);
+
+  call.set_type(v1::executor::Call::SUBSCRIBE);
+
+  call.mutable_subscribe();
+
+  arg0->send(call);
+}
+
+
+ACTION_P3(SendUpdateFromTask, frameworkId, executorId, state)
+{
+  v1::TaskStatus status;
+  status.mutable_task_id()->CopyFrom(arg1.task().task_id());
+  status.mutable_executor_id()->CopyFrom(executorId);
+  status.set_state(state);
+  status.set_source(v1::TaskStatus::SOURCE_EXECUTOR);
+  status.set_uuid(UUID::random().toBytes());
+
+  v1::executor::Call call;
+  call.mutable_framework_id()->CopyFrom(frameworkId);
+  call.mutable_executor_id()->CopyFrom(executorId);
+
+  call.set_type(v1::executor::Call::UPDATE);
+
+  call.mutable_update()->mutable_status()->CopyFrom(status);
+
+  arg0->send(call);
+}
+
+
+ACTION_P3(SendUpdateFromTaskID, frameworkId, executorId, state)
+{
+  v1::TaskStatus status;
+  status.mutable_task_id()->CopyFrom(arg1.task_id());
+  status.mutable_executor_id()->CopyFrom(executorId);
+  status.set_state(state);
+  status.set_source(v1::TaskStatus::SOURCE_EXECUTOR);
+  status.set_uuid(UUID::random().toBytes());
+
+  v1::executor::Call call;
+  call.mutable_framework_id()->CopyFrom(frameworkId);
+  call.mutable_executor_id()->CopyFrom(executorId);
+
+  call.set_type(v1::executor::Call::UPDATE);
+
+  call.mutable_update()->mutable_status()->CopyFrom(status);
+
+  arg0->send(call);
+}
+
+} // namespace executor {
+
+
+using MockV1HTTPExecutor =
+  executor::MockHTTPExecutor<
+    mesos::v1::executor::Mesos, mesos::v1::executor::Event>;
 
 
 class MockGarbageCollector : public slave::GarbageCollector
@@ -957,6 +1335,26 @@ public:
 };
 
 
+// Definition of a mock ContainerLogger to be used in tests with gmock.
+class MockContainerLogger : public mesos::slave::ContainerLogger
+{
+public:
+  MockContainerLogger();
+  virtual ~MockContainerLogger();
+
+  MOCK_METHOD0(initialize, Try<Nothing>(void));
+
+  MOCK_METHOD2(
+      recover,
+      process::Future<Nothing>(const ExecutorInfo&, const std::string&));
+
+  MOCK_METHOD2(
+      prepare,
+      process::Future<mesos::slave::ContainerLogger::SubprocessInfo>(
+          const ExecutorInfo&, const std::string&));
+};
+
+
 // Definition of a mock Docker to be used in tests with gmock.
 class MockDocker : public Docker
 {
@@ -978,6 +1376,11 @@ public:
           const Option<std::map<std::string, std::string>>&,
           const process::Subprocess::IO&,
           const process::Subprocess::IO&));
+
+  MOCK_CONST_METHOD2(
+      ps,
+      process::Future<std::list<Docker::Container>>(
+          bool, const Option<std::string>&));
 
   MOCK_CONST_METHOD3(
       pull,
@@ -1020,6 +1423,13 @@ public:
         env,
         stdout,
         stderr);
+  }
+
+  process::Future<std::list<Docker::Container>> _ps(
+      bool all,
+      const Option<std::string>& prefix) const
+  {
+    return Docker::ps(all, prefix);
   }
 
   process::Future<Docker::Image> _pull(
@@ -1203,37 +1613,20 @@ public:
   virtual ~MockAuthorizer();
 
   MOCK_METHOD1(
-      initialize, Try<Nothing>(const Option<ACLs>& acls));
-  MOCK_METHOD1(
-      authorize, process::Future<bool>(const ACL::RegisterFramework& request));
-  MOCK_METHOD1(
-      authorize, process::Future<bool>(const ACL::RunTask& request));
-  MOCK_METHOD1(
-      authorize, process::Future<bool>(const ACL::ShutdownFramework& request));
-  MOCK_METHOD1(
-      authorize, process::Future<bool>(const ACL::ReserveResources& request));
-  MOCK_METHOD1(
-      authorize, process::Future<bool>(const ACL::UnreserveResources& request));
-  MOCK_METHOD1(
-      authorize, process::Future<bool>(const ACL::CreateVolume& request));
-  MOCK_METHOD1(
-      authorize, process::Future<bool>(const ACL::DestroyVolume& request));
-  MOCK_METHOD1(
-      authorize, process::Future<bool>(const ACL::SetQuota& request));
-  MOCK_METHOD1(
-      authorize, process::Future<bool>(const ACL::RemoveQuota& request));
+      authorized, process::Future<bool>(const authorization::Request& request));
 };
 
 
 class OfferEqMatcher
-  : public ::testing::MatcherInterface<const std::vector<Offer>& >
+  : public ::testing::MatcherInterface<const std::vector<Offer>&>
 {
 public:
   OfferEqMatcher(int _cpus, int _mem)
     : cpus(_cpus), mem(_mem) {}
 
-  virtual bool MatchAndExplain(const std::vector<Offer>& offers,
-                               ::testing::MatchResultListener* listener) const
+  virtual bool MatchAndExplain(
+      const std::vector<Offer>& offers,
+      ::testing::MatchResultListener* listener) const
   {
     double totalCpus = 0;
     double totalMem = 0;
@@ -1273,8 +1666,8 @@ private:
 };
 
 
-inline
-const ::testing::Matcher<const std::vector<Offer>& > OfferEq(int cpus, int mem)
+inline const ::testing::Matcher<const std::vector<Offer>&> OfferEq(
+    int cpus, int mem)
 {
   return MakeMatcher(new OfferEqMatcher(cpus, mem));
 }
@@ -1320,6 +1713,22 @@ ACTION_P(SendFrameworkMessage, data)
   ExpectNoFutureProtobufs(message, from, to)
 
 
+#define FUTURE_HTTP_PROTOBUF(message, path, contentType)   \
+  FutureHttp(message, path, contentType)
+
+
+#define DROP_HTTP_PROTOBUF(message, path, contentType)     \
+  FutureHttp(message, path, contentType, true)
+
+
+#define DROP_HTTP_PROTOBUFS(message, path, contentType)    \
+  DropHttpProtobufs(message, path, contentType)
+
+
+#define EXPECT_NO_FUTURE_HTTP_PROTOBUFS(message, path, contentType)  \
+  ExpectNoFutureHttpProtobufs(message, path, contentType)
+
+
 // These are specialized versions of {FUTURE,DROP}_PROTOBUF that
 // capture a scheduler/executor Call protobuf of the given 'type'.
 // Note that we name methods as '*ProtobufUnion()' because these could
@@ -1352,6 +1761,22 @@ ACTION_P(SendFrameworkMessage, data)
   process::FutureUnionMessage(message, unionType, from, to, true)
 
 
+#define FUTURE_HTTP_CALL(message, unionType, path, contentType)  \
+  FutureUnionHttp(message, unionType, path, contentType)
+
+
+#define DROP_HTTP_CALL(message, unionType, path, contentType)    \
+  FutureUnionHttp(message, unionType, path, contentType, true)
+
+
+#define DROP_HTTP_CALLS(message, unionType, path, contentType)   \
+  DropUnionHttpProtobufs(message, unionType, path, contentType)
+
+
+#define EXPECT_NO_FUTURE_HTTP_CALLS(message, unionType, path, contentType)   \
+  ExpectNoFutureUnionHttpProtobufs(message, unionType, path, contentType)
+
+
 // Forward declaration.
 template <typename T>
 T _FutureProtobuf(const process::Message& message);
@@ -1377,6 +1802,48 @@ process::Future<Message> FutureUnionProtobuf(
 
   return process::FutureUnionMessage(message, unionType, from, to, drop)
     .then(lambda::bind(&_FutureProtobuf<Message>, lambda::_1));
+}
+
+
+template <typename Message, typename Path>
+process::Future<Message> FutureHttp(
+    Message message,
+    Path path,
+    ContentType contentType,
+    bool drop = false)
+{
+  // Help debugging by adding some "type constraints".
+  { google::protobuf::Message* m = &message; (void) m; }
+
+  auto deserializer =
+    lambda::bind(&deserialize<Message>, contentType, lambda::_1);
+
+  return process::FutureHttpRequest(message, path, deserializer, drop)
+    .then([deserializer](const process::http::Request& request) {
+      return deserializer(request.body).get();
+    });
+}
+
+
+template <typename Message, typename UnionType, typename Path>
+process::Future<Message> FutureUnionHttp(
+    Message message,
+    UnionType unionType,
+    Path path,
+    ContentType contentType,
+    bool drop = false)
+{
+  // Help debugging by adding some "type constraints".
+  { google::protobuf::Message* m = &message; (void) m; }
+
+  auto deserializer =
+    lambda::bind(&deserialize<Message>, contentType, lambda::_1);
+
+  return process::FutureUnionHttpRequest(
+      message, unionType, path, deserializer, drop)
+    .then([deserializer](const process::http::Request& request) {
+      return deserializer(request.body).get();
+    });
 }
 
 
@@ -1409,6 +1876,41 @@ void DropUnionProtobufs(Message message, UnionType unionType, From from, To to)
 }
 
 
+template <typename Message, typename Path>
+void DropHttpProtobufs(
+    Message message,
+    Path path,
+    ContentType contentType,
+    bool drop = false)
+{
+  // Help debugging by adding some "type constraints".
+  { google::protobuf::Message* m = &message; (void) m; }
+
+  auto deserializer =
+    lambda::bind(&deserialize<Message>, contentType, lambda::_1);
+
+  process::DropHttpRequests(message, path, deserializer);
+}
+
+
+template <typename Message, typename UnionType, typename Path>
+void DropUnionHttpProtobufs(
+    Message message,
+    UnionType unionType,
+    Path path,
+    ContentType contentType,
+    bool drop = false)
+{
+  // Help debugging by adding some "type constraints".
+  { google::protobuf::Message* m = &message; (void) m; }
+
+  auto deserializer =
+    lambda::bind(&deserialize<Message>, contentType, lambda::_1);
+
+  process::DropUnionHttpRequests(message, unionType, path, deserializer);
+}
+
+
 template <typename T, typename From, typename To>
 void ExpectNoFutureProtobufs(T t, From from, To to)
 {
@@ -1427,6 +1929,42 @@ void ExpectNoFutureUnionProtobufs(
   { google::protobuf::Message* m = &message; (void) m; }
 
   process::ExpectNoFutureUnionMessages(message, unionType, from, to);
+}
+
+
+template <typename Message, typename Path>
+void ExpectNoFutureHttpProtobufs(
+    Message message,
+    Path path,
+    ContentType contentType,
+    bool drop = false)
+{
+  // Help debugging by adding some "type constraints".
+  { google::protobuf::Message* m = &message; (void) m; }
+
+  auto deserializer =
+    lambda::bind(&deserialize<Message>, contentType, lambda::_1);
+
+  process::ExpectNoFutureHttpRequests(message, path, deserializer);
+}
+
+
+template <typename Message, typename UnionType, typename Path>
+void ExpectNoFutureUnionHttpProtobufs(
+    Message message,
+    UnionType unionType,
+    Path path,
+    ContentType contentType,
+    bool drop = false)
+{
+  // Help debugging by adding some "type constraints".
+  { google::protobuf::Message* m = &message; (void) m; }
+
+  auto deserializer =
+    lambda::bind(&deserialize<Message>, contentType, lambda::_1);
+
+  process::ExpectNoFutureUnionHttpRequests(
+      message, unionType, path, deserializer);
 }
 
 

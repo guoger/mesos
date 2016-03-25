@@ -209,6 +209,8 @@ public:
 
   bool empty() const { return resources.size() == 0; }
 
+  size_t size() const { return resources.size(); }
+
   // Checks if this Resources is a superset of the given Resources.
   bool contains(const Resources& that) const;
 
@@ -220,11 +222,12 @@ public:
       const lambda::function<bool(const Resource&)>& predicate) const;
 
   // Returns the reserved resources, by role.
-  hashmap<std::string, Resources> reserved() const;
+  hashmap<std::string, Resources> reservations() const;
 
-  // Returns the reserved resources for the role. Note that the "*"
-  // role represents unreserved resources, and will be ignored.
-  Resources reserved(const std::string& role) const;
+  // Returns the reserved resources for the role, if specified.
+  // Note that the "*" role represents unreserved resources,
+  // and will be ignored.
+  Resources reserved(const Option<std::string>& role = None()) const;
 
   // Returns the unreserved resources.
   Resources unreserved() const;
@@ -248,6 +251,20 @@ public:
   Resources flatten(
       const std::string& role = "*",
       const Option<Resource::ReservationInfo>& reservation = None()) const;
+
+  // Returns a Resources object that contains all the scalar resources
+  // in this object, but with their ReservationInfo and DiskInfo
+  // omitted. Note that the `role` and RevocableInfo, if any, are
+  // preserved. Because we clear ReservationInfo but preserve `role`,
+  // this means that stripping a dynamically reserved resource makes
+  // it effectively statically reserved.
+  //
+  // This is intended for code that would like to aggregate together
+  // Resource values without regard for metadata like whether the
+  // resource is reserved or the particular volume ID in use. For
+  // example, when calculating the total resources in a cluster,
+  // preserving such information has a major performance cost.
+  Resources createStrippedScalarQuantity() const;
 
   // Finds a Resources object with the same amount of each resource
   // type as "targets" from these Resources. The roles specified in
@@ -317,14 +334,26 @@ public:
   // which holds the ephemeral ports allocation logic.
   Option<Value::Ranges> ephemeral_ports() const;
 
-  typedef google::protobuf::RepeatedPtrField<Resource>::iterator
+  // NOTE: Non-`const` `iterator`, `begin()` and `end()` are __intentionally__
+  // defined with `const` semantics in order to prevent mutable access to the
+  // `Resource` objects within `resources`.
+  typedef google::protobuf::RepeatedPtrField<Resource>::const_iterator
   iterator;
 
   typedef google::protobuf::RepeatedPtrField<Resource>::const_iterator
   const_iterator;
 
-  iterator begin() { return resources.begin(); }
-  iterator end() { return resources.end(); }
+  const_iterator begin()
+  {
+    using google::protobuf::RepeatedPtrField;
+    return static_cast<const RepeatedPtrField<Resource>&>(resources).begin();
+  }
+
+  const_iterator end()
+  {
+    using google::protobuf::RepeatedPtrField;
+    return static_cast<const RepeatedPtrField<Resource>&>(resources).end();
+  }
 
   const_iterator begin() const { return resources.begin(); }
   const_iterator end() const { return resources.end(); }

@@ -23,18 +23,23 @@ set(STOUT_TESTS_SRC
   bytes_tests.cpp
   cache_tests.cpp
   duration_tests.cpp
+  dynamiclibrary_tests.cpp
   error_tests.cpp
+  gzip_tests.cpp
   hashmap_tests.cpp
   hashset_tests.cpp
   interval_tests.cpp
   ip_tests.cpp
   json_tests.cpp
+  jsonify_tests.cpp
   linkedhashmap_tests.cpp
   main.cpp
   multimap_tests.cpp
   none_tests.cpp
   numify_tests.cpp
   option_tests.cpp
+  os/filesystem_tests.cpp
+  os/rmdir_tests.cpp
   protobuf_tests.pb.h
   protobuf_tests.proto
   result_tests.cpp
@@ -48,9 +53,7 @@ set(STOUT_TESTS_SRC
 if (NOT WIN32)
   set(STOUT_TESTS_SRC
     ${STOUT_TESTS_SRC}
-    dynamiclibrary_tests.cpp
     flags_tests.cpp
-    gzip_tests.cpp
     mac_tests.cpp
     os_tests.cpp
     path_tests.cpp

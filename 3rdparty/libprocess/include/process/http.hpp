@@ -35,6 +35,7 @@
 #include <stout/hashmap.hpp>
 #include <stout/ip.hpp>
 #include <stout/json.hpp>
+#include <stout/jsonify.hpp>
 #include <stout/none.hpp>
 #include <stout/nothing.hpp>
 #include <stout/option.hpp>
@@ -491,6 +492,8 @@ struct OK : Response
   explicit OK(const std::string& body) : Response(body, Status::OK) {}
 
   OK(const JSON::Value& value, const Option<std::string>& jsonp = None());
+
+  OK(JSON::Proxy&& value, const Option<std::string>& jsonp = None());
 };
 
 
@@ -545,19 +548,6 @@ struct Unauthorized : Response
     // same header.
     headers["WWW-Authenticate"] = strings::join(", ", challenges);
   }
-
-  // TODO(arojas): Remove this in favor of the
-  // explicit challenge constructor above.
-  explicit Unauthorized(const std::string& realm)
-    : Unauthorized(
-          std::vector<std::string>{"Basic realm=\"" + realm + "\""}) {}
-
-  // TODO(arojas): Remove this in favor of the
-  // explicit challenge constructor above.
-  Unauthorized(const std::string& realm, const std::string& body)
-    : Unauthorized(
-          std::vector<std::string>{"Basic realm=\"" + realm + "\""},
-          body) {}
 };
 
 
@@ -715,6 +705,14 @@ std::string encode(const std::string& s);
 Try<std::string> decode(const std::string& s);
 
 
+/**
+ * Decode HTTP responses from the given string.
+ *
+ * @param s the given string.
+ */
+Try<std::vector<Response>> decodeResponses(const std::string& s);
+
+
 namespace query {
 
 // Decodes an HTTP query string into a map. For example:
@@ -785,8 +783,39 @@ private:
 Future<Connection> connect(const URL& url);
 
 
-// TODO(bmahler): Consolidate these functions into a single
-// http::request function that takes a 'Request' object.
+// Create a http Request from the specified parameters.
+Request createRequest(
+  const UPID& upid,
+  const std::string& method,
+  bool enableSSL = false,
+  const Option<std::string>& path = None(),
+  const Option<Headers>& headers = None(),
+  const Option<std::string>& body = None(),
+  const Option<std::string>& contentType = None());
+
+
+Request createRequest(
+    const URL& url,
+    const std::string& method,
+    const Option<Headers>& headers = None(),
+    const Option<std::string>& body = None(),
+    const Option<std::string>& contentType = None());
+
+/**
+ * Asynchronously sends an HTTP request to the process and
+ * returns the HTTP response once the entire response is received.
+ *
+ * @param streamedResponse Being true indicates the HTTP response will
+ *     be 'PIPE' type, and caller must read the response body from the
+ *     Pipe::Reader, otherwise, the HTTP response will be 'BODY' type.
+ */
+Future<Response> request(
+    const Request& request,
+    bool streamedResponse = false);
+
+
+// TODO(Yongqiao Wang): Refactor other functions
+// (such as post/get/requestDelete) to use the 'request' function.
 
 // TODO(bmahler): Support discarding the future responses;
 // discarding should disconnect from the server.

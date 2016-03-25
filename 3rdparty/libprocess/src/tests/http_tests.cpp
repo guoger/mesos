@@ -76,6 +76,7 @@ public:
 
   MOCK_METHOD1(body, Future<http::Response>(const http::Request&));
   MOCK_METHOD1(pipe, Future<http::Response>(const http::Request&));
+  MOCK_METHOD1(request, Future<http::Response>(const http::Request&));
   MOCK_METHOD1(get, Future<http::Response>(const http::Request&));
   MOCK_METHOD1(post, Future<http::Response>(const http::Request&));
   MOCK_METHOD1(requestDelete, Future<http::Response>(const http::Request&));
@@ -89,25 +90,15 @@ public:
 protected:
   virtual void initialize()
   {
-    route("/auth", None(), &HttpProcess::auth);
     route("/body", None(), &HttpProcess::body);
     route("/pipe", None(), &HttpProcess::pipe);
+    route("/request", None(), &HttpProcess::request);
     route("/get", None(), &HttpProcess::get);
     route("/post", None(), &HttpProcess::post);
     route("/delete", None(), &HttpProcess::requestDelete);
     route("/a", None(), &HttpProcess::a);
     route("/a/b/c", None(), &HttpProcess::abc);
     route("/authenticated", "realm", None(), &HttpProcess::authenticated);
-  }
-
-  Future<http::Response> auth(const http::Request& request)
-  {
-    string encodedAuth = base64::encode("testuser:testpass");
-    Option<string> authHeader = request.headers.get("Authorization");
-    if (!authHeader.isSome() || (authHeader.get() != "Basic " + encodedAuth)) {
-      return http::Unauthorized("testrealm");
-    }
-    return http::OK();
   }
 };
 
@@ -131,47 +122,6 @@ public:
 
 
 // TODO(vinod): Use AWAIT_EXPECT_RESPONSE_STATUS_EQ in the tests.
-
-TEST(HTTPTest, Auth)
-{
-  Http http;
-
-  // Test the case where there is no auth.
-  Future<http::Response> noAuthFuture = http::get(http.process->self(), "auth");
-
-  AWAIT_READY(noAuthFuture);
-  EXPECT_EQ(http::Status::UNAUTHORIZED, noAuthFuture->code);
-  EXPECT_EQ(http::Status::string(http::Status::UNAUTHORIZED),
-            noAuthFuture->status);
-  ASSERT_SOME_EQ("Basic realm=\"testrealm\"",
-                 noAuthFuture->headers.get("WWW-authenticate"));
-
-  // Now test passing wrong auth header.
-  http::Headers headers;
-  headers["Authorization"] = "Basic " + base64::encode("testuser:wrongpass");
-
-  Future<http::Response> wrongAuthFuture =
-    http::get(http.process->self(), "auth", None(), headers);
-
-  AWAIT_READY(wrongAuthFuture);
-  EXPECT_EQ(http::Status::UNAUTHORIZED, wrongAuthFuture->code);
-  EXPECT_EQ(http::Status::string(http::Status::UNAUTHORIZED),
-            wrongAuthFuture->status);
-
-  ASSERT_SOME_EQ("Basic realm=\"testrealm\"",
-                 wrongAuthFuture->headers.get("WWW-authenticate"));
-
-  // Now test passing right auth header.
-  headers["Authorization"] = "Basic " + base64::encode("testuser:testpass");
-
-  Future<http::Response> rightAuthFuture =
-    http::get(http.process->self(), "auth", None(), headers);
-
-  AWAIT_READY(rightAuthFuture);
-  EXPECT_EQ(http::Status::OK, rightAuthFuture->code);
-  EXPECT_EQ(http::Status::string(http::Status::OK),
-            rightAuthFuture->status);
-}
 
 
 TEST(HTTPTest, Endpoints)
@@ -229,6 +179,121 @@ TEST(HTTPTest, Endpoints)
 
   EXPECT_SOME_EQ("chunked", future->headers.get("Transfer-Encoding"));
   EXPECT_EQ("Hello World\n", future->body);
+}
+
+
+TEST(HTTPTest, EndpointsHelp)
+{
+  Http http;
+  PID<HttpProcess> pid = http.process->self();
+
+  // Wait until the HttpProcess initialization has run so
+  // that the route calls have completed.
+  std::function<Nothing()> f = []() { return Nothing(); };
+
+  Future<Nothing> initialized = dispatch(pid, f);
+  AWAIT_READY(initialized);
+
+  // Hit '/help' and wait for a 200 OK response.
+  http::URL url = http::URL(
+      "http",
+      http.process->self().address.ip,
+      http.process->self().address.port,
+      "/help");
+
+  Future<http::Response> response = http::get(url);
+
+  AWAIT_READY(response);
+  EXPECT_EQ(http::Status::OK, response->code);
+  EXPECT_EQ(http::Status::string(http::Status::OK), response->status);
+
+  // Hit '/help?format=json' and wait for a 200 OK response.
+  url = http::URL(
+      "http",
+      http.process->self().address.ip,
+      http.process->self().address.port,
+      "/help",
+      {{"format", "json"}});
+
+  response = http::get(url);
+
+  AWAIT_READY(response);
+  EXPECT_EQ(http::Status::OK, response->code);
+  EXPECT_EQ(http::Status::string(http::Status::OK), response->status);
+
+  // Assert that it is valid JSON
+  EXPECT_SOME(JSON::parse(response->body));
+
+  // Hit '/help/<id>/body' and wait for a 200 OK response.
+  url = http::URL(
+      "http",
+      http.process->self().address.ip,
+      http.process->self().address.port,
+      "/help/" + pid.id + "/body");
+
+  response = http::get(url);
+
+  AWAIT_READY(response);
+  EXPECT_EQ(http::Status::OK, response->code);
+  EXPECT_EQ(http::Status::string(http::Status::OK), response->status);
+
+  // Hit '/help/<id>/a/b/c' and wait for a 200 OK response.
+  url = http::URL(
+      "http",
+      http.process->self().address.ip,
+      http.process->self().address.port,
+      "/help/" + pid.id + "/a/b/c");
+
+  response = http::get(url);
+
+  AWAIT_READY(response);
+  EXPECT_EQ(http::Status::OK, response->code);
+  EXPECT_EQ(http::Status::string(http::Status::OK), response->status);
+}
+
+
+TEST(HTTPTest, EndpointsHelpRemoval)
+{
+  // Start up a new HttpProcess;
+  Owned<Http> http(new Http());
+  PID<HttpProcess> pid = http->process->self();
+
+  // Wait until the HttpProcess initialization has run so
+  // that the route calls have completed.
+  std::function<Nothing()> f = []() { return Nothing(); };
+
+  Future<Nothing> initialized = dispatch(pid, f);
+  AWAIT_READY(initialized);
+
+  // Hit '/help/<id>/body' and wait for a 200 OK response.
+  http::URL url = http::URL(
+      "http",
+      http->process->self().address.ip,
+      http->process->self().address.port,
+      "/help/" + pid.id + "/body");
+
+  Future<http::Response> response = http::get(url);
+
+  AWAIT_READY(response);
+  EXPECT_EQ(http::Status::OK, response->code);
+  EXPECT_EQ(http::Status::string(http::Status::OK), response->status);
+
+  // Delete the HttpProcess. This should remove all help endpoints
+  // for the process, in addition to its own endpoints.
+  http.reset();
+
+  // Hit '/help/<id>/bogus' and wait for a 400 BAD REQUEST response.
+  url = http::URL(
+      "http",
+      process::address().ip,
+      process::address().port,
+      "/help/" + pid.id + "/bogus");
+
+  response = http::get(url);
+
+  AWAIT_READY(response);
+  ASSERT_EQ(http::Status::BAD_REQUEST, response->code);
+  ASSERT_EQ(http::Status::string(http::Status::BAD_REQUEST), response->status);
 }
 
 
@@ -680,6 +745,34 @@ TEST(HTTPTest, Delete)
 }
 
 
+http::Response validateDeleteHttpRequest(const http::Request& request)
+{
+  EXPECT_EQ("DELETE", request.method);
+  EXPECT_THAT(request.url.path, EndsWith("request"));
+  EXPECT_TRUE(request.body.empty());
+  EXPECT_TRUE(request.url.query.empty());
+
+  return http::OK();
+}
+
+
+TEST(HTTPTest, Request)
+{
+  Http http;
+
+  EXPECT_CALL(*http.process, request(_))
+    .WillOnce(Invoke(validateDeleteHttpRequest));
+
+  Future<http::Response> future =
+    http::request(http::createRequest(
+        http.process->self(), "DELETE", false, "request"));
+
+  AWAIT_READY(future);
+  ASSERT_EQ(http::Status::OK, future->code);
+  ASSERT_EQ(http::Status::string(http::Status::OK), future->status);
+}
+
+
 TEST(HTTPConnectionTest, Serial)
 {
   Http http;
@@ -909,12 +1002,8 @@ TEST(HTTPConnectionTest, ClosingRequest)
   AWAIT_READY(connection.disconnected());
 }
 
-// TODO(dforsyth): The test suite doesn't see the second call on FreeBSD
-#ifndef __FreeBSD__
+
 TEST(HTTPConnectionTest, ClosingResponse)
-#else
-TEST(HTTPConnectionTest, DISABLED_ClosingResponse)
-#endif
 {
   Http http;
 
@@ -1298,7 +1387,7 @@ TEST_F(HttpAuthenticationTest, Unauthorized)
 
   AuthenticationResult authentication;
   authentication.unauthorized =
-    http::Unauthorized(vector<string>({"Basic realm=\"realm\""}));
+    http::Unauthorized({"Basic realm=\"realm\""});
 
   EXPECT_CALL(*authenticator, authenticate(_))
     .WillOnce(Return(authentication));
@@ -1307,7 +1396,7 @@ TEST_F(HttpAuthenticationTest, Unauthorized)
     http::get(http.process->self(), "authenticated");
 
   AWAIT_EXPECT_RESPONSE_STATUS_EQ(
-      http::Unauthorized(vector<string>()).status,
+      http::Unauthorized({}).status,
       response);
 
   EXPECT_EQ(
@@ -1442,7 +1531,7 @@ TEST_F(HttpAuthenticationTest, Basic)
     Future<http::Response> response = http::get(*http.process, "authenticated");
 
     AWAIT_EXPECT_RESPONSE_STATUS_EQ(
-        http::Unauthorized(vector<string>()).status,
+        http::Unauthorized({}).status,
         response);
   }
 
@@ -1456,7 +1545,7 @@ TEST_F(HttpAuthenticationTest, Basic)
       http::get(http.process->self(), "authenticated", None(), headers);
 
     AWAIT_EXPECT_RESPONSE_STATUS_EQ(
-        http::Unauthorized(vector<string>()).status,
+        http::Unauthorized({}).status,
         response);
   }
 
@@ -1470,7 +1559,7 @@ TEST_F(HttpAuthenticationTest, Basic)
       http::get(http.process->self(), "authenticated", None(), headers);
 
     AWAIT_EXPECT_RESPONSE_STATUS_EQ(
-        http::Unauthorized(vector<string>()).status,
+        http::Unauthorized({}).status,
         response);
   }
 

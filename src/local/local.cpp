@@ -122,7 +122,7 @@ static Master* master = NULL;
 static map<Containerizer*, Slave*> slaves;
 static StandaloneMasterDetector* detector = NULL;
 static MasterContender* contender = NULL;
-static Option<Authorizer*> authorizer = None();
+static Option<Authorizer*> authorizer_ = None();
 static Files* files = NULL;
 static vector<GarbageCollector*>* garbageCollectors = NULL;
 static vector<StatusUpdateManager*>* statusUpdateManagers = NULL;
@@ -141,8 +141,9 @@ PID<Master> launch(const Flags& flags, Allocator* _allocator)
     // Create a default allocator.
     Try<Allocator*> defaultAllocator = HierarchicalDRFAllocator::create();
     if (defaultAllocator.isError()) {
-      EXIT(1) << "Failed to create an instance of HierarchicalDRFAllocator: "
-              << defaultAllocator.error();
+      EXIT(EXIT_FAILURE)
+        << "Failed to create an instance of HierarchicalDRFAllocator: "
+        << defaultAllocator.error();
     }
 
     // Update caller's instance.
@@ -162,8 +163,9 @@ PID<Master> launch(const Flags& flags, Allocator* _allocator)
     master::Flags flags;
     Try<Nothing> load = flags.load("MESOS_");
     if (load.isError()) {
-      EXIT(1) << "Failed to start a local cluster while loading "
-              << "master flags from the environment: " << load.error();
+      EXIT(EXIT_FAILURE)
+        << "Failed to start a local cluster while loading"
+        << " master flags from the environment: " << load.error();
     }
 
     // Load modules. Note that this covers both, master and slave
@@ -171,14 +173,15 @@ PID<Master> launch(const Flags& flags, Allocator* _allocator)
     if (flags.modules.isSome()) {
       Try<Nothing> result = ModuleManager::load(flags.modules.get());
       if (result.isError()) {
-        EXIT(1) << "Error loading modules: " << result.error();
+        EXIT(EXIT_FAILURE) << "Error loading modules: " << result.error();
       }
     }
 
     if (flags.registry == "in_memory") {
       if (flags.registry_strict) {
-        EXIT(1) << "Cannot use '--registry_strict' when using in-memory storage"
-                << " based registry";
+        EXIT(EXIT_FAILURE)
+          << "Cannot use '--registry_strict' when using in-memory storage"
+          << " based registry";
       }
       storage = new state::InMemoryStorage();
     } else if (flags.registry == "replicated_log") {
@@ -199,8 +202,9 @@ PID<Master> launch(const Flags& flags, Allocator* _allocator)
           flags.log_auto_initialize);
       storage = new state::LogStorage(log);
     } else {
-      EXIT(1) << "'" << flags.registry << "' is not a supported"
-              << " option for registry persistence";
+      EXIT(EXIT_FAILURE)
+        << "'" << flags.registry << "' is not a supported"
+        << " option for registry persistence";
     }
 
     CHECK_NOTNULL(storage);
@@ -219,45 +223,31 @@ PID<Master> launch(const Flags& flags, Allocator* _allocator)
     if (authorizerNames.size() > 1) {
       EXIT(EXIT_FAILURE) << "Multiple authorizers not supported";
     }
-    std::string authorizerName = authorizerNames[0];
+    string authorizerName = authorizerNames[0];
 
     // NOTE: The flag --authorizers overrides the flag --acls, i.e. if
     // a non default authorizer is requested, it will be used and
     // the contents of --acls will be ignored.
-    // TODO(arojas): Add support for multiple authorizers.
-    if (authorizerName != master::DEFAULT_AUTHORIZER ||
-        flags.acls.isSome()) {
-      Try<Authorizer*> create = Authorizer::create(authorizerName);
+    // TODO(arojas): Consider adding support for multiple authorizers.
+    Result<Authorizer*> authorizer((None()));
+    if (authorizerName != master::DEFAULT_AUTHORIZER) {
+      LOG(INFO) << "Creating '" << authorizerName << "' authorizer";
 
-      if (create.isError()) {
-        EXIT(EXIT_FAILURE) << "Could not create '" << authorizerName
-                           << "' authorizer: " << create.error();
+      authorizer = Authorizer::create(authorizerName);
+    } else {
+      // `authorizerName` is `DEFAULT_AUTHORIZER` at this point.
+      if (flags.acls.isSome()) {
+        LOG(INFO) << "Creating default '" << authorizerName << "' authorizer";
+
+        authorizer = Authorizer::create(flags.acls.get());
       }
+    }
 
-      authorizer = create.get();
-
-      LOG(INFO) << "Using '" << authorizerName << "' authorizer";
-
-      if (authorizerName == master::DEFAULT_AUTHORIZER) {
-        Try<Nothing> initialize =
-          authorizer.get()->initialize(flags.acls.get());
-
-        if (initialize.isError()) {
-          // Failing to initialize the authorizer leads to undefined
-          // behavior, therefore we default to skip authorization
-          // altogether.
-          EXIT(EXIT_FAILURE) << "Failed to initialize '"
-                             << authorizerName << "' authorizer: "
-                             << initialize.error();
-
-          delete authorizer.get();
-          authorizer = None();
-        }
-      } else if (flags.acls.isSome()) {
-        LOG(WARNING) << "Ignoring contents of --acls flag, because '"
-                     << authorizerName << "' authorizer will be used instead"
-                     << " of the default.";
-      }
+    if (authorizer.isError()) {
+      EXIT(EXIT_FAILURE) << "Could not create '" << authorizerName
+                         << "' authorizer: " << authorizer.error();
+    } else if (authorizer.isSome()) {
+      authorizer_ = authorizer.get();
     }
 
     Option<shared_ptr<RateLimiter>> slaveRemovalLimiter = None();
@@ -269,25 +259,28 @@ PID<Master> launch(const Flags& flags, Allocator* _allocator)
         strings::tokenize(flags.slave_removal_rate_limit.get(), "/");
 
       if (tokens.size() != 2) {
-        EXIT(1) << "Invalid slave_removal_rate_limit: "
-                << flags.slave_removal_rate_limit.get()
-                << ". Format is <Number of slaves>/<Duration>";
+        EXIT(EXIT_FAILURE)
+          << "Invalid slave_removal_rate_limit: "
+          << flags.slave_removal_rate_limit.get()
+          << ". Format is <Number of slaves>/<Duration>";
       }
 
       Try<int> permits = numify<int>(tokens[0]);
       if (permits.isError()) {
-        EXIT(1) << "Invalid slave_removal_rate_limit: "
-                << flags.slave_removal_rate_limit.get()
-                << ". Format is <Number of slaves>/<Duration>"
-                << ": " << permits.error();
+        EXIT(EXIT_FAILURE)
+          << "Invalid slave_removal_rate_limit: "
+          << flags.slave_removal_rate_limit.get()
+          << ". Format is <Number of slaves>/<Duration>"
+          << ": " << permits.error();
       }
 
       Try<Duration> duration = Duration::parse(tokens[1]);
       if (duration.isError()) {
-        EXIT(1) << "Invalid slave_removal_rate_limit: "
-                << flags.slave_removal_rate_limit.get()
-                << ". Format is <Number of slaves>/<Duration>"
-                << ": " << duration.error();
+        EXIT(EXIT_FAILURE)
+          << "Invalid slave_removal_rate_limit: "
+          << flags.slave_removal_rate_limit.get()
+          << ". Format is <Number of slaves>/<Duration>"
+          << ": " << duration.error();
       }
 
       slaveRemovalLimiter = new RateLimiter(permits.get(), duration.get());
@@ -297,7 +290,8 @@ PID<Master> launch(const Flags& flags, Allocator* _allocator)
     foreach (const string& name, ModuleManager::find<Anonymous>()) {
       Try<Anonymous*> create = ModuleManager::create<Anonymous>(name);
       if (create.isError()) {
-        EXIT(1) << "Failed to create anonymous module named '" << name << "'";
+        EXIT(EXIT_FAILURE)
+          << "Failed to create anonymous module named '" << name << "'";
       }
 
       // We don't bother keeping around the pointer to this anonymous
@@ -316,7 +310,7 @@ PID<Master> launch(const Flags& flags, Allocator* _allocator)
         files,
         contender,
         detector,
-        authorizer,
+        authorizer_,
         slaveRemovalLimiter,
         flags);
 
@@ -338,8 +332,9 @@ PID<Master> launch(const Flags& flags, Allocator* _allocator)
     Try<Nothing> load = flags.load("MESOS_");
 
     if (load.isError()) {
-      EXIT(1) << "Failed to start a local cluster while loading "
-              << "slave flags from the environment: " << load.error();
+      EXIT(EXIT_FAILURE)
+        << "Failed to start a local cluster while loading"
+        << " slave flags from the environment: " << load.error();
     }
 
     // Use a different work directory for each slave.
@@ -353,8 +348,8 @@ PID<Master> launch(const Flags& flags, Allocator* _allocator)
       ResourceEstimator::create(flags.resource_estimator);
 
     if (resourceEstimator.isError()) {
-      EXIT(1) << "Failed to create resource estimator: "
-              << resourceEstimator.error();
+      EXIT(EXIT_FAILURE)
+        << "Failed to create resource estimator: " << resourceEstimator.error();
     }
 
     resourceEstimators->push_back(resourceEstimator.get());
@@ -363,8 +358,8 @@ PID<Master> launch(const Flags& flags, Allocator* _allocator)
       QoSController::create(flags.qos_controller);
 
     if (qosController.isError()) {
-      EXIT(1) << "Failed to create QoS Controller: "
-              << qosController.error();
+      EXIT(EXIT_FAILURE)
+        << "Failed to create QoS Controller: " << qosController.error();
     }
 
     qosControllers->push_back(qosController.get());
@@ -378,12 +373,14 @@ PID<Master> launch(const Flags& flags, Allocator* _allocator)
       Containerizer::create(flags, true, fetchers->back());
 
     if (containerizer.isError()) {
-      EXIT(1) << "Failed to create a containerizer: " << containerizer.error();
+      EXIT(EXIT_FAILURE)
+        << "Failed to create a containerizer: " << containerizer.error();
     }
 
     // NOTE: At this point detector is already initialized by the
     // Master.
     Slave* slave = new Slave(
+        process::ID::generate("slave"),
         flags,
         detector,
         containerizer.get(),
@@ -426,9 +423,9 @@ void shutdown()
 
     slaves.clear();
 
-    if (authorizer.isSome()) {
-      delete authorizer.get();
-      authorizer = None();
+    if (authorizer_.isSome()) {
+      delete authorizer_.get();
+      authorizer_ = None();
     }
 
     delete detector;

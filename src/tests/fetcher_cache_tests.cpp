@@ -17,7 +17,6 @@
 #include <unistd.h>
 
 #include <list>
-#include <mutex>
 #include <string>
 #include <vector>
 
@@ -31,6 +30,7 @@
 #include <process/collect.hpp>
 #include <process/future.hpp>
 #include <process/gmock.hpp>
+#include <process/latch.hpp>
 #include <process/message.hpp>
 #include <process/owned.hpp>
 #include <process/pid.hpp>
@@ -71,6 +71,7 @@ using mesos::internal::slave::FetcherProcess;
 
 using process::Future;
 using process::HttpEvent;
+using process::Latch;
 using process::Owned;
 using process::PID;
 using process::Process;
@@ -143,30 +144,35 @@ protected:
 
   Try<vector<Task>> launchTasks(const vector<CommandInfo>& commandInfos);
 
-  // Waits until FetcherProcess::run() has been called for all tasks.
-  void awaitFetchContention();
+  // Promises whose futures indicate that FetcherProcess::_fetch() has been
+  // called for a task with a given index.
+  vector<Owned<Promise<Nothing>>> fetchContentionWaypoints;
 
   string assetsDirectory;
   string commandPath;
   string archivePath;
+  string cacheDirectory;
+
+  Owned<cluster::Master> master;
+  Owned<cluster::Slave> slave;
 
   slave::Flags flags;
-  MesosContainerizer* containerizer;
-  PID<Slave> slavePid;
   SlaveID slaveId;
-  string cacheDirectory;
+
+  Owned<MasterDetector> detector;
+  Owned<MesosContainerizer> containerizer;
+
+  // NOTE: This is technically owned by the `fetcher`, but we violate
+  // this ownership in the tests.
   MockFetcherProcess* fetcherProcess;
+
   MockScheduler scheduler;
-  MesosSchedulerDriver* driver;
+  Owned<MesosSchedulerDriver> driver;
 
 private:
-  Fetcher* fetcher;
+  Owned<Fetcher> fetcher;
 
   FrameworkID frameworkId;
-
-  // Promises whose futures indicate that FetcherProcess::_fetch() has been
-  // called for a task with a given index.
-  vector<Owned<Promise<Nothing>>> fetchContentionWaypoints;
 
   // If this test did not succeed as indicated by the above variable,
   // the contents of these sandboxes will be dumped during tear down.
@@ -187,27 +193,28 @@ void FetcherCacheTest::SetUp()
   setupCommandFileAsset();
   setupArchiveAsset();
 
-  Try<PID<Master>> master = StartMaster();
-  ASSERT_SOME(master);
+  Try<Owned<cluster::Master>> _master = StartMaster();
+  ASSERT_SOME(_master);
+  master = _master.get();
 
   fetcherProcess = new MockFetcherProcess();
-  fetcher = new Fetcher(Owned<FetcherProcess>(fetcherProcess));
+  fetcher.reset(new Fetcher(Owned<FetcherProcess>(fetcherProcess)));
 
   FrameworkInfo frameworkInfo;
   frameworkInfo.set_name("default");
   frameworkInfo.set_checkpoint(true);
 
-  driver = new MesosSchedulerDriver(
-    &scheduler, frameworkInfo, master.get(), DEFAULT_CREDENTIAL);
+  driver.reset(new MesosSchedulerDriver(
+    &scheduler, frameworkInfo, master->pid, DEFAULT_CREDENTIAL));
 
-  EXPECT_CALL(scheduler, registered(driver, _, _))
+  EXPECT_CALL(scheduler, registered(driver.get(), _, _))
     .Times(1);
 
   // This installs a temporary reaction to resourceOffers calls, which
   // must be in place BEFORE starting the scheduler driver. This
   // "cover" is necessary, because we only add relevant mock actions
   // in launchTask() and launchTasks() AFTER starting the driver.
-  EXPECT_CALL(scheduler, resourceOffers(driver, _))
+  EXPECT_CALL(scheduler, resourceOffers(driver.get(), _))
     .WillRepeatedly(DeclineOffers());
 }
 
@@ -262,9 +269,9 @@ void FetcherCacheTest::TearDown()
 
   driver->stop();
   driver->join();
-  delete driver;
 
-  delete fetcher;
+  master.reset();
+  slave.reset();
 
   MesosTest::TearDown();
 }
@@ -275,29 +282,26 @@ void FetcherCacheTest::TearDown()
 void FetcherCacheTest::startSlave()
 {
   Try<MesosContainerizer*> create = MesosContainerizer::create(
-      flags, true, fetcher);
+      flags, true, fetcher.get());
+
   ASSERT_SOME(create);
-  containerizer = create.get();
+  containerizer.reset(create.get());
 
   Future<SlaveRegisteredMessage> slaveRegisteredMessage =
     FUTURE_PROTOBUF(SlaveRegisteredMessage(), _, _);
 
-  Try<PID<Slave>> pid = StartSlave(containerizer, flags);
-  ASSERT_SOME(pid);
-  slavePid = pid.get();
+  detector = master->createDetector();
+
+  Try<Owned<cluster::Slave>> _slave =
+    StartSlave(detector.get(), containerizer.get(), flags);
+  ASSERT_SOME(_slave);
+  slave = _slave.get();
 
   AWAIT_READY(slaveRegisteredMessage);
   slaveId = slaveRegisteredMessage.get().slave_id();
 
   cacheDirectory =
     slave::paths::getSlavePath(flags.fetcher_cache_dir, slaveId);
-}
-
-
-void FetcherCacheTest::stopSlave()
-{
-  Stop(slavePid);
-  delete containerizer;
 }
 
 
@@ -405,7 +409,7 @@ Try<FetcherCacheTest::Task> FetcherCacheTest::launchTask(
     const size_t taskIndex)
 {
   Future<vector<Offer>> offers;
-  EXPECT_CALL(scheduler, resourceOffers(driver, _))
+  EXPECT_CALL(scheduler, resourceOffers(driver.get(), _))
     .WillOnce(FutureArg<1>(&offers))
     .WillRepeatedly(DeclineOffers());
 
@@ -444,7 +448,7 @@ Try<FetcherCacheTest::Task> FetcherCacheTest::launchTask(
 
   Queue<TaskStatus> taskStatusQueue;
 
-  EXPECT_CALL(scheduler, statusUpdate(driver, _))
+  EXPECT_CALL(scheduler, statusUpdate(driver.get(), _))
     .WillRepeatedly(PushTaskStatus(taskStatusQueue));
 
   driver->launchTasks(offer.id(), tasks);
@@ -516,7 +520,7 @@ Try<vector<FetcherCacheTest::Task>> FetcherCacheTest::launchTasks(
               Invoke(fetcherProcess, &MockFetcherProcess::unmocked__fetch)));
 
   Future<vector<Offer>> offers;
-  EXPECT_CALL(scheduler, resourceOffers(driver, _))
+  EXPECT_CALL(scheduler, resourceOffers(driver.get(), _))
     .WillOnce(FutureArg<1>(&offers))
     .WillRepeatedly(DeclineOffers());
 
@@ -577,26 +581,16 @@ Try<vector<FetcherCacheTest::Task>> FetcherCacheTest::launchTasks(
 
     result.push_back(Task {sandboxPath, taskStatusQueue});
 
-    EXPECT_CALL(scheduler, statusUpdate(driver, _))
-      .WillRepeatedly(PushIndexedTaskStatus<1>(result));
-
     auto waypoint = Owned<Promise<Nothing>>(new Promise<Nothing>());
     fetchContentionWaypoints.push_back(waypoint);
   }
 
+  EXPECT_CALL(scheduler, statusUpdate(driver.get(), _))
+    .WillRepeatedly(PushIndexedTaskStatus<1>(result));
+
   driver->launchTasks(offer.id(), tasks);
 
   return result;
-}
-
-
-// Ensure that FetcherProcess::_fetch() has been called for each task,
-// which means that all tasks are competing for downloading the same URIs.
-void FetcherCacheTest::awaitFetchContention()
-{
-  foreach (const Owned<Promise<Nothing>>& waypoint, fetchContentionWaypoints) {
-    AWAIT(waypoint->future());
-  }
 }
 
 
@@ -608,28 +602,27 @@ TEST_F(FetcherCacheTest, LocalUncached)
   startSlave();
   driver->start();
 
-  for (size_t i = 0; i < 3; i++) {
-    CommandInfo::URI uri;
-    uri.set_value(commandPath);
-    uri.set_executable(true);
+  const int index = 0;
+  CommandInfo::URI uri;
+  uri.set_value(commandPath);
+  uri.set_executable(true);
 
-    CommandInfo commandInfo;
-    commandInfo.set_value("./" + COMMAND_NAME + " " + taskName(i));
-    commandInfo.add_uris()->CopyFrom(uri);
+  CommandInfo commandInfo;
+  commandInfo.set_value("./" + COMMAND_NAME + " " + taskName(index));
+  commandInfo.add_uris()->CopyFrom(uri);
 
-    const Try<Task> task = launchTask(commandInfo, i);
-    ASSERT_SOME(task);
+  const Try<Task> task = launchTask(commandInfo, index);
+  ASSERT_SOME(task);
 
-    AWAIT_READY(awaitFinished(task.get()));
+  AWAIT_READY(awaitFinished(task.get()));
 
-    EXPECT_EQ(0u, fetcherProcess->cacheSize());
-    ASSERT_SOME(fetcherProcess->cacheFiles(slaveId, flags));
-    EXPECT_EQ(0u, fetcherProcess->cacheFiles(slaveId, flags).get().size());
+  EXPECT_EQ(0u, fetcherProcess->cacheSize());
+  ASSERT_SOME(fetcherProcess->cacheFiles(slaveId, flags));
+  EXPECT_EQ(0u, fetcherProcess->cacheFiles(slaveId, flags).get().size());
 
-    const string path = path::join(task.get().runDirectory.value, COMMAND_NAME);
-    EXPECT_TRUE(isExecutable(path));
-    EXPECT_TRUE(os::exists(path + taskName(i)));
-  }
+  const string path = path::join(task.get().runDirectory.value, COMMAND_NAME);
+  EXPECT_TRUE(isExecutable(path));
+  EXPECT_TRUE(os::exists(path + taskName(index)));
 }
 
 
@@ -641,7 +634,7 @@ TEST_F(FetcherCacheTest, LocalCached)
   startSlave();
   driver->start();
 
-  for (size_t i = 0; i < 3; i++) {
+  for (size_t i = 0; i < 2; i++) {
     CommandInfo::URI uri;
     uri.set_value(commandPath);
     uri.set_executable(true);
@@ -664,6 +657,48 @@ TEST_F(FetcherCacheTest, LocalCached)
     ASSERT_SOME(fetcherProcess->cacheFiles(slaveId, flags));
     EXPECT_EQ(1u, fetcherProcess->cacheFiles(slaveId, flags).get().size());
   }
+}
+
+
+TEST_F(FetcherCacheTest, CachedCustomFilename)
+{
+  startSlave();
+  driver->start();
+
+  const int index = 0;
+  const string customFilename = "my-command";
+  CommandInfo::URI uri;
+  uri.set_value(commandPath);
+  uri.set_executable(true);
+  uri.set_cache(true);
+  uri.set_filename(customFilename);
+
+  CommandInfo commandInfo;
+  commandInfo.set_value("./" + customFilename + " " + taskName(index));
+  commandInfo.add_uris()->CopyFrom(uri);
+
+  const Try<Task> task = launchTask(commandInfo, index);
+  ASSERT_SOME(task);
+
+  AWAIT_READY(awaitFinished(task.get()));
+
+  EXPECT_EQ(1u, fetcherProcess->cacheSize());
+  ASSERT_SOME(fetcherProcess->cacheFiles(slaveId, flags));
+  EXPECT_EQ(1u, fetcherProcess->cacheFiles(slaveId, flags).get().size());
+
+  // Verify that the downloaded executable lives at our custom filename path.
+  const string executablePath = path::join(
+      task.get().runDirectory.value, customFilename);
+
+  EXPECT_TRUE(isExecutable(executablePath));
+
+  // The script specified by COMMAND_SCRIPT just statically touches a file
+  // named $COMMAND_NAME + $1, so if we want to verify that it ran here we have
+  // to check this path in addition to the custom-named executable we saved.
+  const string outputPath = path::join(
+      task.get().runDirectory.value, COMMAND_NAME);
+
+  EXPECT_TRUE(os::exists(outputPath + taskName(index)));
 }
 
 
@@ -723,34 +758,33 @@ TEST_F(FetcherCacheTest, LocalUncachedExtract)
   startSlave();
   driver->start();
 
-  for (size_t i = 0; i < 3; i++) {
-    CommandInfo::URI uri;
-    uri.set_value(archivePath);
-    uri.set_extract(true);
+  const int index = 0;
+  CommandInfo::URI uri;
+  uri.set_value(archivePath);
+  uri.set_extract(true);
 
-    CommandInfo commandInfo;
-    commandInfo.set_value("./" + ARCHIVED_COMMAND_NAME + " " + taskName(i));
-    commandInfo.add_uris()->CopyFrom(uri);
+  CommandInfo commandInfo;
+  commandInfo.set_value("./" + ARCHIVED_COMMAND_NAME + " " + taskName(index));
+  commandInfo.add_uris()->CopyFrom(uri);
 
-    const Try<Task> task = launchTask(commandInfo, i);
-    ASSERT_SOME(task);
+  const Try<Task> task = launchTask(commandInfo, index);
+  ASSERT_SOME(task);
 
-    AWAIT_READY(awaitFinished(task.get()));
+  AWAIT_READY(awaitFinished(task.get()));
 
-    EXPECT_TRUE(os::exists(
-        path::join(task.get().runDirectory.value, ARCHIVE_NAME)));
-    EXPECT_FALSE(isExecutable(
-        path::join(task.get().runDirectory.value, ARCHIVE_NAME)));
+  EXPECT_TRUE(os::exists(
+      path::join(task.get().runDirectory.value, ARCHIVE_NAME)));
+  EXPECT_FALSE(isExecutable(
+      path::join(task.get().runDirectory.value, ARCHIVE_NAME)));
 
-    const string path =
-      path::join(task.get().runDirectory.value, ARCHIVED_COMMAND_NAME);
-    EXPECT_TRUE(isExecutable(path));
-    EXPECT_TRUE(os::exists(path + taskName(i)));
+  const string path =
+    path::join(task.get().runDirectory.value, ARCHIVED_COMMAND_NAME);
+  EXPECT_TRUE(isExecutable(path));
+  EXPECT_TRUE(os::exists(path + taskName(index)));
 
-    EXPECT_EQ(0u, fetcherProcess->cacheSize());
-    ASSERT_SOME(fetcherProcess->cacheFiles(slaveId, flags));
-    EXPECT_EQ(0u, fetcherProcess->cacheFiles(slaveId, flags).get().size());
-  }
+  EXPECT_EQ(0u, fetcherProcess->cacheSize());
+  ASSERT_SOME(fetcherProcess->cacheFiles(slaveId, flags));
+  EXPECT_EQ(0u, fetcherProcess->cacheFiles(slaveId, flags).get().size());
 }
 
 
@@ -760,7 +794,7 @@ TEST_F(FetcherCacheTest, LocalCachedExtract)
   startSlave();
   driver->start();
 
-  for (size_t i = 0; i < 3; i++) {
+  for (size_t i = 0; i < 2; i++) {
     CommandInfo::URI uri;
     uri.set_value(archivePath);
     uri.set_extract(true);
@@ -807,13 +841,22 @@ public:
   class HttpServer : public Process<HttpServer>
   {
   public:
-    HttpServer(FetcherCacheHttpTest* test)
+  public:
+    HttpServer(const string& _commandPath, const string& _archivePath)
       : countRequests(0),
         countCommandRequests(0),
-        countArchiveRequests(0)
+        countArchiveRequests(0),
+        commandPath(_commandPath),
+        archivePath(_archivePath)
     {
-      provide(COMMAND_NAME, test->commandPath);
-      provide(ARCHIVE_NAME, test->archivePath);
+      CHECK(!_commandPath.empty());
+      CHECK(!_archivePath.empty());
+    }
+
+    virtual void initialize()
+    {
+      provide(COMMAND_NAME, commandPath);
+      provide(ARCHIVE_NAME, archivePath);
     }
 
     string url()
@@ -821,40 +864,40 @@ public:
       return "http://" + stringify(self().address) + "/" + self().id + "/";
     }
 
-    // Stalls the execution of HTTP requests inside visit().
+    // Stalls the execution of future HTTP requests inside visit().
     void pause()
     {
-      mutex.lock();
+      // If there is no latch or if the existing latch has already been
+      // triggered, create a new latch.
+      if (latch.get() == nullptr || latch->await(Duration::min())) {
+        latch.reset(new Latch());
+      }
     }
 
     void resume()
     {
-      mutex.unlock();
+      if (latch.get() != nullptr) {
+        latch->trigger();
+      }
     }
 
     virtual void visit(const HttpEvent& event)
     {
-      // TODO(bernd-mesos): Don't use locks here because we'll
-      // actually block libprocess threads which could cause a
-      // deadlock if we have a test with too many requests that we
-      // don't have enough threads to run other actors! Instead,
-      // consider asynchronously deferring the actual execution of
-      // this function via a Queue. This is currently non-trivial
-      // because we can't copy an HttpEvent so we're _forced_ to block
-      // the thread synchronously.
-      synchronized (mutex) {
-        countRequests++;
-
-        if (strings::contains(event.request->url.path, COMMAND_NAME)) {
-          countCommandRequests++;
-        }
-
-        if (strings::contains(event.request->url.path, ARCHIVE_NAME)) {
-          countArchiveRequests++;
-        }
-
-        ProcessBase::visit(event);
+      if (latch.get() != nullptr) {
+        latch->await();
       }
+
+      countRequests++;
+
+      if (strings::contains(event.request->url.path, COMMAND_NAME)) {
+        countCommandRequests++;
+      }
+
+      if (strings::contains(event.request->url.path, ARCHIVE_NAME)) {
+        countArchiveRequests++;
+      }
+
+      ProcessBase::visit(event);
     }
 
     void resetCounts()
@@ -869,14 +912,16 @@ public:
     size_t countArchiveRequests;
 
   private:
-    std::mutex mutex;
+    const string commandPath;
+    const string archivePath;
+    Owned<Latch> latch;
   };
 
   virtual void SetUp()
   {
     FetcherCacheTest::SetUp();
 
-    httpServer = new HttpServer(this);
+    httpServer = new HttpServer(commandPath, archivePath);
     spawn(httpServer);
   }
 
@@ -974,10 +1019,12 @@ TEST_F(FetcherCacheHttpTest, HttpCachedConcurrent)
 
   CHECK_EQ(countTasks, tasks.get().size());
 
-  // Given pausing the HTTP server, this proves that fetch contention
-  // has happened. All tasks have passed the point where it occurs,
-  // but they are not running yet.
-  awaitFetchContention();
+  // Having paused the HTTP server, ensure that FetcherProcess::_fetch()
+  // has been called for each task, which means that all tasks are competing
+  // for downloading the same URIs.
+  foreach (const Owned<Promise<Nothing>>& waypoint, fetchContentionWaypoints) {
+    AWAIT(waypoint->future());
+  }
 
   // Now let the tasks run.
   httpServer->resume();
@@ -1081,10 +1128,12 @@ TEST_F(FetcherCacheHttpTest, HttpMixed)
 
   CHECK_EQ(3u, tasks.get().size());
 
-  // Given pausing the HTTP server, this proves that fetch contention
-  // has happened. All tasks have passed the point where it occurs,
-  // but they are not running yet.
-  awaitFetchContention();
+  // Having paused the HTTP server, ensure that FetcherProcess::_fetch()
+  // has been called for each task, which means that all tasks are competing
+  // for downloading the same URIs.
+  foreach (const Owned<Promise<Nothing>>& waypoint, fetchContentionWaypoints) {
+    AWAIT(waypoint->future());
+  }
 
   // Now let the tasks run.
   httpServer->resume();
@@ -1179,7 +1228,8 @@ TEST_F(FetcherCacheHttpTest, DISABLED_HttpCachedRecovery)
     EXPECT_EQ(2u, httpServer->countCommandRequests);
   }
 
-  stopSlave();
+  // Stop and destroy the current slave.
+  slave->terminate();
 
   // Start over.
   httpServer->resetCounts();
@@ -1188,19 +1238,21 @@ TEST_F(FetcherCacheHttpTest, DISABLED_HttpCachedRecovery)
   // stopping the slave.
   Fetcher fetcher2;
 
-  Try<MesosContainerizer*> c =
+  Try<MesosContainerizer*> _containerizer =
     MesosContainerizer::create(flags, true, &fetcher2);
-  CHECK_SOME(c);
-  containerizer = c.get();
+
+  ASSERT_SOME(_containerizer);
+  containerizer.reset(_containerizer.get());
 
   // Set up so we can wait until the new slave updates the container's
   // resources (this occurs after the executor has re-registered).
   Future<Nothing> update =
     FUTURE_DISPATCH(_, &MesosContainerizerProcess::update);
 
-  Try<PID<Slave>> pid = StartSlave(containerizer, flags);
-  CHECK_SOME(pid);
-  slavePid = pid.get();
+  Try<Owned<cluster::Slave>> _slave =
+    StartSlave(detector.get(), containerizer.get(), flags);
+  ASSERT_SOME(_slave);
+  slave = _slave.get();
 
   // Wait until the containerizer is updated.
   AWAIT_READY(update);
@@ -1245,7 +1297,7 @@ TEST_F(FetcherCacheHttpTest, DISABLED_HttpCachedRecovery)
 // observe how the number of cache files rises and then stays constant.
 TEST_F(FetcherCacheTest, SimpleEviction)
 {
-  const size_t countCacheEntries = 3;
+  const size_t countCacheEntries = 2;
 
   // Let only the first 'countCacheEntries' downloads fit in the cache.
   flags.fetcher_cache_size = COMMAND_SCRIPT.size() * countCacheEntries;
@@ -1385,7 +1437,7 @@ TEST_F(FetcherCacheTest, FallbackFromEviction)
   // extra characters so the cache will fill up to the last byte.
   ASSERT_SOME(os::write(
       commandPath,
-      COMMAND_SCRIPT + std::string(growth, '\n')));
+      COMMAND_SCRIPT + string(growth, '\n')));
 
   CommandInfo::URI uri1;
   uri1.set_value(commandPath);
@@ -1433,7 +1485,7 @@ TEST_F(FetcherCacheTest, FallbackFromEviction)
   // fit into the cache any more.
   ASSERT_SOME(os::write(
       commandPath,
-      COMMAND_SCRIPT + std::string(2 * growth, '\n')));
+      COMMAND_SCRIPT + string(2 * growth, '\n')));
 
   CommandInfo::URI uri2;
   uri2.set_value(commandPath);

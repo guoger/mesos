@@ -46,8 +46,8 @@ using std::string;
 using std::vector;
 
 using mesos::slave::ContainerConfig;
+using mesos::slave::ContainerLaunchInfo;
 using mesos::slave::ContainerLimitation;
-using mesos::slave::ContainerPrepareInfo;
 using mesos::slave::ContainerState;
 using mesos::slave::Isolator;
 
@@ -244,9 +244,8 @@ Future<Nothing> CgroupsCpushareIsolatorProcess::recover(
 }
 
 
-Future<Option<ContainerPrepareInfo>> CgroupsCpushareIsolatorProcess::prepare(
+Future<Option<ContainerLaunchInfo>> CgroupsCpushareIsolatorProcess::prepare(
     const ContainerID& containerId,
-    const ExecutorInfo& executorInfo,
     const ContainerConfig& containerConfig)
 {
   if (infos.contains(containerId)) {
@@ -289,8 +288,8 @@ Future<Option<ContainerPrepareInfo>> CgroupsCpushareIsolatorProcess::prepare(
     }
   }
 
-  return update(containerId, executorInfo.resources())
-    .then([]() -> Future<Option<ContainerPrepareInfo>> {
+  return update(containerId, containerConfig.executor_info().resources())
+    .then([]() -> Future<Option<ContainerLaunchInfo>> {
       return None();
     });
 }

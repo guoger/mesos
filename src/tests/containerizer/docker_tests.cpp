@@ -50,9 +50,10 @@ class DockerTest : public MesosTest
 {
   virtual void TearDown()
   {
-    Try<Docker*> docker =
-      Docker::create(tests::flags.docker, tests::flags.docker_socket,
-      false);
+    Try<Owned<Docker>> docker = Docker::create(
+        tests::flags.docker,
+        tests::flags.docker_socket,
+        false);
 
     ASSERT_SOME(docker);
 
@@ -65,8 +66,6 @@ class DockerTest : public MesosTest
     foreach (const Docker::Container& container, containers.get()) {
       AWAIT_READY_FOR(docker.get()->rm(container.id, true), Seconds(30));
     }
-
-    delete docker.get();
   }
 };
 
@@ -77,9 +76,10 @@ TEST_F(DockerTest, ROOT_DOCKER_interface)
   const string containerName = NAME_PREFIX + "-test";
   Resources resources = Resources::parse("cpus:1;mem:512").get();
 
-  Owned<Docker> docker(Docker::create(tests::flags.docker,
-                                      tests::flags.docker_socket,
-                                      false).get());
+  Owned<Docker> docker = Docker::create(
+      tests::flags.docker,
+      tests::flags.docker_socket,
+      false).get();
 
   // Verify that we do not see the container.
   Future<list<Docker::Container> > containers = docker->ps(true, containerName);
@@ -95,7 +95,7 @@ TEST_F(DockerTest, ROOT_DOCKER_interface)
   containerInfo.set_type(ContainerInfo::DOCKER);
 
   ContainerInfo::DockerInfo dockerInfo;
-  dockerInfo.set_image("busybox");
+  dockerInfo.set_image("alpine");
   containerInfo.mutable_docker()->CopyFrom(dockerInfo);
 
   CommandInfo commandInfo;
@@ -112,6 +112,7 @@ TEST_F(DockerTest, ROOT_DOCKER_interface)
 
   Future<Docker::Container> inspect =
     docker->inspect(containerName, Seconds(1));
+
   AWAIT_READY(inspect);
 
   // Should be able to see the container now.
@@ -227,40 +228,47 @@ TEST_F(DockerTest, ROOT_DOCKER_interface)
 // This test tests parsing docker version output.
 TEST_F(DockerTest, ROOT_DOCKER_parsing_version)
 {
-  Owned<Docker> docker1(Docker::create("echo Docker version 1.7.1, build",
-                                       tests::flags.docker_socket,
-                                       false).get());
+  Owned<Docker> docker1 = Docker::create(
+      "echo Docker version 1.7.1, build",
+      tests::flags.docker_socket,
+      false).get();
+
   Future<Version> version1 = docker1->version();
   AWAIT_READY(version1);
-  EXPECT_EQ(version1.get(), Version::parse("1.7.1").get());
+  EXPECT_EQ(Version::parse("1.7.1").get(), version1.get());
 
-  Owned<Docker> docker2(Docker::create("echo Docker version 1.7.1.fc22, build",
-                                       tests::flags.docker_socket,
-                                       false).get());
+  Owned<Docker> docker2 = Docker::create(
+      "echo Docker version 1.7.1.fc22, build",
+      tests::flags.docker_socket,
+      false).get();
+
   Future<Version> version2 = docker2->version();
   AWAIT_READY(version2);
-  EXPECT_EQ(version2.get(), Version::parse("1.7.1").get());
+  EXPECT_EQ(Version::parse("1.7.1").get(), version2.get());
 
-  Owned<Docker> docker3(Docker::create("echo Docker version 1.7.1-fc22, build",
-                                       tests::flags.docker_socket,
-                                       false).get());
+  Owned<Docker> docker3 = Docker::create(
+      "echo Docker version 1.7.1-fc22, build",
+      tests::flags.docker_socket,
+      false).get();
+
   Future<Version> version3 = docker3->version();
   AWAIT_READY(version3);
-  EXPECT_EQ(version3.get(), Version::parse("1.7.1").get());
+  EXPECT_EQ(Version::parse("1.7.1").get(), version3.get());
 }
 
 
 TEST_F(DockerTest, ROOT_DOCKER_CheckCommandWithShell)
 {
-  Owned<Docker> docker(Docker::create(tests::flags.docker,
-                                     tests::flags.docker_socket,
-                                     false).get());
+  Owned<Docker> docker = Docker::create(
+      tests::flags.docker,
+      tests::flags.docker_socket,
+      false).get();
 
   ContainerInfo containerInfo;
   containerInfo.set_type(ContainerInfo::DOCKER);
 
   ContainerInfo::DockerInfo dockerInfo;
-  dockerInfo.set_image("busybox");
+  dockerInfo.set_image("alpine");
   containerInfo.mutable_docker()->CopyFrom(dockerInfo);
 
   CommandInfo commandInfo;
@@ -280,9 +288,11 @@ TEST_F(DockerTest, ROOT_DOCKER_CheckCommandWithShell)
 TEST_F(DockerTest, ROOT_DOCKER_CheckPortResource)
 {
   const string containerName = NAME_PREFIX + "-port-resource-test";
-  Owned<Docker> docker(Docker::create(tests::flags.docker,
-                                     tests::flags.docker_socket,
-                                     false).get());
+
+  Owned<Docker> docker = Docker::create(
+      tests::flags.docker,
+      tests::flags.docker_socket,
+      false).get();
 
   // Make sure the container is removed.
   Future<Nothing> remove = docker->rm(containerName, true);
@@ -293,7 +303,7 @@ TEST_F(DockerTest, ROOT_DOCKER_CheckPortResource)
   containerInfo.set_type(ContainerInfo::DOCKER);
 
   ContainerInfo::DockerInfo dockerInfo;
-  dockerInfo.set_image("busybox");
+  dockerInfo.set_image("alpine");
   dockerInfo.set_network(ContainerInfo::DockerInfo::BRIDGE);
 
   ContainerInfo::DockerInfo::PortMapping portMapping;
@@ -352,9 +362,10 @@ TEST_F(DockerTest, ROOT_DOCKER_CancelPull)
 
   AWAIT_READY_FOR(s.get().status(), Seconds(30));
 
-  Owned<Docker> docker(Docker::create(tests::flags.docker,
-                                      tests::flags.docker_socket,
-                                      false).get());
+  Owned<Docker> docker = Docker::create(
+      tests::flags.docker,
+      tests::flags.docker_socket,
+      false).get();
 
   Try<string> directory = environment->mkdtemp();
 
@@ -376,9 +387,10 @@ TEST_F(DockerTest, ROOT_DOCKER_CancelPull)
 // docker container works.
 TEST_F(DockerTest, ROOT_DOCKER_MountRelative)
 {
-  Owned<Docker> docker(Docker::create(tests::flags.docker,
-                                     tests::flags.docker_socket,
-                                     false).get());
+  Owned<Docker> docker = Docker::create(
+      tests::flags.docker,
+      tests::flags.docker_socket,
+      false).get();
 
   ContainerInfo containerInfo;
   containerInfo.set_type(ContainerInfo::DOCKER);
@@ -389,7 +401,7 @@ TEST_F(DockerTest, ROOT_DOCKER_MountRelative)
   volume->set_mode(Volume::RO);
 
   ContainerInfo::DockerInfo dockerInfo;
-  dockerInfo.set_image("busybox");
+  dockerInfo.set_image("alpine");
 
   containerInfo.mutable_docker()->CopyFrom(dockerInfo);
 
@@ -418,9 +430,10 @@ TEST_F(DockerTest, ROOT_DOCKER_MountRelative)
 // docker container works.
 TEST_F(DockerTest, ROOT_DOCKER_MountAbsolute)
 {
-  Owned<Docker> docker(Docker::create(tests::flags.docker,
-                                      tests::flags.docker_socket,
-                                      false).get());
+  Owned<Docker> docker = Docker::create(
+      tests::flags.docker,
+      tests::flags.docker_socket,
+      false).get();
 
   ContainerInfo containerInfo;
   containerInfo.set_type(ContainerInfo::DOCKER);
@@ -437,7 +450,7 @@ TEST_F(DockerTest, ROOT_DOCKER_MountAbsolute)
   volume->set_mode(Volume::RO);
 
   ContainerInfo::DockerInfo dockerInfo;
-  dockerInfo.set_image("busybox");
+  dockerInfo.set_image("alpine");
 
   containerInfo.mutable_docker()->CopyFrom(dockerInfo);
 
@@ -491,6 +504,7 @@ TEST_F(DockerImageTest, ParseInspectonImage)
     "            \"LANG=C.UTF-8\","
     "            \"JAVA_VERSION=8u66\","
     "            \"JAVA_DEBIAN_VERSION=8u66-b01-1~bpo8+1\","
+    "            \"SPARK_OPTS=--driver-java-options=-Xms1024M --driver-java-options=-Xmx4096M --driver-java-options=-Dlog4j.logLevel=info\"," // NOLINT(whitespace/line_length)
     "            \"CA_CERTIFICATES_JAVA_VERSION=20140324\""
     "        ],"
     "        \"Cmd\": ["
@@ -531,6 +545,7 @@ TEST_F(DockerImageTest, ParseInspectonImage)
     "            \"LANG=C.UTF-8\","
     "            \"JAVA_VERSION=8u66\","
     "            \"JAVA_DEBIAN_VERSION=8u66-b01-1~bpo8+1\","
+    "            \"SPARK_OPTS=--driver-java-options=-Xms1024M --driver-java-options=-Xmx4096M --driver-java-options=-Dlog4j.logLevel=info\"," // NOLINT(whitespace/line_length)
     "            \"CA_CERTIFICATES_JAVA_VERSION=20140324\""
     "        ],"
     "        \"Cmd\": null,"
@@ -564,6 +579,10 @@ TEST_F(DockerImageTest, ParseInspectonImage)
   EXPECT_EQ("8u66", image.get().environment.get().at("JAVA_VERSION"));
   EXPECT_EQ("8u66-b01-1~bpo8+1",
             image.get().environment.get().at("JAVA_DEBIAN_VERSION"));
+  EXPECT_EQ("--driver-java-options=-Xms1024M "
+            "--driver-java-options=-Xmx4096M "
+            "--driver-java-options=-Dlog4j.logLevel=info",
+            image.get().environment.get().at("SPARK_OPTS"));
   EXPECT_EQ("20140324",
             image.get().environment.get().at("CA_CERTIFICATES_JAVA_VERSION"));
 }

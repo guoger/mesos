@@ -27,6 +27,7 @@
 #include <process/http.hpp>
 #include <process/subprocess.hpp>
 
+#include <stout/base64.hpp>
 #include <stout/gtest.hpp>
 #include <stout/json.hpp>
 #include <stout/net.hpp>
@@ -81,7 +82,7 @@ TEST_F(FetcherTest, FileURI)
   EXPECT_FALSE(os::exists(localFile));
 
   slave::Flags flags;
-  flags.launcher_dir = path::join(tests::flags.build_dir, "src");
+  flags.launcher_dir = getLauncherDir();
 
   ContainerID containerId;
   containerId.set_value(UUID::random().toString());
@@ -115,7 +116,7 @@ TEST_F(FetcherTest, InvalidUser)
   EXPECT_FALSE(os::exists(localFile));
 
   slave::Flags flags;
-  flags.launcher_dir = path::join(tests::flags.build_dir, "src");
+  flags.launcher_dir = getLauncherDir();
   flags.frameworks_home = "/tmp/frameworks";
 
   ContainerID containerId;
@@ -151,7 +152,7 @@ TEST_F(FetcherTest, NonExistingFile)
   string testFile = path::join(fromDir, "nonExistingFile");
 
   slave::Flags flags;
-  flags.launcher_dir = path::join(tests::flags.build_dir, "src");
+  flags.launcher_dir = getLauncherDir();
   flags.frameworks_home = "/tmp/frameworks";
 
   ContainerID containerId;
@@ -177,7 +178,7 @@ TEST_F(FetcherTest, NonExistingFile)
 TEST_F(FetcherTest, MalformedURI)
 {
   slave::Flags flags;
-  flags.launcher_dir = path::join(tests::flags.build_dir, "src");
+  flags.launcher_dir = getLauncherDir();
   flags.frameworks_home = "/tmp/frameworks";
 
   ContainerID containerId;
@@ -210,7 +211,7 @@ TEST_F(FetcherTest, AbsoluteFilePath)
   EXPECT_FALSE(os::exists(localFile));
 
   slave::Flags flags;
-  flags.launcher_dir = path::join(tests::flags.build_dir, "src");
+  flags.launcher_dir = getLauncherDir();
 
   ContainerID containerId;
   containerId.set_value(UUID::random().toString());
@@ -241,7 +242,7 @@ TEST_F(FetcherTest, RelativeFilePath)
   EXPECT_FALSE(os::exists(localFile));
 
   slave::Flags flags;
-  flags.launcher_dir = path::join(tests::flags.build_dir, "src");
+  flags.launcher_dir = getLauncherDir();
 
   ContainerID containerId;
   containerId.set_value(UUID::random().toString());
@@ -321,7 +322,7 @@ TEST_F(FetcherTest, OSNetUriTest)
   EXPECT_FALSE(os::exists(localFile));
 
   slave::Flags flags;
-  flags.launcher_dir = path::join(tests::flags.build_dir, "src");
+  flags.launcher_dir = getLauncherDir();
   flags.frameworks_home = "/tmp/frameworks";
 
   ContainerID containerId;
@@ -366,7 +367,7 @@ TEST_F(FetcherTest, OSNetUriSpaceTest)
   EXPECT_FALSE(os::exists(localFile));
 
   slave::Flags flags;
-  flags.launcher_dir = path::join(tests::flags.build_dir, "src");
+  flags.launcher_dir = getLauncherDir();
   flags.frameworks_home = "/tmp/frameworks";
 
   ContainerID containerId;
@@ -405,7 +406,7 @@ TEST_F(FetcherTest, FileLocalhostURI)
   EXPECT_FALSE(os::exists(localFile));
 
   slave::Flags flags;
-  flags.launcher_dir = path::join(tests::flags.build_dir, "src");
+  flags.launcher_dir = getLauncherDir();
 
   ContainerID containerId;
   containerId.set_value(UUID::random().toString());
@@ -428,6 +429,7 @@ TEST_F(FetcherTest, FileLocalhostURI)
 TEST_F(FetcherTest, NoExtractNotExecutable)
 {
   // First construct a temporary file that can be fetched.
+  // TODO(mrbrowning): Fix other tests to use this tempfile pattern.
   Try<string> path = os::mktemp();
 
   ASSERT_SOME(path);
@@ -442,7 +444,7 @@ TEST_F(FetcherTest, NoExtractNotExecutable)
   uri->set_extract(false);
 
   slave::Flags flags;
-  flags.launcher_dir = path::join(tests::flags.build_dir, "src");
+  flags.launcher_dir = getLauncherDir();
 
   Fetcher fetcher;
   SlaveID slaveId;
@@ -481,7 +483,7 @@ TEST_F(FetcherTest, NoExtractExecutable)
   uri->set_extract(false);
 
   slave::Flags flags;
-  flags.launcher_dir = path::join(tests::flags.build_dir, "src");
+  flags.launcher_dir = getLauncherDir();
 
   Fetcher fetcher;
   SlaveID slaveId;
@@ -532,7 +534,7 @@ TEST_F(FetcherTest, ExtractNotExecutable)
   uri->set_extract(true);
 
   slave::Flags flags;
-  flags.launcher_dir = path::join(tests::flags.build_dir, "src");
+  flags.launcher_dir = getLauncherDir();
 
   Fetcher fetcher;
   SlaveID slaveId;
@@ -542,12 +544,12 @@ TEST_F(FetcherTest, ExtractNotExecutable)
 
   AWAIT_READY(fetch);
 
-  ASSERT_TRUE(os::exists(path::join(".", path.get())));
+  ASSERT_TRUE(os::exists(path::join(os::getcwd(), path.get())));
 
-  ASSERT_SOME_EQ("hello world", os::read(path::join(".", path.get())));
+  ASSERT_SOME_EQ("hello world", os::read(path::join(os::getcwd(), path.get())));
 
   Try<os::Permissions> permissions =
-    os::permissions(path::join(".", path.get()));
+    os::permissions(path::join(os::getcwd(), path.get()));
 
   ASSERT_SOME(permissions);
   EXPECT_FALSE(permissions.get().owner.x);
@@ -583,7 +585,7 @@ TEST_F(FetcherTest, ExtractTar)
   uri->set_extract(true);
 
   slave::Flags flags;
-  flags.launcher_dir = path::join(tests::flags.build_dir, "src");
+  flags.launcher_dir = getLauncherDir();
 
   Fetcher fetcher;
   SlaveID slaveId;
@@ -593,9 +595,9 @@ TEST_F(FetcherTest, ExtractTar)
 
   AWAIT_READY(fetch);
 
-  ASSERT_TRUE(os::exists(path::join(".", path.get())));
+  ASSERT_TRUE(os::exists(path::join(os::getcwd(), path.get())));
 
-  ASSERT_SOME_EQ("hello tar", os::read(path::join(".", path.get())));
+  ASSERT_SOME_EQ("hello tar", os::read(path::join(os::getcwd(), path.get())));
 
   ASSERT_SOME(os::rm(path.get()));
 }
@@ -621,7 +623,7 @@ TEST_F(FetcherTest, ExtractGzipFile)
   uri->set_extract(true);
 
   slave::Flags flags;
-  flags.launcher_dir = path::join(tests::flags.build_dir, "src");
+  flags.launcher_dir = getLauncherDir();
 
   Fetcher fetcher;
   SlaveID slaveId;
@@ -631,12 +633,256 @@ TEST_F(FetcherTest, ExtractGzipFile)
 
   AWAIT_READY(fetch);
 
-  string extractFile = path::join(".", Path(path.get()).basename());
-  ASSERT_TRUE(os::exists(extractFile));
+  string extractedFile = path::join(os::getcwd(), Path(path.get()).basename());
+  ASSERT_TRUE(os::exists(extractedFile));
 
-  ASSERT_SOME_EQ("hello world", os::read(extractFile));
+  ASSERT_SOME_EQ("hello world", os::read(extractedFile));
 
   ASSERT_SOME(os::rm(path.get() + ".gz"));
+}
+
+
+TEST_F(FetcherTest, UNZIP_ExtractFile)
+{
+  // Construct a tmp file that can be fetched and archived with zip.
+  string fromDir = path::join(os::getcwd(), "from");
+  ASSERT_SOME(os::mkdir(fromDir));
+
+  Try<string> path = os::mktemp(path::join(fromDir, "XXXXXX"));
+  ASSERT_SOME(path);
+
+  //  Length     Size  Cmpr    Date    Time   CRC-32   Name    Content
+  // --------  ------- ---- ---------- ----- --------  ----    ------
+  //       12       12   0% 2016-03-19 10:08 af083b2d  hello   hello world\n
+  // --------  -------  ---                            ------- ------
+  //       12       12   0%                            1 file
+  ASSERT_SOME(os::write(path.get(), base64::decode(
+      "UEsDBAoAAAAAABBRc0gtOwivDAAAAAwAAAAFABwAaGVsbG9VVAkAAxAX7VYQ"
+      "F+1WdXgLAAEE6AMAAARkAAAAaGVsbG8gd29ybGQKUEsBAh4DCgAAAAAAEFFz"
+      "SC07CK8MAAAADAAAAAUAGAAAAAAAAQAAAKSBAAAAAGhlbGxvVVQFAAMQF+1W"
+      "dXgLAAEE6AMAAARkAAAAUEsFBgAAAAABAAEASwAAAEsAAAAAAA==").get()));
+
+  ASSERT_SOME(os::rename(path.get(), path.get() + ".zip"));
+
+  ContainerID containerId;
+  containerId.set_value(UUID::random().toString());
+
+  CommandInfo commandInfo;
+  CommandInfo::URI* uri = commandInfo.add_uris();
+  uri->set_value(path.get() + ".zip");
+  uri->set_extract(true);
+
+  slave::Flags flags;
+  flags.launcher_dir = getLauncherDir();
+
+  Fetcher fetcher;
+  SlaveID slaveId;
+
+  Future<Nothing> fetch = fetcher.fetch(
+      containerId,
+      commandInfo,
+      os::getcwd(),
+      None(),
+      slaveId,
+      flags);
+
+  AWAIT_READY(fetch);
+
+  string extractedFile = path::join(os::getcwd(), "hello");
+  ASSERT_TRUE(os::exists(extractedFile));
+
+  ASSERT_SOME_EQ("hello world\n", os::read(extractedFile));
+}
+
+
+TEST_F(FetcherTest, UNZIP_ExtractInvalidFile)
+{
+  // Construct a tmp file that can be filled with broken zip.
+  string fromDir = path::join(os::getcwd(), "from");
+  ASSERT_SOME(os::mkdir(fromDir));
+
+  Try<string> path = os::mktemp(path::join(fromDir, "XXXXXX"));
+  ASSERT_SOME(path);
+
+  // Write broken zip to file [bad CRC 440a6aa5  (should be af083b2d)].
+  //  Length     Date    Time  CRC expected  CRC actual  Name    Content
+  // -------- ---------- ----- ------------  ----------  ----    ------
+  //       12 2016-03-19 10:08  af083b2d     440a6aa5    world   hello hello\n
+  // --------                                            ------- ------
+  //       12                                            1 file
+  ASSERT_SOME(os::write(path.get(), base64::decode(
+      "UEsDBAoAAAAAABBRc0gtOwivDAAAAAwAAAAFABwAd29ybG9VVAkAAxAX7VYQ"
+      "F+1WdXgLAAEE6AMAAARkAAAAaGVsbG8gaGVsbG8KUEsBAh4DCgAAAAAAEFFz"
+      "SC07CK8MAAAADAAAAAUAGAAAAAAAAQAAAKSBAAAAAHdvcmxkVVQFAAMQF+1W"
+      "dXgLAAEE6AMAAARkAAAAUEsFBgAAAAABAAEASwAAAEsAAAAAAA==").get()));
+
+  ASSERT_SOME(os::rename(path.get(), path.get() + ".zip"));
+
+  ContainerID containerId;
+  containerId.set_value(UUID::random().toString());
+
+  CommandInfo commandInfo;
+  CommandInfo::URI* uri = commandInfo.add_uris();
+  uri->set_value(path.get() + ".zip");
+  uri->set_extract(true);
+
+  slave::Flags flags;
+  flags.launcher_dir = getLauncherDir();
+
+  Fetcher fetcher;
+  SlaveID slaveId;
+
+  Future<Nothing> fetch = fetcher.fetch(
+      containerId,
+      commandInfo,
+      os::getcwd(),
+      None(),
+      slaveId,
+      flags);
+
+  AWAIT_FAILED(fetch);
+
+  string extractedFile = path::join(os::getcwd(), "world");
+  ASSERT_TRUE(os::exists(extractedFile));
+
+  ASSERT_SOME_EQ("hello hello\n", os::read(extractedFile));
+}
+
+
+TEST_F(FetcherTest, UNZIP_ExtractFileWithDuplicatedEntries)
+{
+  // Construct a tmp file that can be filled with zip containing
+  // duplicates.
+  string fromDir = path::join(os::getcwd(), "from");
+  ASSERT_SOME(os::mkdir(fromDir));
+
+  Try<string> path = os::mktemp(path::join(fromDir, "XXXXXX"));
+  ASSERT_SOME(path);
+
+  // Create zip file with duplicates.
+  //   Length  Method    Size  Cmpr    Date    Time   CRC-32   Name   Content
+  // --------  ------  ------- ---- ---------- ----- --------  ----   -------
+  //       1   Stored        1   0% 2016-03-18 22:49 83dcefb7  A          1
+  //       1   Stored        1   0% 2016-03-18 22:49 1ad5be0d  A          2
+  // --------          -------  ---                           ------- -------
+  //       2                2   0%                            2 files
+  ASSERT_SOME(os::write(path.get(), base64::decode(
+      "UEsDBBQAAAAAADC2cki379yDAQAAAAEAAAABAAAAQTFQSwMEFAAAAAAAMrZy"
+      "SA2+1RoBAAAAAQAAAAEAAABBMlBLAQIUAxQAAAAAADC2cki379yDAQAAAAEA"
+      "AAABAAAAAAAAAAAAAACAAQAAAABBUEsBAhQDFAAAAAAAMrZySA2+1RoBAAAA"
+      "AQAAAAEAAAAAAAAAAAAAAIABIAAAAEFQSwUGAAAAAAIAAgBeAAAAQAAAAAAA").get()));
+
+  ASSERT_SOME(os::rename(path.get(), path.get() + ".zip"));
+
+  ContainerID containerId;
+  containerId.set_value(UUID::random().toString());
+
+  CommandInfo commandInfo;
+  CommandInfo::URI* uri = commandInfo.add_uris();
+  uri->set_value(path.get() + ".zip");
+  uri->set_extract(true);
+
+  slave::Flags flags;
+  flags.launcher_dir = getLauncherDir();
+
+  Fetcher fetcher;
+  SlaveID slaveId;
+
+  Future<Nothing> fetch = fetcher.fetch(
+      containerId,
+      commandInfo,
+      os::getcwd(),
+      None(),
+      slaveId,
+      flags);
+
+  AWAIT_READY(fetch);
+
+  string extractedFile = path::join(os::getcwd(), "A");
+  ASSERT_TRUE(os::exists(extractedFile));
+
+  ASSERT_SOME_EQ("2", os::read(extractedFile));
+}
+
+
+TEST_F(FetcherTest, UseCustomFilename)
+{
+  // First construct a temporary file that can be fetched.
+  Try<string> dir =
+      os::mkdtemp(path::join(os::getcwd(), "XXXXXX"));
+  ASSERT_SOME(dir);
+
+  Try<string> path = os::mktemp(path::join(dir.get(), "XXXXXX"));
+  ASSERT_SOME(path);
+
+  ASSERT_SOME(os::write(path.get(), "hello renamed file"));
+
+  ContainerID containerId;
+  containerId.set_value(UUID::random().toString());
+
+  const string customFilename = "custom.txt";
+  CommandInfo commandInfo;
+  CommandInfo::URI* uri = commandInfo.add_uris();
+  uri->set_value(path.get());
+  uri->set_extract(true);
+  uri->set_filename(customFilename);
+
+  slave::Flags flags;
+  flags.launcher_dir = getLauncherDir();
+
+  Fetcher fetcher;
+  SlaveID slaveId;
+
+  Future<Nothing> fetch = fetcher.fetch(
+      containerId, commandInfo, os::getcwd(), None(), slaveId, flags);
+
+  AWAIT_READY(fetch);
+
+  ASSERT_TRUE(os::exists(path::join(".", customFilename)));
+
+  ASSERT_SOME_EQ(
+      "hello renamed file", os::read(path::join(".", customFilename)));
+}
+
+
+TEST_F(FetcherTest, CustomGzipFilename)
+{
+  // First construct a temporary file that can be fetched.
+  Try<string> dir =
+      os::mkdtemp(path::join(os::getcwd(), "XXXXXX"));
+  ASSERT_SOME(dir);
+
+  Try<string> path = os::mktemp(path::join(dir.get(), "XXXXXX"));
+  ASSERT_SOME(path);
+
+  ASSERT_SOME(os::write(path.get(), "hello renamed gzip file"));
+  ASSERT_SOME(os::shell("gzip " + path.get()));
+
+  ContainerID containerId;
+  containerId.set_value(UUID::random().toString());
+
+  const string customFilename = "custom";
+  CommandInfo commandInfo;
+  CommandInfo::URI* uri = commandInfo.add_uris();
+  uri->set_value(path.get() + ".gz");
+  uri->set_extract(true);
+  uri->set_filename(customFilename + ".gz");
+
+  slave::Flags flags;
+  flags.launcher_dir = getLauncherDir();
+
+  Fetcher fetcher;
+  SlaveID slaveId;
+
+  Future<Nothing> fetch = fetcher.fetch(
+      containerId, commandInfo, os::getcwd(), None(), slaveId, flags);
+
+  AWAIT_READY(fetch);
+
+  string extractFile = path::join(".", customFilename);
+  ASSERT_TRUE(os::exists(extractFile));
+
+  ASSERT_SOME_EQ("hello renamed gzip file", os::read(extractFile));
 }
 
 
@@ -704,7 +950,7 @@ TEST_F(FetcherTest, HdfsURI)
   EXPECT_FALSE(os::exists(localFile));
 
   slave::Flags flags;
-  flags.launcher_dir = path::join(tests::flags.build_dir, "src");
+  flags.launcher_dir = getLauncherDir();
   flags.hadoop_home = hadoopPath;
 
   ContainerID containerId;

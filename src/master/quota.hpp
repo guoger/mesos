@@ -19,12 +19,15 @@
 
 #include <string>
 
+#include <google/protobuf/repeated_field.h>
+
 #include <mesos/mesos.hpp>
 
 #include <mesos/quota/quota.hpp>
 
+#include <stout/error.hpp>
 #include <stout/hashset.hpp>
-#include <stout/nothing.hpp>
+#include <stout/option.hpp>
 #include <stout/try.hpp>
 
 #include "master/registrar.hpp"
@@ -96,6 +99,20 @@ private:
 };
 
 
+/**
+ * Creates a `QuotaInfo` protobuf from the `QuotaRequest` protobuf.
+ */
+Try<mesos::quota::QuotaInfo> createQuotaInfo(
+    const mesos::quota::QuotaRequest& request);
+
+/**
+ * Creates a `QuotaInfo` protobuf from its components.
+ */
+Try<mesos::quota::QuotaInfo> createQuotaInfo(
+    const std::string& role,
+    const google::protobuf::RepeatedPtrField<Resource>& resources);
+
+
 namespace validation {
 
 // `QuotaInfo` is valid if the following conditions are met:
@@ -103,7 +120,7 @@ namespace validation {
 //   - Irrelevant fields in `Resources` are not set
 //     (e.g. `ReservationInfo`).
 //   - Request only contains scalar `Resources`.
-Try<Nothing> quotaInfo(const mesos::quota::QuotaInfo& quotaInfo);
+Option<Error> quotaInfo(const mesos::quota::QuotaInfo& quotaInfo);
 
 } // namespace validation {
 

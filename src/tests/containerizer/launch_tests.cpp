@@ -34,6 +34,7 @@
 #include "slave/containerizer/mesos/launch.hpp"
 
 #include "tests/flags.hpp"
+#include "tests/utils.hpp"
 
 #include "tests/containerizer/rootfs.hpp"
 
@@ -62,7 +63,7 @@ public:
     command.set_value(_command);
 
     launchFlags.command = JSON::protobuf(command);
-    launchFlags.directory = "/tmp";
+    launchFlags.sandbox = "/tmp";
     launchFlags.pipe_read = open("/dev/zero", O_RDONLY);
     launchFlags.pipe_write = open("/dev/null", O_WRONLY);
     launchFlags.rootfs = rootfs;
@@ -72,7 +73,7 @@ public:
     argv[1] = slave::MesosContainerizerLaunch::NAME;
 
     Try<Subprocess> s = subprocess(
-        path::join(tests::flags.build_dir, "src", "mesos-containerizer"),
+        path::join(getLauncherDir(), "mesos-containerizer"),
         argv,
         Subprocess::PATH("/dev/null"),
         Subprocess::FD(STDOUT_FILENO),

@@ -18,16 +18,20 @@
 
 #include <process/future.hpp>
 #include <process/http.hpp>
+#include <process/owned.hpp>
 #include <process/pid.hpp>
 
 #include <stout/gtest.hpp>
 #include <stout/try.hpp>
 
 #include "master/master.hpp"
+
 #include "tests/mesos.hpp"
 
 using mesos::internal::master::Master;
 using mesos::internal::slave::Slave;
+
+using process::Owned;
 
 namespace mesos {
 namespace internal {
@@ -37,7 +41,7 @@ class MetricsTest : public mesos::internal::tests::MesosTest {};
 
 TEST_F(MetricsTest, Master)
 {
-  Try<process::PID<Master>> master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   // Get the snapshot.
@@ -73,6 +77,7 @@ TEST_F(MetricsTest, Master)
   EXPECT_EQ(1u, stats.values.count("master/tasks_staging"));
   EXPECT_EQ(1u, stats.values.count("master/tasks_starting"));
   EXPECT_EQ(1u, stats.values.count("master/tasks_running"));
+  EXPECT_EQ(1u, stats.values.count("master/tasks_killing"));
   EXPECT_EQ(1u, stats.values.count("master/tasks_finished"));
   EXPECT_EQ(1u, stats.values.count("master/tasks_failed"));
   EXPECT_EQ(1u, stats.values.count("master/tasks_killed"));
@@ -150,10 +155,11 @@ TEST_F(MetricsTest, Slave)
 {
   // TODO(dhamon): https://issues.apache.org/jira/browse/MESOS-2134 to allow
   // only a Slave to be started.
-  Try<process::PID<Master>> master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
-  Try<process::PID<Slave>> slave = StartSlave();
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get());
   ASSERT_SOME(slave);
 
   // Get the snapshot.
@@ -180,6 +186,7 @@ TEST_F(MetricsTest, Slave)
   EXPECT_EQ(1u, stats.values.count("slave/tasks_staging"));
   EXPECT_EQ(1u, stats.values.count("slave/tasks_starting"));
   EXPECT_EQ(1u, stats.values.count("slave/tasks_running"));
+  EXPECT_EQ(1u, stats.values.count("slave/tasks_killing"));
   EXPECT_EQ(1u, stats.values.count("slave/tasks_finished"));
   EXPECT_EQ(1u, stats.values.count("slave/tasks_failed"));
   EXPECT_EQ(1u, stats.values.count("slave/tasks_killed"));

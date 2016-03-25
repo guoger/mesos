@@ -25,6 +25,8 @@
 
 #include <iostream>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <sstream>
 
@@ -103,8 +105,11 @@ using process::Process;
 using process::UPID;
 
 using std::map;
+using std::mutex;
+using std::shared_ptr;
 using std::string;
 using std::vector;
+using std::weak_ptr;
 
 using process::wait; // Necessary on some OS's to disambiguate.
 
@@ -112,6 +117,59 @@ using utils::copy;
 
 namespace mesos {
 namespace internal {
+
+
+// The DetectorPool is responsible for tracking single detector per url
+// to avoid having multiple detectors per url when multiple frameworks
+// are instantiated per process. See MESOS-3595.
+
+class DetectorPool
+{
+public:
+  virtual ~DetectorPool() {}
+
+  static Try<shared_ptr<MasterDetector>> get(const string& url)
+  {
+    synchronized (DetectorPool::instance()->poolMutex) {
+      // Get or create the `weak_ptr` map entry.
+      shared_ptr<MasterDetector> result =
+        DetectorPool::instance()->pool[url].lock();
+
+      if (result) {
+        // Return existing master detector.
+        return result;
+      } else {
+        // Else, create the master detector and record it in the map.
+        Try<MasterDetector*> detector = MasterDetector::create(url);
+        if (detector.isError()) {
+          return Error(detector.error());
+        }
+
+        result = shared_ptr<MasterDetector>(detector.get());
+        DetectorPool::instance()->pool[url] = result;
+        return result;
+      }
+    }
+  }
+
+private:
+  // Hide the constructors and assignment operator.
+  DetectorPool() {}
+  DetectorPool(const DetectorPool&) = delete;
+  DetectorPool& operator=(const DetectorPool&) = delete;
+
+  // Instead of having multiple detectors for multiple frameworks,
+  // keep track of one detector per url.
+  hashmap<string, weak_ptr<MasterDetector>> pool;
+  std::mutex poolMutex;
+
+  // Internal Singleton.
+  static DetectorPool* instance()
+  {
+    static DetectorPool* singleton = new DetectorPool();
+    return singleton;
+  }
+};
 
 // The scheduler process (below) is responsible for interacting with
 // the master and responding to Mesos API calls from scheduler
@@ -236,7 +294,7 @@ protected:
     CHECK(!_master.isDiscarded());
 
     if (_master.isFailed()) {
-      EXIT(1) << "Failed to detect a master: " << _master.failure();
+      EXIT(EXIT_FAILURE) << "Failed to detect a master: " << _master.failure();
     }
 
     if (_master.get().isSome()) {
@@ -334,8 +392,9 @@ protected:
       Try<Authenticatee*> module =
         modules::ModuleManager::create<Authenticatee>(flags.authenticatee);
       if (module.isError()) {
-        EXIT(1) << "Could not create authenticatee module '"
-                << flags.authenticatee << "': " << module.error();
+        EXIT(EXIT_FAILURE)
+          << "Could not create authenticatee module '"
+          << flags.authenticatee << "': " << module.error();
       }
       LOG(INFO) << "Using '" << flags.authenticatee << "' authenticatee";
       authenticatee = module.get();
@@ -440,11 +499,7 @@ protected:
   {
     // TODO(bmahler): Increment a metric.
 
-    // NOTE: The << operator for 'event.type()' from
-    // type_utils.hpp does not resolve here.
-    LOG(WARNING) << "Dropping "
-                 << mesos::scheduler::Event_Type_Name(event.type())
-                 << ": " << message;
+    LOG(WARNING) << "Dropping " << event.type() << ": " << message;
   }
 
   void receive(const UPID& from, const Event& event)
@@ -1755,9 +1810,7 @@ MesosSchedulerDriver::~MesosSchedulerDriver()
 
   delete latch;
 
-  if (detector != NULL) {
-    delete detector;
-  }
+  detector.reset();
 
   // Check and see if we need to shutdown a local cluster.
   if (master == "local" || master == "localquiet") {
@@ -1774,7 +1827,7 @@ Status MesosSchedulerDriver::start()
     }
 
     if (detector == NULL) {
-      Try<MasterDetector*> detector_ = MasterDetector::create(url);
+      Try<shared_ptr<MasterDetector>> detector_ = DetectorPool::get(url);
 
       if (detector_.isError()) {
         status = DRIVER_ABORTED;
@@ -1819,7 +1872,7 @@ Status MesosSchedulerDriver::start()
           None(),
           implicitAcknowlegements,
           schedulerId,
-          detector,
+          detector.get(),
           flags,
           &mutex,
           latch);
@@ -1832,7 +1885,7 @@ Status MesosSchedulerDriver::start()
           cred,
           implicitAcknowlegements,
           schedulerId,
-          detector,
+          detector.get(),
           flags,
           &mutex,
           latch);
@@ -1905,19 +1958,20 @@ Status MesosSchedulerDriver::abort()
 
 Status MesosSchedulerDriver::join()
 {
-  // Exit early if the driver is not running.
+  // We can use the process pointer to detect if the driver was ever
+  // started properly. If it wasn't, we return the current status
+  // (which should either be DRIVER_NOT_STARTED or DRIVER_ABORTED).
   synchronized (mutex) {
-    if (status != DRIVER_RUNNING) {
+    if (process == NULL) {
+      CHECK(status == DRIVER_NOT_STARTED || status == DRIVER_ABORTED);
+
       return status;
     }
   }
 
-  // If the driver was running, the latch will be triggered regardless
-  // of the current `status`. Wait for this to happen to signify
-  // termination.
+  // Otherwise, wait for stop() or abort() to trigger the latch.
   CHECK_NOTNULL(latch)->await();
 
-  // Now return the current `status` of the driver.
   synchronized (mutex) {
     CHECK(status == DRIVER_ABORTED || status == DRIVER_STOPPED);
 

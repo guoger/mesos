@@ -93,7 +93,8 @@ static Future<Nothing> checkError(const string& cmd, const Subprocess& s)
     .then(lambda::bind(_checkError, cmd, s));
 }
 
-Try<Docker*> Docker::create(
+
+Try<Owned<Docker>> Docker::create(
     const string& path,
     const string& socket,
     bool validate)
@@ -102,7 +103,7 @@ Try<Docker*> Docker::create(
     return Error("Invalid Docker socket path: " + socket);
   }
 
-  Docker* docker = new Docker(path, socket);
+  Owned<Docker> docker(new Docker(path, socket));
   if (!validate) {
     return docker;
   }
@@ -113,7 +114,6 @@ Try<Docker*> Docker::create(
   Result<string> hierarchy = cgroups::hierarchy("cpu");
 
   if (hierarchy.isNone()) {
-    delete docker;
     return Error("Failed to find a mounted cgroups hierarchy "
                  "for the 'cpu' subsystem; you probably need "
                  "to mount cgroups manually");
@@ -122,7 +122,6 @@ Try<Docker*> Docker::create(
 
   Try<Nothing> validateVersion = docker->validateVersion(Version(1, 0, 0));
   if (validateVersion.isError()) {
-    delete docker;
     return Error(validateVersion.error());
   }
 
@@ -302,17 +301,53 @@ Try<Docker::Container> Docker::Container::create(const string& output)
 
   bool started = startedAtValue.get().value != "0001-01-01T00:00:00Z";
 
-  Result<JSON::String> ipAddressValue =
-    json.find<JSON::String>("NetworkSettings.IPAddress");
-  if (ipAddressValue.isNone()) {
-    return Error("Unable to find NetworkSettings.IPAddress in container");
-  } else if (ipAddressValue.isError()) {
-    return Error(
-        "Error finding NetworkSettings.Name in container: " +
-        ipAddressValue.error());
+  Option<string> ipAddress;
+  bool findDeprecatedIP = false;
+  Result<JSON::String> networkMode =
+    json.find<JSON::String>("HostConfig.NetworkMode");
+  if (!networkMode.isSome()) {
+    // We need to fail back to the old field as Docker added NetworkMode
+    // since Docker remote API 1.15.
+    VLOG(1) << "Unable to detect HostConfig.NetworkMode, "
+            << "attempting deprecated IP field";
+    findDeprecatedIP = true;
+  } else {
+    // We currently rely on the fact that we always set --net when
+    // we shell out to docker run, and therefore the network mode
+    // matches what --net is. Without --net, the network mode would be set
+    // to 'default' and we won't be able to find the IP address as
+    // it will be in 'Networks.bridge' key.
+    string addressLocation = "NetworkSettings.Networks." +
+                             networkMode->value + ".IPAddress";
+
+    Result<JSON::String> ipAddressValue =
+      json.find<JSON::String>(addressLocation);
+
+    if (!ipAddressValue.isSome()) {
+      // We also need to failback to the old field as the IP Address
+      // field location also changed since Docker remote API 1.20.
+      VLOG(1) << "Unable to detect IP Address at '" << addressLocation << "',"
+              << " attempting deprecated field";
+      findDeprecatedIP = true;
+    } else if (!ipAddressValue->value.empty()) {
+      ipAddress = ipAddressValue->value;
+    }
   }
 
-  string ipAddress = ipAddressValue.get().value;
+  if (findDeprecatedIP) {
+    Result<JSON::String> ipAddressValue =
+      json.find<JSON::String>("NetworkSettings.IPAddress");
+
+    if (ipAddressValue.isNone()) {
+      return Error("Unable to find NetworkSettings.IPAddress in container");
+    } else if (ipAddressValue.isError()) {
+      return Error(
+        "Error finding NetworkSettings.IPAddress in container: " +
+        ipAddressValue.error());
+    } else if (!ipAddressValue->value.empty()) {
+      ipAddress = ipAddressValue->value;
+    }
+  }
 
   return Docker::Container(output, id, name, optionalPid, started, ipAddress);
 }
@@ -380,8 +415,8 @@ Try<Docker::Image> Docker::Image::create(const JSON::Object& json)
           return Error("Expecting environment value to be type string");
         }
 
-        const std::vector<std::string> tokens =
-            strings::tokenize(value.as<JSON::String>().value, "=");
+        const vector<string> tokens =
+          strings::split(value.as<JSON::String>().value, "=", 2);
 
         if (tokens.size() != 2) {
           return Error("Unexpected Env format for 'ContainerConfig.Env'");

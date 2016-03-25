@@ -1,4 +1,5 @@
 ---
+title: Apache Mesos - Fetcher
 layout: documentation
 ---
 
@@ -12,7 +13,7 @@ from local file systems.
 ## What is the Mesos fetcher?
 
 The Mesos fetcher is a mechanism to download resources into the [sandbox
-directory](/documentation/latest/sandbox/) of a task in preparation of running
+directory](sandbox.md) of a task in preparation of running
 the task. As part of a TaskInfo message, the framework ordering the task's
 execution provides a list of `CommandInfo::URI` protobuf values, which becomes
 the input to the Mesos fetcher.
@@ -21,7 +22,7 @@ The Mesos fetcher can copy files from a local filesytem and it also natively
 supports the HTTP, HTTPS, FTP and FTPS protocols. If the requested URI is based
 on some other protocol, then the fetcher tries to utilise a local Hadoop client
 and hence supports any protocol supported by the Hadoop client, e.g., HDFS, S3.
-See the slave [configuration documentation](/documentation/latest/configuration/)
+See the slave [configuration documentation](configuration.md)
 for how to configure the slave with a path to the Hadoop client.
 
 By default, each requested URI is downloaded directly into the sandbox directory
@@ -72,6 +73,7 @@ each URI are determined based on the following protobuf structure. (See
         optional bool executable = 2;
         optional bool extract = 3 [default = true];
         optional bool cache = 4;
+        optional string filename = 5;
       }
       ...
       optional string user = 5;
@@ -83,6 +85,9 @@ If the "executable" field is "true", the "extract" field is ignored and
 has no effect.
 
 If the "cache" field is true, the fetcher cache is to be used for the URI.
+
+If the "filename" field is set, the fetcher will use that name for the copy
+stored in the sandbox directory.
 
 ### Specifying a user name
 
@@ -116,12 +121,19 @@ procedure, in the sandbox directory only. It does not affect any cache file.
 ### Archive extraction
 
 If the "extract" field is "true", which is the default, then files with
-extensions that hint at packed or compressed archives (".zip", ".tar", et.al.)
-are unpacked in the sandbox directory.
+a recognized extension that hints at packed or compressed archives are unpacked
+in the sandbox directory. These file extensions are recognized:
+
+- .tar, .tar.gz, .tar.bz2, .tar.xz
+- .gz, .tgz, .tbz2, .txz, .zip
 
 In case the cache is bypassed, both the archive and the unpacked results will be
 found together in the sandbox. In case a cache file is unpacked, only the
 extraction result will be found in the sandbox.
+
+The "filename" field is useful here for cases where the URI ends with query
+parameters, since these will otherwise end up in the file copied to the sandbox
+and will subsequently fail to be recognized as archives.
 
 ### Bypassing the cache
 
@@ -193,7 +205,7 @@ unspecified. Do not use any cache feature with any URI for which you have any
 doubts!
 
 To mitigate this problem, cache files that have been found to be larger than
-expected are deleted immediately after downloading and and delivering the
+expected are deleted immediately after downloading and delivering the
 requested content to the sandbox. Thus exceeding total capacity at least
 does not accumulate over subsequent fetcher runs.
 
@@ -233,8 +245,8 @@ The respective environment variable name is `[protocol]_proxy`, where
 
 For example, the value of the `http_proxy` environment variable would be used
 as the proxy for fetching http contents, while `https_proxy` would be used for
-fetching https contents. Pay attention that the name must be in all lower
-case.
+fetching https contents. Pay attention that these variable names must be
+entirely in lower case.
 
 The value of the proxy variable is of the format
 `[protocol://][user:password@]machine[:port]`, where `protocol` can be one of
@@ -299,4 +311,4 @@ The following features would be relatively easy to implement additionally.
   running the present task, right after fetching its own resources.
 
 ## Implementation Details
-The [Mesos Fetcher Cache Internals](/documentation/latest/fetcher-cache-internals/) describes how the fetcher cache is implemented.
+The [Mesos Fetcher Cache Internals](fetcher-cache-internals.md) describes how the fetcher cache is implemented.

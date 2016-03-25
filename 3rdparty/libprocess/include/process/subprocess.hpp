@@ -21,6 +21,7 @@
 
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -28,6 +29,7 @@
 
 #include <stout/flags.hpp>
 #include <stout/lambda.hpp>
+#include <stout/none.hpp>
 #include <stout/option.hpp>
 #include <stout/try.hpp>
 
@@ -44,22 +46,72 @@ namespace process {
 class Subprocess
 {
 public:
+  // Forward declarations.
+  struct Hook;
+
   /**
    * Describes how the I/O is redirected for stdin/stdout/stderr.
    * One of the following three modes are supported:
-   *   1. PIPE: Redirect to a pipe. The pipe will be created
-   *      automatically and the user can read/write the parent side of
-   *      the pipe from in()/out()/err().
-   *   2. PATH: Redirect to a file. The file will be created if it
-   *      does not exist. If the file exists, it will be appended.
+   *   1. PIPE: Redirect to a pipe.  The pipe will be created when
+   *      launching a subprocess and the the user can read/write the
+   *      parent side of the pipe using `Subprocess::in/out/err`.
+   *   2. PATH: Redirect to a file.  For stdout/stderr, the file will
+   *      be created if it does not exist.  If the file exists, it
+   *      will be appended.
    *   3. FD: Redirect to an open file descriptor.
    */
   class IO
   {
   public:
-    bool isPipe() const { return mode == PIPE; }
-    bool isPath() const { return mode == PATH; }
-    bool isFd() const { return mode == FD; }
+    /**
+     * For input file descriptors a child reads from the `read` file
+     * descriptor and a parent may write to the `write` file
+     * descriptor if one is present.
+     *
+     * NOTE: We initialize `read` to -1 so that we do not close an
+     * arbitrary file descriptor,in case we encounter an error
+     * while starting a subprocess (closing -1 is always a no-op).
+     */
+    struct InputFileDescriptors
+    {
+      int read = -1;
+      Option<int> write = None();
+    };
+
+    /**
+     * For output file descriptors a child write to the `write` file
+     * descriptor and a parent may read from the `read` file
+     * descriptor if one is present.
+     *
+     * NOTE: We initialize `write` to -1 so that we do not close an
+     * arbitrary file descriptor,in case we encounter an error
+     * while starting a subprocess (closing -1 is always a no-op).
+     */
+    struct OutputFileDescriptors
+    {
+      Option<int> read = None();
+      int write = -1;
+    };
+
+    /**
+     * Describes the lifecycle of a file descriptor passed into a subprocess
+     * via the `Subprocess::FD` helper.
+     */
+    enum FDType {
+      /**
+       * The file descriptor is duplicated before being passed to the
+       * subprocess.  The original file descriptor remains open.
+       */
+      DUPLICATED,
+
+      /**
+       * The file descriptor is not duplicated before being passed to the
+       * subprocess.  Upon spawning the subprocess, the original file
+       * descriptor is closed in the parent and remains open in the child.
+       */
+      OWNED
+    };
+
 
   private:
     friend class Subprocess;
@@ -74,52 +126,55 @@ public:
         const Option<std::map<std::string, std::string>>& environment,
         const Option<lambda::function<int()>>& setup,
         const Option<lambda::function<
-            pid_t(const lambda::function<int()>&)>>& clone);
+            pid_t(const lambda::function<int()>&)>>& clone,
+        const std::vector<Subprocess::Hook>& parent_hooks);
 
-    enum Mode
-    {
-      PIPE, // Redirect I/O to a pipe.
-      PATH, // Redirect I/O to a file.
-      FD,   // Redirect I/O to an open file descriptor.
-    };
+    IO(const lambda::function<Try<InputFileDescriptors>()>& _input,
+       const lambda::function<Try<OutputFileDescriptors>()>& _output)
+      : input(_input),
+        output(_output) {}
 
-    IO(Mode _mode, const Option<int>& _fd, const Option<std::string>& _path)
-      : mode(_mode), fd(_fd), path(_path) {}
+    /**
+     * Prepares a set of file descriptors for stdin of a subprocess.
+     */
+    lambda::function<Try<InputFileDescriptors>()> input;
 
-    Mode mode;
-    Option<int> fd;
-    Option<std::string> path;
+    /**
+     * Prepares a set of file descriptors for stdout/stderr of a subprocess.
+     */
+    lambda::function<Try<OutputFileDescriptors>()> output;
   };
 
   /**
-   * Provides some syntactic sugar to create an IO::PIPE redirector.
-   *
-   * @return An IO::PIPE redirector.
+   * A hook can be passed to a `subprocess` call. It provides a way to
+   * inject dynamic implementation behavior between the clone and exec
+   * calls in the implementation of `subprocess`.
    */
-  static IO PIPE()
+  struct Hook
   {
-    return IO(IO::PIPE, None(), None());
-  }
+    /**
+     * Returns an empty list of hooks.
+     */
+    static std::vector<Hook> None() { return std::vector<Hook>(); }
 
-  /**
-   * Provides some syntactic sugar to create an IO::PATH redirector.
-   *
-   * @return An IO::PATH redirector.
-   */
-  static IO PATH(const std::string& path)
-  {
-    return IO(IO::PATH, None(), path);
-  }
+    Hook(const lambda::function<Try<Nothing>(pid_t)>& _parent_callback);
 
-  /**
-   * Provides some syntactic sugar to create an IO::FD redirector.
-   *
-   * @return An IO::FD redirector.
-   */
-  static IO FD(int fd)
-  {
-    return IO(IO::FD, fd, None());
-  }
+    /**
+     * The callback that must be sepcified for execution after the
+     * child has been cloned, but before it start executing the new
+     * process. This provides access to the child pid after its
+     * initialization to add tracking or modify execution state of
+     * the child before it executes the new process.
+     */
+    const lambda::function<Try<Nothing>(pid_t)> parent_callback;
+
+    friend class Subprocess;
+  };
+
+  // Some syntactic sugar to create an IO::PIPE redirector.
+  static IO PIPE();
+  static IO PATH(const std::string& path);
+  static IO FD(int fd, IO::FDType type = IO::DUPLICATED);
 
   /**
    * @return The operating system PID for this subprocess.
@@ -172,7 +227,8 @@ private:
       const Option<std::map<std::string, std::string>>& environment,
       const Option<lambda::function<int()>>& setup,
       const Option<lambda::function<
-          pid_t(const lambda::function<int()>&)>>& clone);
+          pid_t(const lambda::function<int()>&)>>& clone,
+      const std::vector<Subprocess::Hook>& parent_hooks);
 
   struct Data
   {
@@ -186,7 +242,7 @@ private:
     pid_t pid;
 
     // The parent side of the pipe for stdin/stdout/stderr. If the
-    // mode is not PIPE, None will be stored.
+    // IO mode is not a pipe, `None` will be stored.
     // NOTE: stdin, stdout, stderr are macros on some systems, hence
     // these names instead.
     Option<int> in;
@@ -226,8 +282,12 @@ private:
  *     async unsafe code in the body of this function.
  * @param clone Function to be invoked in order to fork/clone the
  *     subprocess.
+ * @param parent_hooks Hooks that will be executed in the parent
+ *     before the child execs.
  * @return The subprocess or an error if one occured.
  */
+// TODO(jmlvanre): Consider removing default argument for
+// `parent_hooks` to force the caller to think about setting them.
 Try<Subprocess> subprocess(
     const std::string& path,
     std::vector<std::string> argv,
@@ -238,7 +298,9 @@ Try<Subprocess> subprocess(
     const Option<std::map<std::string, std::string>>& environment = None(),
     const Option<lambda::function<int()>>& setup = None(),
     const Option<lambda::function<
-        pid_t(const lambda::function<int()>&)>>& clone = None());
+        pid_t(const lambda::function<int()>&)>>& clone = None(),
+    const std::vector<Subprocess::Hook>& parent_hooks =
+      Subprocess::Hook::None());
 
 
 /**
@@ -260,8 +322,12 @@ Try<Subprocess> subprocess(
  *     async unsafe code in the body of this function.
  * @param clone Function to be invoked in order to fork/clone the
  *     subprocess.
+ * @param parent_hooks Hooks that will be executed in the parent
+ *     before the child execs.
  * @return The subprocess or an error if one occured.
  */
+// TODO(jmlvanre): Consider removing default argument for
+// `parent_hooks` to force the caller to think about setting them.
 inline Try<Subprocess> subprocess(
     const std::string& command,
     const Subprocess::IO& in = Subprocess::FD(STDIN_FILENO),
@@ -270,7 +336,9 @@ inline Try<Subprocess> subprocess(
     const Option<std::map<std::string, std::string>>& environment = None(),
     const Option<lambda::function<int()>>& setup = None(),
     const Option<lambda::function<
-        pid_t(const lambda::function<int()>&)>>& clone = None())
+        pid_t(const lambda::function<int()>&)>>& clone = None(),
+    const std::vector<Subprocess::Hook>& parent_hooks =
+      Subprocess::Hook::None())
 {
   std::vector<std::string> argv = {"sh", "-c", command};
 
@@ -283,7 +351,8 @@ inline Try<Subprocess> subprocess(
       None(),
       environment,
       setup,
-      clone);
+      clone,
+      parent_hooks);
 }
 
 } // namespace process {

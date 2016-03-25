@@ -5,6 +5,7 @@
 
 import atexit
 import json
+import os
 import subprocess
 import sys
 import urllib
@@ -13,6 +14,7 @@ import urllib2
 from datetime import datetime, timedelta
 
 REVIEWBOARD_URL = "https://reviews.apache.org"
+REVIEW_SIZE = 1000000 # 1 MB in bytes.
 
 # TODO(vinod): Use 'argparse' module.
 # Get the user and password from command line.
@@ -64,6 +66,9 @@ def api(url, data=None):
         urllib2.install_opener(opener)
 
         return json.loads(urllib2.urlopen(url, data=data).read())
+    except urllib2.HTTPError as e:
+        print "Error handling URL %s: %s (%s)" % (url, e.reason, e.read())
+        exit(1)
     except urllib2.URLError as e:
         print "Error handling URL %s: %s" % (url, e.reason)
         exit(1)
@@ -74,25 +79,29 @@ def apply_review(review_id):
     shell("./support/apply-review.sh -n -r %s" % review_id)
 
 
-def apply_reviews(review_request, applied):
-    # Skip this review if it's already applied.
-    if review_request["id"] in applied:
-        print "Skipping already applied review %s" % review_request["id"]
-
+def apply_reviews(review_request, reviews):
+    # If there are no reviewers specified throw an error.
     if not review_request["target_people"]:
-      raise ReviewError("No reviewers specified. Please find a reviewer by"
-                        " asking on JIRA or the mailing list.")
+        raise ReviewError("No reviewers specified. Please find a reviewer by"
+                          " asking on JIRA or the mailing list.")
+
+    # If there is a circular dependency throw an error.`
+    if review_request["id"] in reviews:
+        raise ReviewError("Circular dependency detected for review %s."
+                          "Please fix the 'depends_on' field."
+                          % review_request["id"])
+    else:
+        reviews.append(review_request["id"])
 
     # First recursively apply the dependent reviews.
     for review in review_request["depends_on"]:
         review_url = review["href"]
         print "Dependent review: %s " % review_url
-        apply_reviews(api(review_url)["review_request"], applied)
+        apply_reviews(api(review_url)["review_request"], reviews)
 
     # Now apply this review if not yet submitted.
-    applied.append(review_request["id"])
     if review_request["status"] != "submitted":
-      apply_review(review_request["id"])
+        apply_review(review_request["id"])
 
 
 def post_review(review_request, message):
@@ -114,39 +123,62 @@ def cleanup():
 
 def verify_review(review_request):
     print "Verifying review %s" % review_request["id"]
+    build_output = "build_" + str(review_request["id"])
+
     try:
         # Recursively apply the review and its dependents.
-        applied = []
-        apply_reviews(review_request, applied)
+        reviews = []
+        apply_reviews(review_request, reviews)
+
+        reviews.reverse() # Reviews are applied in the reverse order.
 
         # Launch docker build script.
 
-        # TODO(jojy): Launch docker_build in subprocess so that verifications
-        # can be run parallely for various configurations.
-        configuration = "export OS=ubuntu:14.04;export CONFIGURATION=\"--verbose\";export COMPILER=gcc"
+        # TODO(jojy): Launch 'docker_build.sh' in subprocess so that
+        # verifications can be run in parallel for various configurations.
+        configuration = ("export "
+                         "OS='ubuntu:14.04' "
+                         "CONFIGURATION='--verbose' "
+                         "COMPILER='gcc' "
+                         "ENVIRONMENT='GLOG_v=1 MESOS_VERBOSE=1'")
+
         command = "%s; ./support/docker_build.sh" % configuration
 
-        shell(command)
+
+        # `tee` the output so that the console can log the whole build output.
+        # `pipefail` ensures that the exit status of the build command is
+        # preserved even after tee'ing.
+        subprocess.check_call(['bash', '-c', 'set -o pipefail; %s 2>&1 | tee %s'
+                               % (command, build_output)])
 
         # Success!
         post_review(
             review_request,
             "Patch looks great!\n\n" \
             "Reviews applied: %s\n\n" \
-            "Passed command: %s" % (applied, command))
+            "Passed command: %s" % (reviews, command))
     except subprocess.CalledProcessError as e:
+        # If we are here because the docker build command failed, read the
+        # output from `build_output` file. For all other command failures read
+        # the output from `e.output`.
+        output = open(build_output).read() if os.path.exists(build_output) else e.output
+
+        # Truncate the output when posting the review as it can be very large.
+        output = output if len(output) <= REVIEW_SIZE else "...<truncated>...\n" + output[-REVIEW_SIZE:]
+        output = output + "\nFull log: " + os.path.join(os.environ['BUILD_URL'], 'console')
+
         post_review(
             review_request,
             "Bad patch!\n\n" \
             "Reviews applied: %s\n\n" \
             "Failed command: %s\n\n" \
-            "Error:\n %s" % (applied, e.cmd, e.output))
+            "Error:\n%s" % (reviews, e.cmd, output))
     except ReviewError as e:
         post_review(
             review_request,
             "Bad review!\n\n" \
             "Reviews applied: %s\n\n" \
-            "Error:\n %s" % (applied, e.args[0]))
+            "Error:\n%s" % (reviews, e.args[0]))
 
     # Clean up.
     cleanup()

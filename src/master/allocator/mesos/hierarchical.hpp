@@ -23,15 +23,16 @@
 
 #include <process/future.hpp>
 #include <process/id.hpp>
-#include <process/metrics/gauge.hpp>
-#include <process/metrics/metrics.hpp>
 
 #include <stout/duration.hpp>
 #include <stout/hashmap.hpp>
 #include <stout/hashset.hpp>
+#include <stout/lambda.hpp>
 #include <stout/option.hpp>
 
 #include "master/allocator/mesos/allocator.hpp"
+#include "master/allocator/mesos/metrics.hpp"
+
 #include "master/allocator/sorter/drf/sorter.hpp"
 
 #include "master/constants.hpp"
@@ -72,10 +73,10 @@ public:
       initialized(false),
       paused(true),
       metrics(*this),
-      roleSorterFactory(_roleSorterFactory),
-      frameworkSorterFactory(_frameworkSorterFactory),
+      roleSorter(NULL),
       quotaRoleSorter(NULL),
-      roleSorter(NULL) {}
+      roleSorterFactory(_roleSorterFactory),
+      frameworkSorterFactory(_frameworkSorterFactory) {}
 
   virtual ~HierarchicalAllocatorProcess() {}
 
@@ -182,17 +183,20 @@ public:
 
   void setQuota(
       const std::string& role,
-      const mesos::quota::QuotaInfo& quota);
+      const Quota& quota);
 
   void removeQuota(
       const std::string& role);
+
+  void updateWeights(
+      const std::vector<WeightInfo>& weightInfos);
 
 protected:
   // Useful typedefs for dispatch/delay/defer to self()/this.
   typedef HierarchicalAllocatorProcess Self;
   typedef HierarchicalAllocatorProcess This;
 
-  // Helpers for pausing and resuming allocation.
+  // Idempotent helpers for pausing and resuming allocation.
   void pause();
   void resume();
 
@@ -260,23 +264,8 @@ protected:
       void(const FrameworkID&,
            const hashmap<SlaveID, UnavailableResources>&)> inverseOfferCallback;
 
-  struct Metrics
-  {
-    explicit Metrics(const Self& process)
-      : event_queue_dispatches(
-            "allocator/event_queue_dispatches",
-            process::defer(process.self(), &Self::_event_queue_dispatches))
-    {
-      process::metrics::add(event_queue_dispatches);
-    }
-
-    ~Metrics()
-    {
-      process::metrics::remove(event_queue_dispatches);
-    }
-
-    process::metrics::Gauge event_queue_dispatches;
-  } metrics;
+  friend Metrics;
+  Metrics metrics;
 
   struct Framework
   {
@@ -297,6 +286,14 @@ protected:
   {
     return static_cast<double>(eventCount<process::DispatchEvent>());
   }
+
+  double _resources_total(const std::string& resource);
+
+  double _resources_offered_or_allocated(const std::string& resource);
+
+  double _quota_allocated(
+      const std::string& role,
+      const std::string& resource);
 
   hashmap<FrameworkID, Framework> frameworks;
 
@@ -328,6 +325,7 @@ protected:
     // Represents a scheduled unavailability due to maintenance for a specific
     // slave, and the responses from frameworks as to whether they will be able
     // to gracefully handle this unavailability.
+    //
     // NOTE: We currently implement maintenance in the allocator to be able to
     // leverage state and features such as the FrameworkSorter and OfferFilter.
     struct Maintenance
@@ -340,6 +338,7 @@ protected:
 
       // A mapping of frameworks to the inverse offer status associated with
       // this unavailability.
+      //
       // NOTE: We currently lose this information during a master fail over
       // since it is not persisted or replicated. This is ok as the new master's
       // allocator will send out new inverse offers and re-collect the
@@ -365,7 +364,7 @@ protected:
   // Number of registered frameworks for each role. When a role's active
   // count drops to zero, it is removed from this map; the role is also
   // removed from `roleSorter` and its `frameworkSorter` is deleted.
-  hashmap<std::string, int> activeRoles;
+  hashmap<std::string, size_t> activeRoles;
 
   // Configured weight for each role, if any; if a role does not
   // appear here, it has the default weight of 1.
@@ -378,42 +377,75 @@ protected:
   //
   // NOTE: We currently associate quota with roles, but this may
   // change in the future.
-  hashmap<std::string, mesos::quota::QuotaInfo> quotas;
+  hashmap<std::string, Quota> quotas;
 
   // Slaves to send offers for.
   Option<hashset<std::string>> whitelist;
 
-  // There are two levels of sorting, hence "hierarchical".
+  // There are two stages of allocation. During the first stage resources
+  // are allocated only to frameworks in roles with quota set. During the
+  // second stage remaining resources that would not be required to satisfy
+  // un-allocated quota are then allocated to all frameworks.
+  //
+  // Each stage comprises two levels of sorting, hence "hierarchical".
   // Level 1 sorts across roles:
-  //   Reserved resources are excluded from fairness calculation,
-  //   since they are forcibly pinned to a role.
+  //   Currently, only the allocated portion of the reserved resources are
+  //   accounted for fairness calculation.
+  //
+  // TODO(mpark): Reserved resources should be accounted for fairness
+  // calculation whether they are allocated or not, since they model a long or
+  // forever running task. That is, the effect of reserving resources is
+  // equivalent to launching a task in that the resources that make up the
+  // reservation are not available to other roles as non-revocable.
+  //
   // Level 2 sorts across frameworks within a particular role:
-  //   Both reserved resources and unreserved resources are used
-  //   in the fairness calculation. This is because reserved
-  //   resources can be allocated to any framework in the role.
+  //   Reserved resources at this level are, and should be accounted for
+  //   fairness calculation only if they are allocated. This is because
+  //   reserved resources are fairly shared across the frameworks in the role.
   //
-  // Note that the hierarchical allocator considers oversubscribed
-  // resources as regular resources when doing fairness calculations.
+  // The allocator relies on `Sorter`s to employ a particular sorting
+  // algorithm. Each level has its own sorter and hence may have different
+  // fairness calculations.
+  //
+  // NOTE: The hierarchical allocator considers revocable resources as
+  // regular resources when doing fairness calculations.
+  //
   // TODO(vinod): Consider using a different fairness algorithm for
-  // oversubscribed resources.
-  const std::function<Sorter*()> roleSorterFactory;
-  const std::function<Sorter*()> frameworkSorterFactory;
+  // revocable resources.
 
-  // A dedicated sorter for roles for which quota is set. Quota'ed roles
-  // belong to an extra allocation group and have resources allocated up
-  // to their alloted quota prior to non-quota'ed roles.
+  // A sorter for active roles. This sorter determines the order in which
+  // roles are allocated resources during Level 1 of the second stage.
+  Sorter* roleSorter;
+
+  // A dedicated sorter for roles for which quota is set. This sorter
+  // determines the order in which quota'ed roles are allocated resources
+  // during Level 1 of the first stage. Quota'ed roles have resources
+  // allocated up to their alloted quota (the first stage) prior to
+  // non-quota'ed roles (the second stage).
   //
-  // Note that a role appears in `quotaRoleSorter` if it has a quota
-  // (even if no frameworks are currently registered in that role). In
-  // contrast, `roleSorter` only contains entries for roles with one or
-  // more registered frameworks.
+  // NOTE: A role appears in `quotaRoleSorter` if it has a quota (even if
+  // no frameworks are currently registered in that role). In contrast,
+  // `roleSorter` only contains entries for roles with one or more
+  // registered frameworks.
   //
-  // NOTE: This sorter counts only unreserved non-revocable resources.
-  // TODO(alexr): Consider including dynamically reserved resources.
+  // NOTE: We do not include revocable resources in the quota role sorter,
+  // because the quota role sorter's job is to perform fair sharing between
+  // the quota roles as it pertains to their level of quota satisfaction.
+  // Since revocable resources do not increase a role's level of satisfaction
+  // toward its quota, we choose to exclude them from the quota role sorter.
   Sorter* quotaRoleSorter;
 
-  Sorter* roleSorter;
+  // A collection of sorters, one per active role. Each sorter determines
+  // the order in which frameworks that belong to the same role are allocated
+  // resources inside the role's share. These sorters are used during Level 2
+  // for both the first and the second stages.
   hashmap<std::string, Sorter*> frameworkSorters;
+
+  // Factory functions for sorters.
+  //
+  // NOTE: `quotaRoleSorter` currently reuses `roleSorterFactory`.
+  const std::function<Sorter*()> roleSorterFactory;
+  const std::function<Sorter*()> frameworkSorterFactory;
 };
 
 

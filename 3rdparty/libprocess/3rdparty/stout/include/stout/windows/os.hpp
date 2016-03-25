@@ -13,11 +13,10 @@
 #ifndef __STOUT_WINDOWS_OS_HPP__
 #define __STOUT_WINDOWS_OS_HPP__
 
-#include <stddef.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <direct.h>
+#include <io.h>
 
-#include <sys/types.h>
+#include <sys/utime.h>
 
 #include <list>
 #include <map>
@@ -32,11 +31,21 @@
 #include <stout/try.hpp>
 #include <stout/windows.hpp>
 
-#include <stout/os/raw/environment.hpp>
+#include <stout/os/os.hpp>
+#include <stout/os/read.hpp>
 
+#include <stout/os/raw/environment.hpp>
 
 namespace os {
 
+inline int pagesize()
+{
+  SYSTEM_INFO si = {0};
+  GetSystemInfo(&si);
+  return si.dwPageSize;
+}
+
+/*
 // Sets the value associated with the specified key in the set of
 // environment variables.
 inline void setenv(const std::string& key,
@@ -50,15 +59,6 @@ inline void setenv(const std::string& key,
 // Unsets the value associated with the specified key in the set of
 // environment variables.
 inline void unsetenv(const std::string& key)
-{
-  UNIMPLEMENTED;
-}
-
-
-// By default, recursively deletes a directory akin to: 'rm -r'. If the
-// programmer sets recursive to false, it deletes a directory akin to: 'rmdir'.
-// Note that this function expects an absolute path.
-inline Try<Nothing> rmdir(const std::string& directory, bool recursive = true)
 {
   UNIMPLEMENTED;
 }
@@ -98,24 +98,7 @@ inline Try<Nothing> chown(
 }
 
 
-// Changes the specified path's user and group ownership to that of
-// the specified user.
-inline Try<Nothing> chown(
-    const std::string& user,
-    const std::string& path,
-    bool recursive = true)
-{
-  UNIMPLEMENTED;
-}
-
-
 inline Try<Nothing> chmod(const std::string& path, int mode)
-{
-  UNIMPLEMENTED;
-}
-
-
-inline Try<Nothing> chroot(const std::string& directory)
 {
   UNIMPLEMENTED;
 }
@@ -125,30 +108,6 @@ inline Try<Nothing> mknod(
     const std::string& path,
     mode_t mode,
     dev_t dev)
-{
-  UNIMPLEMENTED;
-}
-
-
-inline Result<uid_t> getuid(const Option<std::string>& user = None())
-{
-  UNIMPLEMENTED;
-}
-
-
-inline Result<gid_t> getgid(const Option<std::string>& user = None())
-{
-  UNIMPLEMENTED;
-}
-
-
-inline Try<Nothing> su(const std::string& user)
-{
-  UNIMPLEMENTED;
-}
-
-
-inline Result<std::string> user(Option<uid_t> uid = None())
 {
   UNIMPLEMENTED;
 }
@@ -212,7 +171,7 @@ inline Try<std::set<pid_t>> pids(Option<pid_t> group, Option<pid_t> session)
 {
   UNIMPLEMENTED;
 }
-
+*/
 } // namespace os {
 
 #endif // __STOUT_WINDOWS_OS_HPP__

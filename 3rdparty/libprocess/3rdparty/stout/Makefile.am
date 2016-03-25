@@ -21,6 +21,7 @@ SUBDIRS = . include
 
 # Tests.
 EXTRA_DIST =					\
+  tests/adaptor_tests.cpp			\
   tests/base64_tests.cpp			\
   tests/bits_tests.cpp				\
   tests/bytes_tests.cpp				\
@@ -35,6 +36,7 @@ EXTRA_DIST =					\
   tests/interval_tests.cpp			\
   tests/ip_tests.cpp                            \
   tests/json_tests.cpp				\
+  tests/jsonify_tests.cpp			\
   tests/linkedhashmap_tests.cpp			\
   tests/mac_tests.cpp                           \
   tests/main.cpp				\
@@ -43,6 +45,8 @@ EXTRA_DIST =					\
   tests/numify_tests.cpp			\
   tests/option_tests.cpp			\
   tests/os_tests.cpp				\
+  tests/os/filesystem_tests.cpp			\
+  tests/os/rmdir_tests.cpp			\
   tests/os/sendfile_tests.cpp			\
   tests/os/signals_tests.cpp			\
   tests/os/strerror_tests.cpp			\

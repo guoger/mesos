@@ -105,16 +105,27 @@ protected:
   /**
    * Invoked when a linked process has exited.
    *
+   * For local linked processes (i.e., when the linker and linkee are
+   * part of the same OS process), this can be used to reliably detect
+   * when the linked process has exited.
+   *
+   * For remote linked processes, this indicates that the persistent
+   * TCP connection between the linker and the linkee has failed
+   * (e.g., linkee process died, a network error occurred). In this
+   * situation, the remote linkee process might still be running.
+   *
    * @see process::ProcessBase::link
    */
-  virtual void exited(const UPID& pid) {}
+  virtual void exited(const UPID&) {}
 
   /**
    * Invoked when a linked process can no longer be monitored.
    *
+   * TODO(neilc): This is not implemented.
+   *
    * @see process::ProcessBase::link
    */
-  virtual void lost(const UPID& pid) {}
+  virtual void lost(const UPID&) {}
 
   /**
    * Puts the message at front of this process's message queue.
@@ -141,11 +152,14 @@ protected:
   /**
    * Links with the specified `UPID`.
    *
-   * Linking with a process from within the same "operating system
-   * process" is guaranteed to give you perfect monitoring of that
-   * process. However, linking with a process on another machine might
-   * result in receiving lost callbacks due to the nature of a distributed
-   * environment.
+   * Linking with a process from within the same OS process is
+   * guaranteed to give you perfect monitoring of that process.
+   *
+   * Linking to a remote process establishes a persistent TCP
+   * connection to the remote libprocess instance that hosts that
+   * process. If the TCP connection fails, the true state of the
+   * remote linked process cannot be determined; we handle this
+   * situation by generating an ExitedEvent.
    */
   UPID link(const UPID& pid);
 
@@ -442,7 +456,7 @@ protected:
  *
  * @see [glog](https://google-glog.googlecode.com/svn/trunk/doc/glog.html)
  */
-void initialize(const std::string& delegate = "");
+void initialize(const Option<std::string>& delegate = None());
 
 
 /**

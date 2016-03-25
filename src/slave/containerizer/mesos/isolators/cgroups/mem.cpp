@@ -54,8 +54,8 @@ using std::string;
 using std::vector;
 
 using mesos::slave::ContainerConfig;
+using mesos::slave::ContainerLaunchInfo;
 using mesos::slave::ContainerLimitation;
-using mesos::slave::ContainerPrepareInfo;
 using mesos::slave::ContainerState;
 using mesos::slave::Isolator;
 
@@ -231,9 +231,8 @@ Future<Nothing> CgroupsMemIsolatorProcess::recover(
 }
 
 
-Future<Option<ContainerPrepareInfo>> CgroupsMemIsolatorProcess::prepare(
+Future<Option<ContainerLaunchInfo>> CgroupsMemIsolatorProcess::prepare(
     const ContainerID& containerId,
-    const ExecutorInfo& executorInfo,
     const ContainerConfig& containerConfig)
 {
   if (infos.contains(containerId)) {
@@ -279,8 +278,8 @@ Future<Option<ContainerPrepareInfo>> CgroupsMemIsolatorProcess::prepare(
   oomListen(containerId);
   pressureListen(containerId);
 
-  return update(containerId, executorInfo.resources())
-    .then([]() -> Future<Option<ContainerPrepareInfo>> {
+  return update(containerId, containerConfig.executor_info().resources())
+    .then([]() -> Future<Option<ContainerLaunchInfo>> {
       return None();
     });
 }

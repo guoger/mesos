@@ -48,7 +48,9 @@ public:
 
   // Returns the disk usage rooted at 'path'. The user can discard the
   // returned future to cancel the check.
-  process::Future<Bytes> usage(const std::string& path);
+  process::Future<Bytes> usage(
+      const std::string& path,
+      const std::vector<std::string>& excludes);
 
 private:
   DiskUsageCollectorProcess* process;
@@ -80,9 +82,8 @@ public:
       const std::list<mesos::slave::ContainerState>& states,
       const hashset<ContainerID>& orphans);
 
-  virtual process::Future<Option<mesos::slave::ContainerPrepareInfo>> prepare(
+  virtual process::Future<Option<mesos::slave::ContainerLaunchInfo>> prepare(
       const ContainerID& containerId,
-      const ExecutorInfo& executorInfo,
       const mesos::slave::ContainerConfig& containerConfig);
 
   virtual process::Future<Nothing> isolate(
@@ -104,6 +105,10 @@ public:
 
 private:
   PosixDiskIsolatorProcess(const Flags& flags);
+
+  process::Future<Bytes> collect(
+      const ContainerID& containerId,
+      const std::string& path);
 
   void _collect(
       const ContainerID& containerId,

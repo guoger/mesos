@@ -45,6 +45,7 @@ Try<Owned<Fetcher>> create(const Option<Flags>& _flags)
 
   hashmap<string, Creator> creators;
   creators.put("curl", lambda::bind(&CurlFetcherPlugin::create, flags));
+  creators.put("file", lambda::bind(&CopyFetcherPlugin::create, flags));
   creators.put("hadoop", lambda::bind(&HadoopFetcherPlugin::create, flags));
   creators.put("docker", lambda::bind(&DockerFetcherPlugin::create, flags));
 
@@ -55,8 +56,8 @@ Try<Owned<Fetcher>> create(const Option<Flags>& _flags)
     if (plugin.isError()) {
       // NOTE: We skip the plugin if it cannot be created, instead of
       // returning an Error so that we can still use other plugins.
-      LOG(ERROR) << "Failed to create URI fetcher plugin "
-                 << "'"  << name << "': " << plugin.error();
+      LOG(INFO) << "Skipping URI fetcher plugin " << "'"  << name << "' "
+                << "as it could not be created: " << plugin.error();
       continue;
     }
 
@@ -78,13 +79,13 @@ Try<Owned<Fetcher>> create(const Option<Flags>& _flags)
 
 Future<Nothing> Fetcher::fetch(
     const URI& uri,
-    const string& directory)
+    const string& directory) const
 {
   if (!plugins.contains(uri.scheme())) {
     return Failure("Scheme '" + uri.scheme() + "' is not supported");
   }
 
-  return plugins[uri.scheme()]->fetch(uri, directory);
+  return plugins.at(uri.scheme())->fetch(uri, directory);
 }
 
 } // namespace uri {

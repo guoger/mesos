@@ -51,8 +51,6 @@
 #include "tests/flags.hpp"
 #include "tests/mesos.hpp"
 
-using std::string;
-
 using namespace mesos::modules;
 
 using mesos::internal::master::Master;
@@ -144,20 +142,21 @@ TEST_F(HookTest, HookLoading)
 // taskinfo message during master launch task.
 TEST_F(HookTest, VerifyMasterLaunchTaskHook)
 {
-  Try<PID<Master>> master = StartMaster(CreateMasterFlags());
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
-
   TestContainerizer containerizer(&exec);
 
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
   // Start a mock slave since we aren't testing the slave hooks yet.
-  Try<PID<Slave>> slave = StartSlave(&containerizer);
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
   ASSERT_SOME(slave);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(&driver, _, _));
 
@@ -218,8 +217,6 @@ TEST_F(HookTest, VerifyMasterLaunchTaskHook)
 
   driver.stop();
   driver.join();
-
-  Shutdown(); // Must shutdown before 'containerizer' gets deallocated.
 }
 
 
@@ -230,7 +227,7 @@ TEST_F(HookTest, MasterSlaveLostHookTest)
 {
   Future<HookExecuted> hookFuture = FUTURE_PROTOBUF(HookExecuted(), _, _);
 
-  DROP_MESSAGES(Eq(PingSlaveMessage().GetTypeName()), _, _);
+  DROP_PROTOBUFS(PingSlaveMessage(), _, _);
 
   master::Flags masterFlags = CreateMasterFlags();
 
@@ -238,18 +235,19 @@ TEST_F(HookTest, MasterSlaveLostHookTest)
   masterFlags.slave_ping_timeout = Seconds(1);
   masterFlags.max_slave_ping_timeouts = 1;
 
-  Try<PID<Master>> master = StartMaster(masterFlags);
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
   ASSERT_SOME(master);
 
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
-
   TestContainerizer containerizer(&exec);
 
   Future<SlaveRegisteredMessage> slaveRegisteredMessage =
     FUTURE_PROTOBUF(SlaveRegisteredMessage(), _, _);
 
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
   // Start a mock Agent since we aren't testing the slave hooks.
-  Try<PID<Slave>> slave = StartSlave(&containerizer);
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
   ASSERT_SOME(slave);
 
   // Make sure Agent is up and running.
@@ -268,8 +266,6 @@ TEST_F(HookTest, MasterSlaveLostHookTest)
   AWAIT_READY(hookFuture);
 
   // TODO(nnielsen): Verify hook signal type.
-
-  Shutdown(); // Must shutdown before 'containerizer' gets deallocated.
 }
 
 
@@ -283,9 +279,11 @@ TEST_F(HookTest, VerifySlaveExecutorEnvironmentDecorator)
   const string& directory = os::getcwd(); // We're inside a temporary sandbox.
   Fetcher fetcher;
 
-  Try<MesosContainerizer*> containerizer =
+  Try<MesosContainerizer*> _containerizer =
     MesosContainerizer::create(CreateSlaveFlags(), false, &fetcher);
-  ASSERT_SOME(containerizer);
+
+  ASSERT_SOME(_containerizer);
+  Owned<MesosContainerizer> containerizer(_containerizer.get());
 
   ContainerID containerId;
   containerId.set_value("test_container");
@@ -293,7 +291,7 @@ TEST_F(HookTest, VerifySlaveExecutorEnvironmentDecorator)
   // Test hook adds a new environment variable "FOO" to the executor
   // with a value "bar". A '0' (success) exit status for the following
   // command validates the hook.
-  process::Future<bool> launch = containerizer.get()->launch(
+  process::Future<bool> launch = containerizer->launch(
       containerId,
       CREATE_EXECUTOR_INFO("executor", "test $FOO = 'bar'"),
       directory,
@@ -306,14 +304,12 @@ TEST_F(HookTest, VerifySlaveExecutorEnvironmentDecorator)
 
   // Wait on the container.
   process::Future<containerizer::Termination> wait =
-    containerizer.get()->wait(containerId);
+    containerizer->wait(containerId);
   AWAIT_READY(wait);
 
   // Check the executor exited correctly.
   EXPECT_TRUE(wait.get().has_status());
   EXPECT_EQ(0, wait.get().status());
-
-  delete containerizer.get();
 }
 
 
@@ -324,21 +320,21 @@ TEST_F(HookTest, VerifySlaveLaunchExecutorHook)
 {
   master::Flags masterFlags = CreateMasterFlags();
 
-  Try<PID<Master>> master = StartMaster(masterFlags);
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
   ASSERT_SOME(master);
 
   slave::Flags slaveFlags = CreateSlaveFlags();
 
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
-
   TestContainerizer containerizer(&exec);
 
-  Try<PID<Slave>> slave = StartSlave(&containerizer);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
   ASSERT_SOME(slave);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(&driver, _, _));
 
@@ -391,8 +387,6 @@ TEST_F(HookTest, VerifySlaveLaunchExecutorHook)
   // the remove-executor hook.
   // Here, we wait for the hook to finish execution.
   AWAIT_READY(hookFuture);
-
-  Shutdown(); // Must shutdown before 'containerizer' gets deallocated.
 }
 
 
@@ -403,19 +397,19 @@ TEST_F(HookTest, VerifySlaveLaunchExecutorHook)
 // add a new "baz":"qux" pair.
 TEST_F(HookTest, VerifySlaveRunTaskHook)
 {
-  Try<PID<Master>> master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
-
   TestContainerizer containerizer(&exec);
 
-  Try<PID<Slave>> slave = StartSlave(&containerizer);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
   ASSERT_SOME(slave);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(&driver, _, _));
 
@@ -481,8 +475,6 @@ TEST_F(HookTest, VerifySlaveRunTaskHook)
 
   driver.stop();
   driver.join();
-
-  Shutdown(); // Must shutdown before 'containerizer' gets deallocated.
 }
 
 
@@ -494,19 +486,19 @@ TEST_F(HookTest, VerifySlaveRunTaskHook)
 // "baz":"qux" pair.
 TEST_F(HookTest, VerifySlaveTaskStatusDecorator)
 {
-  Try<PID<Master>> master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
-
   TestContainerizer containerizer(&exec);
 
-  Try<PID<Slave>> slave = StartSlave(&containerizer);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
   ASSERT_SOME(slave);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(&driver, _, _));
 
@@ -610,8 +602,6 @@ TEST_F(HookTest, VerifySlaveTaskStatusDecorator)
 
   driver.stop();
   driver.join();
-
-  Shutdown(); // Must shutdown before 'containerizer' gets deallocated.
 }
 
 
@@ -622,7 +612,7 @@ TEST_F(HookTest, VerifySlaveTaskStatusDecorator)
 // the "foo" file exists in the docker container or not.
 TEST_F(HookTest, ROOT_DOCKER_VerifySlavePreLaunchDockerHook)
 {
-  Try<PID<Master>> master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   MockDocker* mockDocker =
@@ -639,18 +629,21 @@ TEST_F(HookTest, ROOT_DOCKER_VerifySlavePreLaunchDockerHook)
 
   ASSERT_SOME(logger);
 
-  MockDockerContainerizer dockerContainerizer(
+  MockDockerContainerizer containerizer(
       flags,
       &fetcher,
       Owned<ContainerLogger>(logger.get()),
       docker);
 
-  Try<PID<Slave>> slave = StartSlave(&dockerContainerizer, flags);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  Try<Owned<cluster::Slave>> slave =
+    StartSlave(detector.get(), &containerizer, flags);
   ASSERT_SOME(slave);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
   Future<FrameworkID> frameworkId;
   EXPECT_CALL(sched, registered(&driver, _, _))
@@ -686,7 +679,7 @@ TEST_F(HookTest, ROOT_DOCKER_VerifySlavePreLaunchDockerHook)
 
   // TODO(tnachen): Use local image to test if possible.
   ContainerInfo::DockerInfo dockerInfo;
-  dockerInfo.set_image("busybox");
+  dockerInfo.set_image("alpine");
   containerInfo.mutable_docker()->CopyFrom(dockerInfo);
 
   task.mutable_command()->CopyFrom(command);
@@ -696,9 +689,9 @@ TEST_F(HookTest, ROOT_DOCKER_VerifySlavePreLaunchDockerHook)
   tasks.push_back(task);
 
   Future<ContainerID> containerId;
-  EXPECT_CALL(dockerContainerizer, launch(_, _, _, _, _, _, _, _))
+  EXPECT_CALL(containerizer, launch(_, _, _, _, _, _, _, _))
     .WillOnce(DoAll(FutureArg<0>(&containerId),
-                    Invoke(&dockerContainerizer,
+                    Invoke(&containerizer,
                            &MockDockerContainerizer::_launch)));
 
   Future<TaskStatus> statusRunning;
@@ -717,7 +710,7 @@ TEST_F(HookTest, ROOT_DOCKER_VerifySlavePreLaunchDockerHook)
   EXPECT_EQ(TASK_FINISHED, statusFinished.get().state());
 
   Future<containerizer::Termination> termination =
-    dockerContainerizer.wait(containerId.get());
+    containerizer.wait(containerId.get());
 
   driver.stop();
   driver.join();
@@ -733,28 +726,27 @@ TEST_F(HookTest, ROOT_DOCKER_VerifySlavePreLaunchDockerHook)
   foreach (const Docker::Container& container, containers.get()) {
     AWAIT_READY_FOR(docker.get()->rm(container.id, true), Seconds(30));
   }
-
-  Shutdown();
 }
 
 // Test that the changes made by the resources decorator hook are correctly
 // propagated to the resource offer.
 TEST_F(HookTest, VerifySlaveResourcesAndAttributesDecorator)
 {
-  Try<PID<Master>> master = StartMaster(CreateMasterFlags());
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
-
   TestContainerizer containerizer(&exec);
 
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
   // Start a mock slave since we aren't testing the slave hooks yet.
-  Try<PID<Slave>> slave = StartSlave(&containerizer);
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
   ASSERT_SOME(slave);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-    &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+    &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(&driver, _, _));
 
@@ -788,8 +780,6 @@ TEST_F(HookTest, VerifySlaveResourcesAndAttributesDecorator)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 } // namespace tests {

@@ -288,6 +288,12 @@ bool operator==(const Labels& left, const Labels& right)
 }
 
 
+bool operator!=(const Labels& left, const Labels& right)
+{
+  return !(left == right);
+}
+
+
 bool operator==(const DiscoveryInfo& left, const DiscoveryInfo& right)
 {
   return left.visibility() == right.visibility() &&
@@ -391,7 +397,7 @@ ostream& operator<<(ostream& stream, const ExecutorInfo& executor)
 }
 
 
-ostream& operator<<(std::ostream& stream, const FrameworkID& frameworkId)
+ostream& operator<<(ostream& stream, const FrameworkID& frameworkId)
 {
   return stream << frameworkId.value();
 }

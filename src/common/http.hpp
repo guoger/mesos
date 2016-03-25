@@ -24,6 +24,7 @@
 
 #include <stout/hashmap.hpp>
 #include <stout/json.hpp>
+#include <stout/jsonify.hpp>
 #include <stout/protobuf.hpp>
 
 namespace mesos {
@@ -78,17 +79,19 @@ JSON::Object model(const Attributes& attributes);
 JSON::Object model(const CommandInfo& command);
 JSON::Object model(const ExecutorInfo& executorInfo);
 JSON::Array model(const Labels& labels);
-
-// These are the two identical ways to model a task, depending on
-// whether you have a 'Task' or a 'TaskInfo' available.
 JSON::Object model(const Task& task);
-JSON::Object model(
-    const TaskInfo& task,
-    const FrameworkID& frameworkId,
-    const TaskState& state,
-    const std::vector<TaskStatus>& statuses);
+
+void json(JSON::ObjectWriter* writer, const Task& task);
 
 } // namespace internal {
+
+void json(JSON::ObjectWriter* writer, const Attributes& attributes);
+void json(JSON::ObjectWriter* writer, const CommandInfo& command);
+void json(JSON::ObjectWriter* writer, const ExecutorInfo& executorInfo);
+void json(JSON::ArrayWriter* writer, const Labels& labels);
+void json(JSON::ObjectWriter* writer, const Resources& resources);
+void json(JSON::ObjectWriter* writer, const TaskStatus& status);
+
 } // namespace mesos {
 
 #endif // __COMMON_HTTP_HPP__

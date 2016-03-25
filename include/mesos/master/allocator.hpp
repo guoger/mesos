@@ -361,7 +361,7 @@ public:
    */
   virtual void setQuota(
       const std::string& role,
-      const mesos::quota::QuotaInfo& quota) = 0;
+      const Quota& quota) = 0;
 
   /**
    * Informs the allocator to remove quota for the given role.
@@ -379,6 +379,13 @@ public:
    */
   virtual void removeQuota(
       const std::string& role) = 0;
+
+  /**
+   * Updates the weight of each provided role.
+   * Subsequent allocation calculations will use these updated weights.
+   */
+  virtual void updateWeights(
+      const std::vector<WeightInfo>& weightInfos) = 0;
 };
 
 } // namespace allocator {

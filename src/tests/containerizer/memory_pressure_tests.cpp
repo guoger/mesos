@@ -21,6 +21,7 @@
 
 #include <process/clock.hpp>
 #include <process/gtest.hpp>
+#include <process/owned.hpp>
 
 #include <stout/gtest.hpp>
 #include <stout/os.hpp>
@@ -50,6 +51,7 @@ using std::vector;
 using testing::_;
 using testing::Eq;
 using testing::Return;
+using testing::Unused;
 
 namespace mesos {
 namespace internal {
@@ -70,7 +72,7 @@ public:
 
 TEST_F(MemoryPressureMesosTest, CGROUPS_ROOT_Statistics)
 {
-  Try<PID<Master>> master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   slave::Flags flags = CreateSlaveFlags();
@@ -81,18 +83,22 @@ TEST_F(MemoryPressureMesosTest, CGROUPS_ROOT_Statistics)
 
   Fetcher fetcher;
 
-  Try<MesosContainerizer*> containerizer =
+  Try<MesosContainerizer*> _containerizer =
     MesosContainerizer::create(flags, true, &fetcher);
 
-  ASSERT_SOME(containerizer);
+  ASSERT_SOME(_containerizer);
+  Owned<MesosContainerizer> containerizer(_containerizer.get());
 
-  Try<PID<Slave>> slave = StartSlave(containerizer.get(), flags);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  Try<Owned<cluster::Slave>> slave =
+    StartSlave(detector.get(), containerizer.get(), flags);
   ASSERT_SOME(slave);
 
   MockScheduler sched;
 
   MesosSchedulerDriver driver(
-      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(_, _, _));
 
@@ -115,18 +121,20 @@ TEST_F(MemoryPressureMesosTest, CGROUPS_ROOT_Statistics)
       Resources::parse("cpus:1;mem:256;disk:1024").get(),
       "while true; do dd count=512 bs=1M if=/dev/zero of=./temp; done");
 
-  Future<TaskStatus> status;
+  Future<TaskStatus> running;
+  Future<TaskStatus> killed;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
-    .WillOnce(FutureArg<1>(&status))
+    .WillOnce(FutureArg<1>(&running))
+    .WillOnce(FutureArg<1>(&killed))
     .WillRepeatedly(Return());       // Ignore subsequent updates.
 
   driver.launchTasks(offer.id(), {task});
 
-  AWAIT_READY(status);
-  EXPECT_EQ(task.task_id(), status.get().task_id());
-  EXPECT_EQ(TASK_RUNNING, status.get().state());
+  AWAIT_READY(running);
+  EXPECT_EQ(task.task_id(), running.get().task_id());
+  EXPECT_EQ(TASK_RUNNING, running.get().state());
 
-  Future<hashset<ContainerID>> containers = containerizer.get()->containers();
+  Future<hashset<ContainerID>> containers = containerizer->containers();
   AWAIT_READY(containers);
   ASSERT_EQ(1u, containers.get().size());
 
@@ -135,7 +143,7 @@ TEST_F(MemoryPressureMesosTest, CGROUPS_ROOT_Statistics)
   // Wait a while for some memory pressure events to occur.
   Duration waited = Duration::zero();
   do {
-    Future<ResourceStatistics> usage = containerizer.get()->usage(containerId);
+    Future<ResourceStatistics> usage = containerizer->usage(containerId);
     AWAIT_READY(usage);
 
     if (usage.get().mem_low_pressure_counter() > 0) {
@@ -151,16 +159,20 @@ TEST_F(MemoryPressureMesosTest, CGROUPS_ROOT_Statistics)
 
   EXPECT_LE(waited, Seconds(5));
 
+  // Pause the clock to ensure that the reaper doesn't reap the exited
+  // command executor and inform the containerizer/slave.
+  Clock::pause();
+  Clock::settle();
+
   // Stop the memory-hammering task.
   driver.killTask(task.task_id());
 
-  // Process any queued up events through before proceeding.
-  process::Clock::pause();
-  process::Clock::settle();
-  process::Clock::resume();
+  AWAIT_READY(killed);
+  EXPECT_EQ(task.task_id(), killed->task_id());
+  EXPECT_EQ(TASK_KILLED, killed->state());
 
   // Now check the correctness of the memory pressure counters.
-  Future<ResourceStatistics> usage = containerizer.get()->usage(containerId);
+  Future<ResourceStatistics> usage = containerizer->usage(containerId);
   AWAIT_READY(usage);
 
   EXPECT_GE(usage.get().mem_low_pressure_counter(),
@@ -168,18 +180,17 @@ TEST_F(MemoryPressureMesosTest, CGROUPS_ROOT_Statistics)
   EXPECT_GE(usage.get().mem_medium_pressure_counter(),
             usage.get().mem_critical_pressure_counter());
 
+  Clock::resume();
+
   driver.stop();
   driver.join();
-
-  Shutdown();
-  delete containerizer.get();
 }
 
 
 // Test that memory pressure listening is restarted after recovery.
 TEST_F(MemoryPressureMesosTest, CGROUPS_ROOT_SlaveRecovery)
 {
-  Try<PID<Master>> master = StartMaster();
+  Try<Owned<cluster::Master>> master = StartMaster();
   ASSERT_SOME(master);
 
   slave::Flags flags = CreateSlaveFlags();
@@ -190,12 +201,16 @@ TEST_F(MemoryPressureMesosTest, CGROUPS_ROOT_SlaveRecovery)
 
   Fetcher fetcher;
 
-  Try<MesosContainerizer*> containerizer1 =
+  Try<MesosContainerizer*> _containerizer =
     MesosContainerizer::create(flags, true, &fetcher);
 
-  ASSERT_SOME(containerizer1);
+  ASSERT_SOME(_containerizer);
+  Owned<MesosContainerizer> containerizer(_containerizer.get());
 
-  Try<PID<Slave>> slave = StartSlave(containerizer1.get(), flags);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  Try<Owned<cluster::Slave>> slave =
+    StartSlave(detector.get(), containerizer.get(), flags);
   ASSERT_SOME(slave);
 
   MockScheduler sched;
@@ -205,7 +220,7 @@ TEST_F(MemoryPressureMesosTest, CGROUPS_ROOT_SlaveRecovery)
   frameworkInfo.set_checkpoint(true);
 
   MesosSchedulerDriver driver(
-      &sched, frameworkInfo, master.get(), DEFAULT_CREDENTIAL);
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(_, _, _));
 
@@ -228,20 +243,25 @@ TEST_F(MemoryPressureMesosTest, CGROUPS_ROOT_SlaveRecovery)
       Resources::parse("cpus:1;mem:256;disk:1024").get(),
       "while true; do dd count=512 bs=1M if=/dev/zero of=./temp; done");
 
-  Future<TaskStatus> status;
+  Future<TaskStatus> running;
   EXPECT_CALL(sched, statusUpdate(&driver, _))
-    .WillOnce(FutureArg<1>(&status))
-    .WillRepeatedly(Return());       // Ignore subsequent updates.
+    .WillOnce(FutureArg<1>(&running));
+
+
+  Future<Nothing> _statusUpdateAcknowledgement =
+    FUTURE_DISPATCH(_, &Slave::_statusUpdateAcknowledgement);
 
   driver.launchTasks(offers.get()[0].id(), {task});
 
-  AWAIT_READY(status);
-  EXPECT_EQ(task.task_id(), status.get().task_id());
-  EXPECT_EQ(TASK_RUNNING, status.get().state());
+  AWAIT_READY(running);
+  EXPECT_EQ(task.task_id(), running.get().task_id());
+  EXPECT_EQ(TASK_RUNNING, running.get().state());
+
+  // Wait for the ACK to be checkpointed.
+  AWAIT_READY(_statusUpdateAcknowledgement);
 
   // We restart the slave to let it recover.
-  Stop(slave.get());
-  delete containerizer1.get();
+  slave.get()->terminate();
 
   // Set up so we can wait until the new slave updates the container's
   // resources (this occurs after the executor has re-registered).
@@ -249,17 +269,22 @@ TEST_F(MemoryPressureMesosTest, CGROUPS_ROOT_SlaveRecovery)
     FUTURE_DISPATCH(_, &MesosContainerizerProcess::update);
 
   // Use the same flags.
-  Try<MesosContainerizer*> containerizer2 =
-    MesosContainerizer::create(flags, true, &fetcher);
-  ASSERT_SOME(containerizer2);
+  _containerizer = MesosContainerizer::create(flags, true, &fetcher);
+  ASSERT_SOME(_containerizer);
+  containerizer.reset(_containerizer.get());
 
-  slave = StartSlave(containerizer2.get(), flags);
+  Future<SlaveReregisteredMessage> reregistered =
+      FUTURE_PROTOBUF(SlaveReregisteredMessage(), master.get()->pid, _);
+
+  slave = StartSlave(detector.get(), containerizer.get(), flags);
   ASSERT_SOME(slave);
+
+  AWAIT_READY(reregistered);
 
   // Wait until the containerizer is updated.
   AWAIT_READY(update);
 
-  Future<hashset<ContainerID>> containers = containerizer2.get()->containers();
+  Future<hashset<ContainerID>> containers = containerizer->containers();
   AWAIT_READY(containers);
   ASSERT_EQ(1u, containers.get().size());
 
@@ -268,7 +293,7 @@ TEST_F(MemoryPressureMesosTest, CGROUPS_ROOT_SlaveRecovery)
   // Wait a while for some memory pressure events to occur.
   Duration waited = Duration::zero();
   do {
-    Future<ResourceStatistics> usage = containerizer2.get()->usage(containerId);
+    Future<ResourceStatistics> usage = containerizer->usage(containerId);
     AWAIT_READY(usage);
 
     if (usage.get().mem_low_pressure_counter() > 0) {
@@ -284,16 +309,24 @@ TEST_F(MemoryPressureMesosTest, CGROUPS_ROOT_SlaveRecovery)
 
   EXPECT_LE(waited, Seconds(5));
 
+  // Pause the clock to ensure that the reaper doesn't reap the exited
+  // command executor and inform the containerizer/slave.
+  Clock::pause();
+  Clock::settle();
+
+  Future<TaskStatus> killed;
+  EXPECT_CALL(sched, statusUpdate(&driver, _))
+    .WillOnce(FutureArg<1>(&killed));
+
   // Stop the memory-hammering task.
   driver.killTask(task.task_id());
 
-  // Process any queued up events through before proceeding.
-  process::Clock::pause();
-  process::Clock::settle();
-  process::Clock::resume();
+  AWAIT_READY(killed);
+  EXPECT_EQ(task.task_id(), killed->task_id());
+  EXPECT_EQ(TASK_KILLED, killed->state());
 
   // Now check the correctness of the memory pressure counters.
-  Future<ResourceStatistics> usage = containerizer2.get()->usage(containerId);
+  Future<ResourceStatistics> usage = containerizer->usage(containerId);
   AWAIT_READY(usage);
 
   EXPECT_GE(usage.get().mem_low_pressure_counter(),
@@ -301,11 +334,10 @@ TEST_F(MemoryPressureMesosTest, CGROUPS_ROOT_SlaveRecovery)
   EXPECT_GE(usage.get().mem_medium_pressure_counter(),
             usage.get().mem_critical_pressure_counter());
 
+  Clock::resume();
+
   driver.stop();
   driver.join();
-
-  Shutdown();
-  delete containerizer2.get();
 }
 
 } // namespace tests {

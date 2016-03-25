@@ -61,19 +61,6 @@ using std::string;
 using std::vector;
 
 
-static hashset<string> listfiles(const string& directory)
-{
-  hashset<string> fileset;
-  Try<std::list<std::string> > entries = os::ls(directory);
-  if (entries.isSome()) {
-    foreach (const string& entry, entries.get()) {
-      fileset.insert(entry);
-    }
-  }
-  return fileset;
-}
-
-
 #ifdef __FreeBSD__
 static bool isJailed() {
   int mib[4];
@@ -102,9 +89,9 @@ TEST_F(OsTest, Environment)
   hashmap<string, string> environment = os::environment();
 
   for (size_t index = 0; environ[index] != NULL; index++) {
-    std::string entry(environ[index]);
+    string entry(environ[index]);
     size_t position = entry.find_first_of('=');
-    if (position == std::string::npos) {
+    if (position == string::npos) {
       continue; // Skip malformed environment entries.
     }
     const string key = entry.substr(0, position);
@@ -112,44 +99,6 @@ TEST_F(OsTest, Environment)
     EXPECT_TRUE(environment.contains(key));
     EXPECT_EQ(value, environment[key]);
   }
-}
-
-
-TEST_F(OsTest, Rmdir)
-{
-  const hashset<string> EMPTY;
-  const string tmpdir = os::getcwd();
-
-  hashset<string> expectedListing = EMPTY;
-  EXPECT_EQ(expectedListing, listfiles(tmpdir));
-
-  os::mkdir(tmpdir + "/a/b/c");
-  os::mkdir(tmpdir + "/a/b/d");
-  os::mkdir(tmpdir + "/e/f");
-
-  expectedListing = EMPTY;
-  expectedListing.insert("a");
-  expectedListing.insert("e");
-  EXPECT_EQ(expectedListing, listfiles(tmpdir));
-
-  expectedListing = EMPTY;
-  expectedListing.insert("b");
-  EXPECT_EQ(expectedListing, listfiles(tmpdir + "/a"));
-
-  expectedListing = EMPTY;
-  expectedListing.insert("c");
-  expectedListing.insert("d");
-  EXPECT_EQ(expectedListing, listfiles(tmpdir + "/a/b"));
-
-  expectedListing = EMPTY;
-  EXPECT_EQ(expectedListing, listfiles(tmpdir + "/a/b/c"));
-  EXPECT_EQ(expectedListing, listfiles(tmpdir + "/a/b/d"));
-
-  expectedListing.insert("f");
-  EXPECT_EQ(expectedListing, listfiles(tmpdir + "/e"));
-
-  expectedListing = EMPTY;
-  EXPECT_EQ(expectedListing, listfiles(tmpdir + "/e/f"));
 }
 
 
@@ -195,9 +144,7 @@ TEST_F(OsTest, Nonblock)
   int pipes[2];
   ASSERT_NE(-1, pipe(pipes));
 
-  Try<bool> isNonBlock = false;
-
-  isNonBlock = os::isNonblock(pipes[0]);
+  Try<bool> isNonBlock = os::isNonblock(pipes[0]);
   EXPECT_SOME_FALSE(isNonBlock);
 
   ASSERT_SOME(os::nonblock(pipes[0]));
@@ -213,35 +160,13 @@ TEST_F(OsTest, Nonblock)
 }
 
 
-TEST_F(OsTest, Touch)
-{
-  const string testfile  = path::join(os::getcwd(), UUID::random().toString());
-
-  ASSERT_SOME(os::touch(testfile));
-  ASSERT_TRUE(os::exists(testfile));
-}
-
-
-TEST_F(OsTest, ReadWriteString)
-{
-  const string testfile  = path::join(os::getcwd(), UUID::random().toString());
-  const string teststr = "line1\nline2";
-
-  ASSERT_SOME(os::write(testfile, teststr));
-
-  Try<string> readstr = os::read(testfile);
-
-  EXPECT_SOME_EQ(teststr, readstr);
-}
-
-
 // Tests whether a file's size is reported by os::stat::size as expected.
 // Tests all four combinations of following a link or not and of a file
 // or a link as argument. Also tests that an error is returned for a
 // non-existing file.
 TEST_F(OsTest, Size)
 {
-  const string& file = path::join(os::getcwd(), UUID::random().toString());
+  const string file = path::join(os::getcwd(), UUID::random().toString());
 
   const Bytes size = 1053;
 
@@ -254,7 +179,7 @@ TEST_F(OsTest, Size)
 
   EXPECT_ERROR(os::stat::size("aFileThatDoesNotExist"));
 
-  const string& link = path::join(os::getcwd(), UUID::random().toString());
+  const string link = path::join(os::getcwd(), UUID::random().toString());
 
   ASSERT_SOME(fs::symlink(file, link));
 
@@ -264,36 +189,6 @@ TEST_F(OsTest, Size)
   // Not following links, we expect the string length of the linked path.
   EXPECT_SOME_EQ(Bytes(file.size()),
                  os::stat::size(link, os::stat::DO_NOT_FOLLOW_SYMLINK));
-}
-
-
-TEST_F(OsTest, Find)
-{
-  const string testdir = path::join(os::getcwd(), UUID::random().toString());
-  const string subdir = testdir + "/test1";
-  ASSERT_SOME(os::mkdir(subdir)); // Create the directories.
-
-  // Now write some files.
-  const string file1 = testdir + "/file1.txt";
-  const string file2 = subdir + "/file2.txt";
-  const string file3 = subdir + "/file3.jpg";
-
-  ASSERT_SOME(os::touch(file1));
-  ASSERT_SOME(os::touch(file2));
-  ASSERT_SOME(os::touch(file3));
-
-  // Find "*.txt" files.
-  Try<std::list<string> > result = os::find(testdir, ".txt");
-  ASSERT_SOME(result);
-
-  hashset<string> files;
-  foreach (const string& file, result.get()) {
-    files.insert(file);
-  }
-
-  ASSERT_EQ(2u, files.size());
-  ASSERT_TRUE(files.contains(file1));
-  ASSERT_TRUE(files.contains(file2));
 }
 
 
@@ -564,7 +459,7 @@ TEST_F(OsTest, Processes)
 }
 
 
-void dosetsid(void)
+void dosetsid()
 {
   if (::setsid() == -1) {
     ABORT(string("Failed to setsid: ") + os::strerror(errno));
@@ -634,7 +529,7 @@ TEST_F(OsTest, Killtree)
 
   // Kill the process tree and follow sessions and groups to make sure
   // we cross the broken link due to the grandchild.
-  Try<std::list<ProcessTree> > trees =
+  Try<list<ProcessTree> > trees =
     os::killtree(child, SIGKILL, true, true);
 
   ASSERT_SOME(trees);
@@ -786,7 +681,7 @@ TEST_F(OsTest, KilltreeNoRoot)
   // Kill the process tree. Even though the root process has exited,
   // we specify to follow sessions and groups which should kill the
   // grandchild and greatgrandchild.
-  Try<std::list<ProcessTree>> trees = os::killtree(child, SIGKILL, true, true);
+  Try<list<ProcessTree>> trees = os::killtree(child, SIGKILL, true, true);
 
   ASSERT_SOME(trees);
   EXPECT_FALSE(trees.get().empty());
@@ -947,10 +842,10 @@ TEST_F(OsTest, User)
 // variable (DYLD_LIBRARY_PATH on OS X).
 TEST_F(OsTest, Libraries)
 {
-  const std::string path1 = "/tmp/path1";
-  const std::string path2 = "/tmp/path1";
-  std::string ldLibraryPath;
-  const std::string originalLibraryPath = os::libraries::paths();
+  const string path1 = "/tmp/path1";
+  const string path2 = "/tmp/path1";
+  string ldLibraryPath;
+  const string originalLibraryPath = os::libraries::paths();
 
   // Test setPaths.
   os::libraries::setPaths(path1);
@@ -1043,13 +938,13 @@ TEST_F(OsTest, Mknod)
 TEST_F(OsTest, Realpath)
 {
   // Create a file.
-  const Try<std::string> _testFile = os::mktemp();
+  const Try<string> _testFile = os::mktemp();
   ASSERT_SOME(_testFile);
   ASSERT_SOME(os::touch(_testFile.get()));
-  const std::string testFile = _testFile.get();
+  const string testFile = _testFile.get();
 
   // Create a symlink pointing to a file.
-  const std::string testLink = UUID::random().toString();
+  const string testLink = UUID::random().toString();
   ASSERT_SOME(fs::symlink(testFile, testLink));
 
   // Validate the symlink.
@@ -1060,7 +955,7 @@ TEST_F(OsTest, Realpath)
   ASSERT_EQ(fileInode.get(), linkInode.get());
 
   // Verify that the symlink resolves correctly.
-  Result<std::string> resolved = os::realpath(testLink);
+  Result<string> resolved = os::realpath(testLink);
   ASSERT_SOME(resolved);
   EXPECT_TRUE(strings::contains(resolved.get(), testFile));
 

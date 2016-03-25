@@ -580,7 +580,6 @@ jmethodID Jvm::findMethod(
 
   std::ostringstream signature;
   signature << "(";
-  std::vector<Jvm::Class>::iterator args;
   foreach (const Jvm::Class& type, argTypes) {
     signature << type.signature();
   }
@@ -842,7 +841,7 @@ void Jvm::check(JNIEnv* env)
   if (env->ExceptionCheck() == JNI_TRUE) {
     if (!exceptions) {
       env->ExceptionDescribe();
-      EXIT(1) << "Caught a JVM exception, not propagating";
+      EXIT(EXIT_FAILURE) << "Caught a JVM exception, not propagating";
     } else {
       java::lang::Throwable throwable;
       Object* object = &throwable;

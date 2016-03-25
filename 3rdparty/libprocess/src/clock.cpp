@@ -165,9 +165,7 @@ void tick(const Time& time)
         clock::settling = true;
       }
 
-      foreach (const Timer& timer, (*timers)[timeout]) {
-        timedout.push_back(timer);
-      }
+      timedout.splice(timedout.end(), (*timers)[timeout]);
     }
 
     // Now erase the range of timers that timed out.
@@ -264,7 +262,7 @@ Time Clock::now(ProcessBase* process)
 
 Timer Clock::timer(
     const Duration& duration,
-    const lambda::function<void(void)>& thunk)
+    const lambda::function<void()>& thunk)
 {
   // Start at 1 since Timer() instances use id 0.
   static std::atomic<uint64_t> id(1);

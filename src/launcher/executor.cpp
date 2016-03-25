@@ -39,6 +39,7 @@
 
 #include <stout/duration.hpp>
 #include <stout/flags.hpp>
+#include <stout/json.hpp>
 #include <stout/lambda.hpp>
 #include <stout/option.hpp>
 #include <stout/os.hpp>
@@ -81,32 +82,42 @@ public:
       const Option<char**>& override,
       const string& _healthCheckDir,
       const Option<string>& _sandboxDirectory,
-      const Option<string>& _user)
+      const Option<string>& _workingDirectory,
+      const Option<string>& _user,
+      const Option<string>& _taskCommand,
+      const Duration& _shutdownGracePeriod)
     : state(REGISTERING),
       launched(false),
       killed(false),
       killedByHealthCheck(false),
       pid(-1),
       healthPid(-1),
-      escalationTimeout(slave::EXECUTOR_SIGNAL_ESCALATION_TIMEOUT),
+      shutdownGracePeriod(_shutdownGracePeriod),
       driver(None()),
+      frameworkInfo(None()),
+      taskId(None()),
       healthCheckDir(_healthCheckDir),
       override(override),
       sandboxDirectory(_sandboxDirectory),
-      user(_user) {}
+      workingDirectory(_workingDirectory),
+      user(_user),
+      taskCommand(_taskCommand) {}
 
   virtual ~CommandExecutorProcess() {}
 
   void registered(
       ExecutorDriver* _driver,
       const ExecutorInfo& _executorInfo,
-      const FrameworkInfo& frameworkInfo,
+      const FrameworkInfo& _frameworkInfo,
       const SlaveInfo& slaveInfo)
   {
     CHECK_EQ(REGISTERING, state);
 
     cout << "Registered executor on " << slaveInfo.hostname() << endl;
+
     driver = _driver;
+    frameworkInfo = _frameworkInfo;
+
     state = REGISTERED;
   }
 
@@ -117,6 +128,7 @@ public:
     CHECK(state == REGISTERED || state == REGISTERING) << state;
 
     cout << "Re-registered executor on " << slaveInfo.hostname() << endl;
+
     state = REGISTERED;
   }
 
@@ -137,26 +149,54 @@ public:
       return;
     }
 
-    // Skip sanity checks for TaskInfo if override is provided since
-    // the executor will be running the override command.
-    if (override.isNone()) {
-      // Sanity checks.
-      CHECK(task.has_command()) << "Expecting task " << task.task_id()
-                                << " to have a command!";
+    // Capture the TaskID.
+    taskId = task.task_id();
 
+    // Capture the kill policy.
+    if (task.has_kill_policy()) {
+      killPolicy = task.kill_policy();
+    }
+
+    // Determine the command to launch the task.
+    CommandInfo command;
+
+    if (taskCommand.isSome()) {
+      // Get CommandInfo from a JSON string.
+      Try<JSON::Object> object = JSON::parse<JSON::Object>(taskCommand.get());
+      if (object.isError()) {
+        cerr << "Failed to parse JSON: " << object.error() << endl;
+        abort();
+      }
+
+      Try<CommandInfo> parse = protobuf::parse<CommandInfo>(object.get());
+      if (parse.isError()) {
+        cerr << "Failed to parse protobuf: " << parse.error() << endl;
+        abort();
+      }
+
+      command = parse.get();
+    } else if (task.has_command()) {
+      command = task.command();
+    } else {
+      CHECK_SOME(override)
+        << "Expecting task '" << task.task_id()
+        << "' to have a command!";
+    }
+
+    if (override.isNone()) {
       // TODO(jieyu): For now, we just fail the executor if the task's
       // CommandInfo is not valid. The framework will receive
       // TASK_FAILED for the task, and will most likely find out the
       // cause with some debugging. This is a temporary solution. A more
       // correct solution is to perform this validation at master side.
-      if (task.command().shell()) {
-        CHECK(task.command().has_value())
-          << "Shell command of task " << task.task_id()
-          << " is not specified!";
+      if (command.shell()) {
+        CHECK(command.has_value())
+          << "Shell command of task '" << task.task_id()
+          << "' is not specified!";
       } else {
-        CHECK(task.command().has_value())
-          << "Executable of task " << task.task_id()
-          << " is not specified!";
+        CHECK(command.has_value())
+          << "Executable of task '" << task.task_id()
+          << "' is not specified!";
       }
     }
 
@@ -190,9 +230,12 @@ public:
       // If 'sandbox_diretory' is specified, that means the user
       // task specifies a root filesystem, and that root filesystem has
       // already been prepared at COMMAND_EXECUTOR_ROOTFS_CONTAINER_PATH.
-      // The command executor is reponsible for mounting the sandbox
+      // The command executor is responsible for mounting the sandbox
       // into the root filesystem, chrooting into it and changing the
       // user before exec-ing the user process.
+      //
+      // TODO(gilbert): Consider a better way to detect if a root
+      // filesystem is specified for the command task.
 #ifdef __linux__
       Result<string> user = os::user();
       if (user.isError()) {
@@ -220,18 +263,32 @@ public:
       }
 
       // Mount the sandbox into the container rootfs.
-      // NOTE: We don't use MS_REC here because the rootfs is already
-      // under the sandbox.
+      // We need to perform a recursive mount because we want all the
+      // volume mounts in the sandbox to be also mounted in the container
+      // root filesystem. However, since the container root filesystem
+      // is also mounted in the sandbox, after the recursive mount we
+      // also need to unmount the root filesystem in the mounted sandbox.
       Try<Nothing> mount = fs::mount(
           os::getcwd(),
           sandbox,
           None(),
-          MS_BIND,
+          MS_BIND | MS_REC,
           NULL);
 
       if (mount.isError()) {
         cerr << "Unable to mount the work directory into container "
              << "rootfs: " << mount.error() << endl;;
+        abort();
+      }
+
+      // Umount the root filesystem path in the mounted sandbox after
+      // the recursive mount.
+      Try<Nothing> unmountAll = fs::unmountAll(path::join(
+          sandbox,
+          COMMAND_EXECUTOR_ROOTFS_CONTAINER_PATH));
+      if (unmountAll.isError()) {
+        cerr << "Unable to unmount rootfs under mounted sandbox: "
+             << unmountAll.error() << endl;
         abort();
       }
 #else
@@ -241,31 +298,31 @@ public:
     }
 
     // Prepare the argv before fork as it's not async signal safe.
-    char **argv = new char*[task.command().arguments().size() + 1];
-    for (int i = 0; i < task.command().arguments().size(); i++) {
-      argv[i] = (char*) task.command().arguments(i).c_str();
+    char **argv = new char*[command.arguments().size() + 1];
+    for (int i = 0; i < command.arguments().size(); i++) {
+      argv[i] = (char*) command.arguments(i).c_str();
     }
-    argv[task.command().arguments().size()] = NULL;
+    argv[command.arguments().size()] = NULL;
 
     // Prepare the command log message.
-    string command;
+    string commandString;
     if (override.isSome()) {
       char** argv = override.get();
       // argv is guaranteed to be NULL terminated and we rely on
       // that fact to print command to be executed.
       for (int i = 0; argv[i] != NULL; i++) {
-        command += string(argv[i]) + " ";
+        commandString += string(argv[i]) + " ";
       }
-    } else if (task.command().shell()) {
-      command = "sh -c '" + task.command().value() + "'";
+    } else if (command.shell()) {
+      commandString = "sh -c '" + command.value() + "'";
     } else {
-      command =
-        "[" + task.command().value() + ", " +
-        strings::join(", ", task.command().arguments()) + "]";
+      commandString =
+        "[" + command.value() + ", " +
+        strings::join(", ", command.arguments()) + "]";
     }
 
     if ((pid = fork()) == -1) {
-      cerr << "Failed to fork to run " << command << ": "
+      cerr << "Failed to fork to run " << commandString << ": "
            << os::strerror(errno) << endl;
       abort();
     }
@@ -322,10 +379,19 @@ public:
           abort();
         }
 
-        Try<Nothing> chdir = os::chdir(sandboxDirectory.get());
+        // Determine the current working directory for the executor.
+        string cwd;
+        if (workingDirectory.isSome()) {
+          cwd = workingDirectory.get();
+        } else {
+          CHECK_SOME(sandboxDirectory);
+          cwd = sandboxDirectory.get();
+        }
+
+        Try<Nothing> chdir = os::chdir(cwd);
         if (chdir.isError()) {
-          cerr << "Failed to change directory to sandbox dir '"
-               << sandboxDirectory.get() << "': " << chdir.error();
+          cerr << "Failed to chdir into current working directory '"
+               << cwd << "': " << chdir.error() << endl;
           abort();
         }
 
@@ -343,20 +409,19 @@ public:
 #endif // __linux__
       }
 
-
-      cout << command << endl;
+      cout << commandString << endl;
 
       // The child has successfully setsid, now run the command.
       if (override.isNone()) {
-        if (task.command().shell()) {
+        if (command.shell()) {
           execlp(
               "sh",
               "sh",
               "-c",
-              task.command().value().c_str(),
+              command.value().c_str(),
               (char*) NULL);
         } else {
-          execvp(task.command().value().c_str(), argv);
+          execvp(command.value().c_str(), argv);
         }
       } else {
         char** argv = override.get();
@@ -383,16 +448,13 @@ public:
 
     cout << "Forked command at " << pid << endl;
 
-    launchHealthCheck(task);
+    if (task.has_health_check()) {
+      launchHealthCheck(task);
+    }
 
     // Monitor this process.
     process::reap(pid)
-      .onAny(defer(self(),
-                   &Self::reaped,
-                   driver,
-                   task.task_id(),
-                   pid,
-                   lambda::_1));
+      .onAny(defer(self(), &Self::reaped, driver, pid, lambda::_1));
 
     TaskStatus status;
     status.mutable_task_id()->MergeFrom(task.task_id());
@@ -404,46 +466,97 @@ public:
 
   void killTask(ExecutorDriver* driver, const TaskID& taskId)
   {
+    cout << "Received killTask" << endl;
+
+    // Since the command executor manages a single task, we
+    // shutdown completely when we receive a killTask.
     shutdown(driver);
-    if (healthPid != -1) {
-      // Cleanup health check process.
-      os::killtree(healthPid, SIGKILL);
-    }
   }
 
   void frameworkMessage(ExecutorDriver* driver, const string& data) {}
 
   void shutdown(ExecutorDriver* driver)
   {
+    // If the kill policy's grace period is set, we use it for the signal
+    // escalation timeout. The agent adjusts executor's shutdown grace
+    // period based on it, hence the executor will be given enough time
+    // to clean up. If the kill policy is not specified, the executor's
+    // shutdown grace period is used, which is set to some default value.
+    //
+    // NOTE: We leave a small buffer of time to do the forced kill, otherwise
+    // the agent may destroy the container before we can send `TASK_KILLED`.
+    //
+    // TODO(alexr): Remove `MAX_REAP_INTERVAL` once the reaper signals
+    // immediately after the watched process has exited.
+    Duration gracePeriod =
+      shutdownGracePeriod - process::MAX_REAP_INTERVAL() - Seconds(1);
+
+    if (killPolicy.isSome() && killPolicy->has_grace_period()) {
+      gracePeriod = Nanoseconds(killPolicy->grace_period().nanoseconds());
+    }
+
+    // TODO(bmahler): If a shutdown arrives after a kill task within
+    // the grace period of the `KillPolicy`, we may need to escalate
+    // more quickly (e.g. the shutdown grace period allotted by the
+    // agent is smaller than the kill grace period).
+
+    shutdown(driver, gracePeriod);
+  }
+
+  void shutdown(ExecutorDriver* driver, const Duration& gracePeriod)
+  {
     cout << "Shutting down" << endl;
 
-    if (pid > 0 && !killed) {
-      cout << "Sending SIGTERM to process tree at pid "
-           << pid << endl;
+    if (launched && !killed) {
+      // Send TASK_KILLING if the framework can handle it.
+      CHECK_SOME(frameworkInfo);
+      CHECK_SOME(taskId);
+
+      foreach (const FrameworkInfo::Capability& c,
+               frameworkInfo->capabilities()) {
+        if (c.type() == FrameworkInfo::Capability::TASK_KILLING_STATE) {
+          TaskStatus status;
+          status.mutable_task_id()->CopyFrom(taskId.get());
+          status.set_state(TASK_KILLING);
+          driver->sendStatusUpdate(status);
+          break;
+        }
+      }
+
+      // Now perform signal escalation to begin killing the task.
+      CHECK_GT(pid, 0);
+
+      cout << "Sending SIGTERM to process tree at pid " << pid << endl;
 
       Try<std::list<os::ProcessTree> > trees =
         os::killtree(pid, SIGTERM, true, true);
 
       if (trees.isError()) {
-        cerr << "Failed to kill the process tree rooted at pid "
-             << pid << ": " << trees.error() << endl;
+        cerr << "Failed to kill the process tree rooted at pid " << pid
+             << ": " << trees.error() << endl;
 
         // Send SIGTERM directly to process 'pid' as it may not have
         // received signal before os::killtree() failed.
         ::kill(pid, SIGTERM);
       } else {
-        cout << "Killing the following process trees:\n"
+        cout << "Sent SIGTERM to the following process trees:\n"
              << stringify(trees.get()) << endl;
       }
 
-      // TODO(nnielsen): Make escalationTimeout configurable through
-      // slave flags and/or per-framework/executor.
-      escalationTimer = delay(
-          escalationTimeout,
-          self(),
-          &Self::escalated);
+      escalationTimer =
+        delay(gracePeriod, self(), &Self::escalated, gracePeriod);
 
       killed = true;
+    }
+
+    // Cleanup health check process.
+    //
+    // TODO(bmahler): Consider doing this after the task has been
+    // reaped, since a framework may be interested in health
+    // information while the task is being killed (consider a
+    // task that takes 30 minutes to be cleanly killed).
+    if (healthPid != -1) {
+      os::killtree(healthPid, SIGKILL);
     }
   }
 
@@ -487,7 +600,6 @@ protected:
 private:
   void reaped(
       ExecutorDriver* driver,
-      const TaskID& taskId,
       pid_t pid,
       const Future<Option<int> >& status_)
   {
@@ -523,8 +635,10 @@ private:
 
     cout << message << " (pid: " << pid << ")" << endl;
 
+    CHECK_SOME(taskId);
+
     TaskStatus taskStatus;
-    taskStatus.mutable_task_id()->MergeFrom(taskId);
+    taskStatus.mutable_task_id()->MergeFrom(taskId.get());
     taskStatus.set_state(taskState);
     taskStatus.set_message(message);
     if (killed && killedByHealthCheck) {
@@ -541,11 +655,10 @@ private:
     driver->stop();
   }
 
-  void escalated()
+  void escalated(Duration timeout)
   {
-    cout << "Process " << pid << " did not terminate after "
-         << escalationTimeout << ", sending SIGKILL to "
-         << "process tree at " << pid << endl;
+    cout << "Process " << pid << " did not terminate after " << timeout
+         << ", sending SIGKILL to process tree at " << pid << endl;
 
     // TODO(nnielsen): Sending SIGTERM in the first stage of the
     // shutdown may leave orphan processes hanging off init. This
@@ -570,40 +683,41 @@ private:
 
   void launchHealthCheck(const TaskInfo& task)
   {
-    if (task.has_health_check()) {
-      JSON::Object json = JSON::protobuf(task.health_check());
+    CHECK(task.has_health_check());
 
-      // Launch the subprocess using 'exec' style so that quotes can
-      // be properly handled.
-      vector<string> argv(4);
-      argv[0] = "mesos-health-check";
-      argv[1] = "--executor=" + stringify(self());
-      argv[2] = "--health_check_json=" + stringify(json);
-      argv[3] = "--task_id=" + task.task_id().value();
+    JSON::Object json = JSON::protobuf(task.health_check());
 
-      cout << "Launching health check process: "
-           << path::join(healthCheckDir, "mesos-health-check")
-           << " " << argv[1] << " " << argv[2] << " " << argv[3] << endl;
+    // Launch the subprocess using 'exec' style so that quotes can
+    // be properly handled.
+    vector<string> argv(4);
+    argv[0] = "mesos-health-check";
+    argv[1] = "--executor=" + stringify(self());
+    argv[2] = "--health_check_json=" + stringify(json);
+    argv[3] = "--task_id=" + task.task_id().value();
 
-      Try<Subprocess> healthProcess =
-        process::subprocess(
-          path::join(healthCheckDir, "mesos-health-check"),
-          argv,
-          // Intentionally not sending STDIN to avoid health check
-          // commands that expect STDIN input to block.
-          Subprocess::PATH("/dev/null"),
-          Subprocess::FD(STDOUT_FILENO),
-          Subprocess::FD(STDERR_FILENO));
+    cout << "Launching health check process: "
+         << path::join(healthCheckDir, "mesos-health-check")
+         << " " << argv[1] << " " << argv[2] << " " << argv[3] << endl;
 
-      if (healthProcess.isError()) {
-        cerr << "Unable to launch health process: " << healthProcess.error();
-      } else {
-        healthPid = healthProcess.get().pid();
+    Try<Subprocess> healthProcess =
+      process::subprocess(
+        path::join(healthCheckDir, "mesos-health-check"),
+        argv,
+        // Intentionally not sending STDIN to avoid health check
+        // commands that expect STDIN input to block.
+        Subprocess::PATH("/dev/null"),
+        Subprocess::FD(STDOUT_FILENO),
+        Subprocess::FD(STDERR_FILENO));
 
-        cout << "Health check process launched at pid: "
-             << stringify(healthPid) << endl;
-      }
+    if (healthProcess.isError()) {
+      cerr << "Unable to launch health process: " << healthProcess.error();
+      return;
     }
+
+    healthPid = healthProcess.get().pid();
+
+    cout << "Health check process launched at pid: "
+         << stringify(healthPid) << endl;
   }
 
   enum State
@@ -617,13 +731,18 @@ private:
   bool killedByHealthCheck;
   pid_t pid;
   pid_t healthPid;
-  Duration escalationTimeout;
+  Duration shutdownGracePeriod;
+  Option<KillPolicy> killPolicy;
   Timer escalationTimer;
   Option<ExecutorDriver*> driver;
+  Option<FrameworkInfo> frameworkInfo;
+  Option<TaskID> taskId;
   string healthCheckDir;
   Option<char**> override;
   Option<string> sandboxDirectory;
+  Option<string> workingDirectory;
   Option<string> user;
+  Option<string> taskCommand;
 };
 
 
@@ -634,10 +753,20 @@ public:
       const Option<char**>& override,
       const string& healthCheckDir,
       const Option<string>& sandboxDirectory,
-      const Option<string>& user)
+      const Option<string>& workingDirectory,
+      const Option<string>& user,
+      const Option<string>& taskCommand,
+      const Duration& shutdownGracePeriod)
   {
     process = new CommandExecutorProcess(
-        override, healthCheckDir, sandboxDirectory, user);
+        override,
+        healthCheckDir,
+        sandboxDirectory,
+        workingDirectory,
+        user,
+        taskCommand,
+        shutdownGracePeriod);
+
     spawn(process);
   }
 
@@ -715,6 +844,8 @@ class Flags : public flags::FlagsBase
 public:
   Flags()
   {
+    // TODO(gilbert): Deprecate the 'override' flag since no one is
+    // using it, and it may cause confusing with 'task_command' flag.
     add(&override,
         "override",
         "Whether to override the command the executor should run when the\n"
@@ -723,16 +854,25 @@ public:
         "subsequent 'argv' to be used with 'execvp'",
         false);
 
-    // The following flags are only applicable when a rootfs is provisioned
-    // for this command.
+    // The following flags are only applicable when a rootfs is
+    // provisioned for this command.
     add(&sandbox_directory,
         "sandbox_directory",
         "The absolute path for the directory in the container where the\n"
         "sandbox is mapped to");
 
+    add(&working_directory,
+        "working_directory",
+        "The working directory for the task in the container.");
+
     add(&user,
         "user",
         "The user that the task should be running as.");
+
+    add(&task_command,
+        "task_command",
+        "If specified, this is the overrided command for launching the\n"
+        "task (instead of the command from TaskInfo).");
 
     // TODO(nnielsen): Add 'prefix' option to enable replacing
     // 'sh -c' with user specified wrapper.
@@ -740,7 +880,9 @@ public:
 
   bool override;
   Option<string> sandbox_directory;
+  Option<string> working_directory;
   Option<string> user;
+  Option<string> task_command;
 };
 
 
@@ -774,11 +916,40 @@ int main(int argc, char** argv)
   }
 
   const Option<string> envPath = os::getenv("MESOS_LAUNCHER_DIR");
-  string path =
-    envPath.isSome() ? envPath.get()
-                     : os::realpath(Path(argv[0]).dirname()).get();
+
+  string path = envPath.isSome()
+    ? envPath.get()
+    : os::realpath(Path(argv[0]).dirname()).get();
+
+  // Get executor shutdown grace period from the environment.
+  //
+  // NOTE: We avoided introducing a command executor flag for this
+  // because the command executor exits if it sees an unknown flag.
+  // This makes it difficult to add or remove command executor flags
+  // that are unconditionally set by the agent.
+  Duration shutdownGracePeriod = DEFAULT_EXECUTOR_SHUTDOWN_GRACE_PERIOD;
+  Option<string> value = os::getenv("MESOS_EXECUTOR_SHUTDOWN_GRACE_PERIOD");
+  if (value.isSome()) {
+    Try<Duration> parse = Duration::parse(value.get());
+    if (parse.isError()) {
+      cerr << "Failed to parse value '" << value.get() << "'"
+           << " of 'MESOS_EXECUTOR_SHUTDOWN_GRACE_PERIOD': " << parse.error();
+      return EXIT_FAILURE;
+    }
+
+    shutdownGracePeriod = parse.get();
+  }
+
   mesos::internal::CommandExecutor executor(
-      override, path, flags.sandbox_directory, flags.user);
+      override,
+      path,
+      flags.sandbox_directory,
+      flags.working_directory,
+      flags.user,
+      flags.task_command,
+      shutdownGracePeriod);
+
   mesos::MesosExecutorDriver driver(&executor);
+
   return driver.run() == mesos::DRIVER_STOPPED ? EXIT_SUCCESS : EXIT_FAILURE;
 }

@@ -39,6 +39,7 @@
 
 #include "slave/slave.hpp"
 
+#include "tests/containerizer.hpp"
 #include "tests/mesos.hpp"
 #include "tests/utils.hpp"
 
@@ -50,6 +51,7 @@ using mesos::internal::slave::Slave;
 
 using process::Clock;
 using process::Future;
+using process::Owned;
 using process::PID;
 using process::Promise;
 
@@ -81,7 +83,7 @@ TEST_F(MasterAuthorizationTest, AuthorizedTask)
   master::Flags flags = CreateMasterFlags();
   flags.acls = acls;
 
-  Try<PID<Master> > master = StartMaster(flags);
+  Try<Owned<cluster::Master>> master = StartMaster(flags);
   ASSERT_SOME(master);
 
   // Create an authorized executor.
@@ -89,13 +91,15 @@ TEST_F(MasterAuthorizationTest, AuthorizedTask)
   executor.mutable_command()->set_user("foo");
 
   MockExecutor exec(executor.executor_id());
+  TestContainerizer containerizer(&exec);
 
-  Try<PID<Slave> > slave = StartSlave(&exec);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
   ASSERT_SOME(slave);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(&driver, _, _))
     .Times(1);
@@ -138,8 +142,6 @@ TEST_F(MasterAuthorizationTest, AuthorizedTask)
 
   driver.stop();
   driver.join();
-
-  Shutdown(); // Must shutdown before 'containerizer' gets deallocated.
 }
 
 
@@ -155,7 +157,7 @@ TEST_F(MasterAuthorizationTest, UnauthorizedTask)
   master::Flags flags = CreateMasterFlags();
   flags.acls = acls;
 
-  Try<PID<Master> > master = StartMaster(flags);
+  Try<Owned<cluster::Master>> master = StartMaster(flags);
   ASSERT_SOME(master);
 
   // Create an unauthorized executor.
@@ -163,13 +165,15 @@ TEST_F(MasterAuthorizationTest, UnauthorizedTask)
   executor.mutable_command()->set_user("foo");
 
   MockExecutor exec(executor.executor_id());
+  TestContainerizer containerizer(&exec);
 
-  Try<PID<Slave> > slave = StartSlave(&exec);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
   ASSERT_SOME(slave);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(&driver, _, _))
     .Times(1);
@@ -204,8 +208,6 @@ TEST_F(MasterAuthorizationTest, UnauthorizedTask)
 
   driver.stop();
   driver.join();
-
-  Shutdown(); // Must shutdown before 'containerizer' gets deallocated.
 }
 
 
@@ -214,17 +216,19 @@ TEST_F(MasterAuthorizationTest, UnauthorizedTask)
 TEST_F(MasterAuthorizationTest, KillTask)
 {
   MockAuthorizer authorizer;
-  Try<PID<Master> > master = StartMaster(&authorizer);
+  Try<Owned<cluster::Master>> master = StartMaster(&authorizer);
   ASSERT_SOME(master);
 
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer(&exec);
 
-  Try<PID<Slave> > slave = StartSlave(&exec);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
   ASSERT_SOME(slave);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(&driver, _, _))
     .Times(1);
@@ -244,7 +248,7 @@ TEST_F(MasterAuthorizationTest, KillTask)
   // Return a pending future from authorizer.
   Future<Nothing> authorize;
   Promise<bool> promise;
-  EXPECT_CALL(authorizer, authorize(An<const mesos::ACL::RunTask&>()))
+  EXPECT_CALL(authorizer, authorized(_))
     .WillOnce(DoAll(FutureSatisfy(&authorize),
                     Return(promise.future())));
 
@@ -276,8 +280,6 @@ TEST_F(MasterAuthorizationTest, KillTask)
 
   driver.stop();
   driver.join();
-
-  Shutdown(); // Must shutdown before 'containerizer' gets deallocated.
 }
 
 
@@ -286,17 +288,19 @@ TEST_F(MasterAuthorizationTest, KillTask)
 TEST_F(MasterAuthorizationTest, SlaveRemoved)
 {
   MockAuthorizer authorizer;
-  Try<PID<Master> > master = StartMaster(&authorizer);
+  Try<Owned<cluster::Master>> master = StartMaster(&authorizer);
   ASSERT_SOME(master);
 
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer(&exec);
 
-  Try<PID<Slave> > slave = StartSlave(&exec);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
   ASSERT_SOME(slave);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(&driver, _, _))
     .Times(1);
@@ -316,7 +320,7 @@ TEST_F(MasterAuthorizationTest, SlaveRemoved)
   // Return a pending future from authorizer.
   Future<Nothing> authorize;
   Promise<bool> promise;
-  EXPECT_CALL(authorizer, authorize(An<const mesos::ACL::RunTask&>()))
+  EXPECT_CALL(authorizer, authorized(_))
     .WillOnce(DoAll(FutureSatisfy(&authorize),
                     Return(promise.future())));
 
@@ -331,7 +335,8 @@ TEST_F(MasterAuthorizationTest, SlaveRemoved)
 
   // Stop the slave with explicit shutdown as otherwise with
   // checkpointing the master will wait for the slave to reconnect.
-  Stop(slave.get(), true);
+  slave.get()->shutdown();
+  slave->reset();
 
   AWAIT_READY(slaveLost);
 
@@ -364,8 +369,6 @@ TEST_F(MasterAuthorizationTest, SlaveRemoved)
 
   driver.stop();
   driver.join();
-
-  Shutdown(); // Must shutdown before 'containerizer' gets deallocated.
 }
 
 
@@ -374,17 +377,19 @@ TEST_F(MasterAuthorizationTest, SlaveRemoved)
 TEST_F(MasterAuthorizationTest, SlaveDisconnected)
 {
   MockAuthorizer authorizer;
-  Try<PID<Master>> master = StartMaster(&authorizer);
+  Try<Owned<cluster::Master>> master = StartMaster(&authorizer);
   ASSERT_SOME(master);
 
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer(&exec);
 
-  Try<PID<Slave> > slave = StartSlave(&exec);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
   ASSERT_SOME(slave);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(&driver, _, _))
     .Times(1);
@@ -404,7 +409,7 @@ TEST_F(MasterAuthorizationTest, SlaveDisconnected)
   // Return a pending future from authorizer.
   Future<Nothing> authorize;
   Promise<bool> promise;
-  EXPECT_CALL(authorizer, authorize(An<const mesos::ACL::RunTask&>()))
+  EXPECT_CALL(authorizer, authorized(_))
     .WillOnce(DoAll(FutureSatisfy(&authorize),
                     Return(promise.future())));
 
@@ -421,7 +426,8 @@ TEST_F(MasterAuthorizationTest, SlaveDisconnected)
 
   // Stop the slave with explicit shutdown message so that the master does not
   // wait for it to reconnect.
-  Stop(slave.get(), true);
+  slave.get()->shutdown();
+  slave->reset();
 
   AWAIT_READY(deactivateSlave);
 
@@ -456,8 +462,6 @@ TEST_F(MasterAuthorizationTest, SlaveDisconnected)
 
   driver.stop();
   driver.join();
-
-  Shutdown(); // Must shutdown before 'containerizer' gets deallocated.
 }
 
 
@@ -466,17 +470,19 @@ TEST_F(MasterAuthorizationTest, SlaveDisconnected)
 TEST_F(MasterAuthorizationTest, FrameworkRemoved)
 {
   MockAuthorizer authorizer;
-  Try<PID<Master> > master = StartMaster(&authorizer);
+  Try<Owned<cluster::Master>> master = StartMaster(&authorizer);
   ASSERT_SOME(master);
 
   MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer(&exec);
 
-  Try<PID<Slave> > slave = StartSlave(&exec);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), &containerizer);
   ASSERT_SOME(slave);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
   EXPECT_CALL(sched, registered(&driver, _, _))
     .Times(1);
@@ -496,7 +502,7 @@ TEST_F(MasterAuthorizationTest, FrameworkRemoved)
   // Return a pending future from authorizer.
   Future<Nothing> authorize;
   Promise<bool> promise;
-  EXPECT_CALL(authorizer, authorize(An<const mesos::ACL::RunTask&>()))
+  EXPECT_CALL(authorizer, authorized(_))
     .WillOnce(DoAll(FutureSatisfy(&authorize),
                     Return(promise.future())));
 
@@ -523,8 +529,6 @@ TEST_F(MasterAuthorizationTest, FrameworkRemoved)
   // No task launch should happen resulting in all resources being
   // returned to the allocator.
   AWAIT_READY(recoverResources);
-
-  Shutdown(); // Must shutdown before 'containerizer' gets deallocated.
 }
 
 
@@ -534,12 +538,12 @@ TEST_F(MasterAuthorizationTest, FrameworkRemoved)
 TEST_F(MasterAuthorizationTest, PendingExecutorInfoDiffersOnDifferentSlaves)
 {
   MockAuthorizer authorizer;
-  Try<PID<Master> > master = StartMaster(&authorizer);
+  Try<Owned<cluster::Master>> master = StartMaster(&authorizer);
   ASSERT_SOME(master);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
   Future<Nothing> registered;
   EXPECT_CALL(sched, registered(&driver, _, _))
@@ -555,8 +559,11 @@ TEST_F(MasterAuthorizationTest, PendingExecutorInfoDiffersOnDifferentSlaves)
 
   // Start the first slave.
   MockExecutor exec1(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer1(&exec1);
 
-  Try<PID<Slave> > slave1 = StartSlave(&exec1);
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave1 =
+    StartSlave(detector.get(), &containerizer1);
   ASSERT_SOME(slave1);
 
   AWAIT_READY(offers1);
@@ -573,7 +580,7 @@ TEST_F(MasterAuthorizationTest, PendingExecutorInfoDiffersOnDifferentSlaves)
   // Return a pending future from authorizer.
   Future<Nothing> authorize;
   Promise<bool> promise;
-  EXPECT_CALL(authorizer, authorize(An<const mesos::ACL::RunTask&>()))
+  EXPECT_CALL(authorizer, authorized(_))
     .WillOnce(DoAll(FutureSatisfy(&authorize),
                     Return(promise.future())));
 
@@ -589,8 +596,10 @@ TEST_F(MasterAuthorizationTest, PendingExecutorInfoDiffersOnDifferentSlaves)
 
   // Now start the second slave.
   MockExecutor exec2(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer2(&exec2);
 
-  Try<PID<Slave> > slave2 = StartSlave(&exec2);
+  Try<Owned<cluster::Slave>> slave2 =
+    StartSlave(detector.get(), &containerizer2);
   ASSERT_SOME(slave2);
 
   AWAIT_READY(offers2);
@@ -615,7 +624,7 @@ TEST_F(MasterAuthorizationTest, PendingExecutorInfoDiffersOnDifferentSlaves)
   EXPECT_CALL(sched, statusUpdate(&driver, _))
     .WillOnce(FutureArg<1>(&status2));
 
-  EXPECT_CALL(authorizer, authorize(An<const mesos::ACL::RunTask&>()))
+  EXPECT_CALL(authorizer, authorized(_))
     .WillOnce(Return(true));
 
   driver.launchTasks(offers2.get()[0].id(), {task2});
@@ -647,8 +656,6 @@ TEST_F(MasterAuthorizationTest, PendingExecutorInfoDiffersOnDifferentSlaves)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
@@ -667,7 +674,7 @@ TEST_F(MasterAuthorizationTest, AuthorizedRole)
   flags.roles = "foo";
   flags.acls = acls;
 
-  Try<PID<Master> > master = StartMaster(flags);
+  Try<Owned<cluster::Master>> master = StartMaster(flags);
   ASSERT_SOME(master);
 
   FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
@@ -675,7 +682,7 @@ TEST_F(MasterAuthorizationTest, AuthorizedRole)
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, frameworkInfo, master.get(), DEFAULT_CREDENTIAL);
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
 
   Future<Nothing> registered;
   EXPECT_CALL(sched, registered(&driver, _, _))
@@ -687,8 +694,6 @@ TEST_F(MasterAuthorizationTest, AuthorizedRole)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
@@ -707,7 +712,7 @@ TEST_F(MasterAuthorizationTest, UnauthorizedRole)
   flags.roles = "foo";
   flags.acls = acls;
 
-  Try<PID<Master> > master = StartMaster(flags);
+  Try<Owned<cluster::Master>> master = StartMaster(flags);
   ASSERT_SOME(master);
 
   FrameworkInfo frameworkInfo = DEFAULT_FRAMEWORK_INFO;
@@ -715,7 +720,7 @@ TEST_F(MasterAuthorizationTest, UnauthorizedRole)
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, frameworkInfo, master.get(), DEFAULT_CREDENTIAL);
+      &sched, frameworkInfo, master.get()->pid, DEFAULT_CREDENTIAL);
 
   Future<Nothing> error;
   EXPECT_CALL(sched, error(&driver, _))
@@ -728,8 +733,6 @@ TEST_F(MasterAuthorizationTest, UnauthorizedRole)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
@@ -740,13 +743,13 @@ TEST_F(MasterAuthorizationTest, UnauthorizedRole)
 TEST_F(MasterAuthorizationTest, DuplicateRegistration)
 {
   MockAuthorizer authorizer;
-  Try<PID<Master> > master = StartMaster(&authorizer);
+  Try<Owned<cluster::Master>> master = StartMaster(&authorizer);
   ASSERT_SOME(master);
 
   // Create a detector for the scheduler driver because we want the
   // spurious leading master change to be known by the scheduler
   // driver only.
-  StandaloneMasterDetector detector(master.get());
+  StandaloneMasterDetector detector(master.get()->pid);
   MockScheduler sched;
   TestingMesosSchedulerDriver driver(&sched, &detector);
 
@@ -759,7 +762,7 @@ TEST_F(MasterAuthorizationTest, DuplicateRegistration)
   Promise<bool> promise1;
   Future<Nothing> authorize2;
   Promise<bool> promise2;
-  EXPECT_CALL(authorizer, authorize(An<const mesos::ACL::RegisterFramework&>()))
+  EXPECT_CALL(authorizer, authorized(_))
     .WillOnce(DoAll(FutureSatisfy(&authorize1),
                     Return(promise1.future())))
     .WillOnce(DoAll(FutureSatisfy(&authorize2),
@@ -775,7 +778,7 @@ TEST_F(MasterAuthorizationTest, DuplicateRegistration)
   AWAIT_READY(authorize1);
 
   // Simulate a spurious leading master change at the scheduler.
-  detector.appoint(master.get());
+  detector.appoint(master.get()->pid);
 
   // Wait until second authorization attempt is in progress.
   AWAIT_READY(authorize2);
@@ -798,8 +801,6 @@ TEST_F(MasterAuthorizationTest, DuplicateRegistration)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
@@ -810,13 +811,13 @@ TEST_F(MasterAuthorizationTest, DuplicateRegistration)
 TEST_F(MasterAuthorizationTest, DuplicateReregistration)
 {
   MockAuthorizer authorizer;
-  Try<PID<Master> > master = StartMaster(&authorizer);
+  Try<Owned<cluster::Master>> master = StartMaster(&authorizer);
   ASSERT_SOME(master);
 
   // Create a detector for the scheduler driver because we want the
   // spurious leading master change to be known by the scheduler
   // driver only.
-  StandaloneMasterDetector detector(master.get());
+  StandaloneMasterDetector detector(master.get()->pid);
   MockScheduler sched;
   TestingMesosSchedulerDriver driver(&sched, &detector);
 
@@ -829,7 +830,7 @@ TEST_F(MasterAuthorizationTest, DuplicateReregistration)
   Promise<bool> promise2;
   Future<Nothing> authorize3;
   Promise<bool> promise3;
-  EXPECT_CALL(authorizer, authorize(An<const mesos::ACL::RegisterFramework&>()))
+  EXPECT_CALL(authorizer, authorized(_))
     .WillOnce(Return(true))
     .WillOnce(DoAll(FutureSatisfy(&authorize2),
                     Return(promise2.future())))
@@ -848,13 +849,13 @@ TEST_F(MasterAuthorizationTest, DuplicateReregistration)
   EXPECT_CALL(sched, disconnected(&driver));
 
   // Simulate a spurious leading master change at the scheduler.
-  detector.appoint(master.get());
+  detector.appoint(master.get()->pid);
 
   // Wait until the second authorization attempt is in progress.
   AWAIT_READY(authorize2);
 
   // Simulate another spurious leading master change at the scheduler.
-  detector.appoint(master.get());
+  detector.appoint(master.get()->pid);
 
   // Wait until the third authorization attempt is in progress.
   AWAIT_READY(authorize3);
@@ -881,8 +882,6 @@ TEST_F(MasterAuthorizationTest, DuplicateReregistration)
 
   driver.stop();
   driver.join();
-
-  Shutdown();
 }
 
 
@@ -891,17 +890,17 @@ TEST_F(MasterAuthorizationTest, DuplicateReregistration)
 TEST_F(MasterAuthorizationTest, FrameworkRemovedBeforeRegistration)
 {
   MockAuthorizer authorizer;
-  Try<PID<Master> > master = StartMaster(&authorizer);
+  Try<Owned<cluster::Master>> master = StartMaster(&authorizer);
   ASSERT_SOME(master);
 
   MockScheduler sched;
   MesosSchedulerDriver driver(
-      &sched, DEFAULT_FRAMEWORK_INFO, master.get(), DEFAULT_CREDENTIAL);
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
 
   // Return a pending future from authorizer.
   Future<Nothing> authorize;
   Promise<bool> promise;
-  EXPECT_CALL(authorizer, authorize(An<const mesos::ACL::RegisterFramework&>()))
+  EXPECT_CALL(authorizer, authorized(_))
     .WillOnce(DoAll(FutureSatisfy(&authorize),
                     Return(promise.future())))
     .WillRepeatedly(Return(true)); // Authorize subsequent registration retries.
@@ -934,8 +933,6 @@ TEST_F(MasterAuthorizationTest, FrameworkRemovedBeforeRegistration)
   // When the master tries to link to a non-existent framework PID
   // it should realize the framework is gone and remove it.
   AWAIT_READY(removeFramework);
-
-  Shutdown();
 }
 
 
@@ -945,13 +942,13 @@ TEST_F(MasterAuthorizationTest, FrameworkRemovedBeforeRegistration)
 TEST_F(MasterAuthorizationTest, FrameworkRemovedBeforeReregistration)
 {
   MockAuthorizer authorizer;
-  Try<PID<Master> > master = StartMaster(&authorizer);
+  Try<Owned<cluster::Master>> master = StartMaster(&authorizer);
   ASSERT_SOME(master);
 
   // Create a detector for the scheduler driver because we want the
   // spurious leading master change to be known by the scheduler
   // driver only.
-  StandaloneMasterDetector detector(master.get());
+  StandaloneMasterDetector detector(master.get()->pid);
   MockScheduler sched;
   TestingMesosSchedulerDriver driver(&sched, &detector);
 
@@ -962,7 +959,7 @@ TEST_F(MasterAuthorizationTest, FrameworkRemovedBeforeReregistration)
   // Return a pending future from authorizer after first attempt.
   Future<Nothing> authorize2;
   Promise<bool> promise2;
-  EXPECT_CALL(authorizer, authorize(An<const mesos::ACL::RegisterFramework&>()))
+  EXPECT_CALL(authorizer, authorized(_))
     .WillOnce(Return(true))
     .WillOnce(DoAll(FutureSatisfy(&authorize2),
                     Return(promise2.future())));
@@ -982,7 +979,7 @@ TEST_F(MasterAuthorizationTest, FrameworkRemovedBeforeReregistration)
     .Times(0);
 
   // Simulate a spurious leading master change at the scheduler.
-  detector.appoint(master.get());
+  detector.appoint(master.get()->pid);
 
   // Wait until the second authorization attempt is in progress.
   AWAIT_READY(authorize2);
@@ -1005,8 +1002,6 @@ TEST_F(MasterAuthorizationTest, FrameworkRemovedBeforeReregistration)
   // Settle the clock here to ensure 'Master::_reregisterFramework()'
   // is executed.
   Clock::settle();
-
-  Shutdown();
 }
 
 } // namespace tests {

@@ -31,7 +31,7 @@ using std::vector;
 
 TEST(StringsTest, Format)
 {
-  Try<std::string> result = strings::format("%s %s", "hello", "world");
+  Try<string> result = strings::format("%s %s", "hello", "world");
   EXPECT_SOME_EQ("hello world", result);
 
   result = strings::format("hello %d", 42);
@@ -198,6 +198,77 @@ TEST(StringsTest, TokenizeNullByteDelim)
 }
 
 
+TEST(StringsTest, TokenizeNZero)
+{
+  vector<string> tokens = strings::tokenize("foo,bar,,,", ",", 0);
+  ASSERT_EQ(0u, tokens.size());
+}
+
+
+TEST(StringsTest, TokenizeNOne)
+{
+  vector<string> tokens = strings::tokenize("foo,bar,,,", ",", 1);
+  ASSERT_EQ(1u, tokens.size());
+  EXPECT_EQ("foo,bar,,,", tokens[0]);
+}
+
+
+TEST(StringsTest, TokenizeNDelimOnlyString)
+{
+  vector<string> tokens = strings::tokenize(",,,", ",", 2);
+  ASSERT_EQ(0u, tokens.size());
+}
+
+
+TEST(StringsTest, TokenizeN)
+{
+  vector<string> tokens = strings::tokenize("foo,bar,,baz", ",", 2);
+  ASSERT_EQ(2u, tokens.size());
+  EXPECT_EQ("foo",      tokens[0]);
+  EXPECT_EQ("bar,,baz", tokens[1]);
+}
+
+
+TEST(StringsTest, TokenizeNStringWithDelimsAtStart)
+{
+  vector<string> tokens = strings::tokenize(",,foo,bar,,baz", ",", 5);
+  ASSERT_EQ(3u, tokens.size());
+  EXPECT_EQ("foo", tokens[0]);
+  EXPECT_EQ("bar", tokens[1]);
+  EXPECT_EQ("baz", tokens[2]);
+}
+
+
+TEST(StringsTest, TokenizeNStringWithDelimsAtEnd)
+{
+  vector<string> tokens = strings::tokenize("foo,bar,,baz,,", ",", 4);
+  ASSERT_EQ(3u, tokens.size());
+  EXPECT_EQ("foo", tokens[0]);
+  EXPECT_EQ("bar", tokens[1]);
+  EXPECT_EQ("baz", tokens[2]);
+}
+
+
+TEST(StringsTest, TokenizeNStringWithDelimsAtStartAndEnd)
+{
+  vector<string> tokens = strings::tokenize(",,foo,bar,,", ",", 6);
+  ASSERT_EQ(2u, tokens.size());
+  EXPECT_EQ("foo", tokens[0]);
+  EXPECT_EQ("bar", tokens[1]);
+}
+
+
+TEST(StringsTest, TokenizeNWithMultipleDelims)
+{
+  vector<string> tokens = strings::tokenize("foo.bar,.,.baz.", ",.", 6);
+  ASSERT_EQ(3u, tokens.size());
+  EXPECT_EQ("foo", tokens[0]);
+  EXPECT_EQ("bar", tokens[1]);
+  EXPECT_EQ("baz", tokens[2]);
+}
+
+
+
 TEST(StringsTest, SplitEmptyString)
 {
   vector<string> tokens = strings::split("", ",");
@@ -285,6 +356,14 @@ TEST(StringsTest, SplitNZero)
 {
   vector<string> tokens = strings::split("foo,bar,,,", ",", 0);
   ASSERT_EQ(0u, tokens.size());
+}
+
+
+TEST(StringsTest, SplitNOne)
+{
+  vector<string> tokens = strings::split("foo,bar,,,", ",", 1);
+  ASSERT_EQ(1u, tokens.size());
+  EXPECT_EQ("foo,bar,,,", tokens[0]);
 }
 
 
@@ -384,7 +463,7 @@ TEST(StringsTest, Join)
   EXPECT_EQ("a\nb\nc\nd", strings::join("\n", "a", "b", "c", "d"));
   std::stringstream ss;
   EXPECT_EQ("a, b, c", strings::join(ss, ", ", "a", "b", "c").str());
-  const std::string gnarly("gnarly");
+  const string gnarly("gnarly");
   EXPECT_EQ("a/gnarly/c", strings::join("/", "a", gnarly, "c"));
   const bool is_true = true;
   const std::set<int32_t> my_set {1, 2, 3};

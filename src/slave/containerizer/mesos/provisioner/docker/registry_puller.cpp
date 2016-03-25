@@ -14,25 +14,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "slave/containerizer/mesos/provisioner/docker/registry_puller.hpp"
-
-#include <list>
+#include <glog/logging.h>
 
 #include <process/collect.hpp>
 #include <process/defer.hpp>
 #include <process/dispatch.hpp>
-#include <process/subprocess.hpp>
+#include <process/http.hpp>
 
-#include "common/status_utils.hpp"
+#include <stout/os/exists.hpp>
+#include <stout/os/mkdir.hpp>
+#include <stout/os/rm.hpp>
+#include <stout/os/write.hpp>
+
+#include "common/command_utils.hpp"
+
+#include "uri/schemes/docker.hpp"
 
 #include "slave/containerizer/mesos/provisioner/docker/paths.hpp"
-#include "slave/containerizer/mesos/provisioner/docker/registry_client.hpp"
+#include "slave/containerizer/mesos/provisioner/docker/registry_puller.hpp"
 
 namespace http = process::http;
 namespace spec = docker::spec;
 
 using std::list;
-using std::pair;
 using std::string;
 using std::vector;
 
@@ -40,255 +44,358 @@ using process::Failure;
 using process::Future;
 using process::Owned;
 using process::Process;
-using process::Promise;
-using process::Subprocess;
+using process::Shared;
+
+using process::defer;
+using process::dispatch;
+using process::spawn;
+using process::wait;
 
 namespace mesos {
 namespace internal {
 namespace slave {
 namespace docker {
 
-using RegistryClient = registry::RegistryClient;
-
-
 class RegistryPullerProcess : public Process<RegistryPullerProcess>
 {
 public:
-  static Try<Owned<RegistryPullerProcess>> create(const Flags& flags);
+  RegistryPullerProcess(
+      const string& _storeDir,
+      const http::URL& _defaultRegistryUrl,
+      const Shared<uri::Fetcher>& _fetcher);
 
-  process::Future<list<pair<string, string>>> pull(
-      const Image::Name& imageName,
-      const Path& directory);
+  Future<vector<string>> pull(
+      const spec::ImageReference& reference,
+      const string& directory);
 
 private:
-  explicit RegistryPullerProcess(
-      const Owned<RegistryClient>& registry,
-      const Duration& timeout);
+  Future<vector<string>> _pull(
+      const spec::ImageReference& reference,
+      const string& directory);
 
-  Future<pair<string, string>> downloadLayer(
-      const Image::Name& imageName,
-      const Path& directory,
-      const string& blobSum,
-      const string& id);
+  Future<vector<string>> __pull(
+    const spec::ImageReference& reference,
+    const string& directory,
+    const spec::v2::ImageManifest& manifest,
+    const hashset<string>& blobSums);
 
-  Future<list<pair<string, string>>> downloadLayers(
-      const spec::v2::ImageManifest& manifest,
-      const Image::Name& imageName,
-      const Path& downloadDir);
-
-  process::Future<list<pair<string, string>>> _pull(
-      const Image::Name& imageName,
-      const Path& downloadDir);
-
-  Future<list<pair<string, string>>> untarLayers(
-    const Future<list<pair<string, string>>>& layerFutures,
-    const Path& downloadDir);
-
-  Owned<RegistryClient> registryClient_;
-  const Duration pullTimeout_;
-  hashmap<string, Owned<Promise<pair<string, string>>>> downloadTracker_;
+  Future<hashset<string>> fetchBlobs(
+    const spec::ImageReference& reference,
+    const string& directory,
+    const spec::v2::ImageManifest& manifest);
 
   RegistryPullerProcess(const RegistryPullerProcess&) = delete;
   RegistryPullerProcess& operator=(const RegistryPullerProcess&) = delete;
+
+  const string storeDir;
+
+  // If the user does not specify the registry url in the image
+  // reference, this registry url will be used as the default.
+  const http::URL defaultRegistryUrl;
+
+  Shared<uri::Fetcher> fetcher;
 };
 
 
-Try<Owned<Puller>> RegistryPuller::create(const Flags& flags)
+Try<Owned<Puller>> RegistryPuller::create(
+    const Flags& flags,
+    const Shared<uri::Fetcher>& fetcher)
 {
-  Try<Owned<RegistryPullerProcess>> process =
-    RegistryPullerProcess::create(flags);
-
-  if (process.isError()) {
-    return Error(process.error());
+  Try<http::URL> defaultRegistryUrl = http::URL::parse(flags.docker_registry);
+  if (defaultRegistryUrl.isError()) {
+    return Error(
+        "Failed to parse the default Docker registry: " +
+        defaultRegistryUrl.error());
   }
 
-  return Owned<Puller>(new RegistryPuller(process.get()));
+  VLOG(1) << "Creating registry puller with docker registry '"
+          << flags.docker_registry << "'";
+
+  Owned<RegistryPullerProcess> process(
+      new RegistryPullerProcess(
+          flags.docker_store_dir,
+          defaultRegistryUrl.get(),
+          fetcher));
+
+  return Owned<Puller>(new RegistryPuller(process));
 }
 
 
-RegistryPuller::RegistryPuller(const Owned<RegistryPullerProcess>& process)
-  : process_(process)
+RegistryPuller::RegistryPuller(Owned<RegistryPullerProcess> _process)
+  : process(_process)
 {
-  spawn(CHECK_NOTNULL(process_.get()));
+  spawn(CHECK_NOTNULL(process.get()));
 }
 
 
 RegistryPuller::~RegistryPuller()
 {
-  terminate(process_.get());
-  process::wait(process_.get());
+  terminate(process.get());
+  wait(process.get());
 }
 
 
-Future<list<pair<string, string>>> RegistryPuller::pull(
-    const Image::Name& imageName,
-    const Path& downloadDir)
+Future<vector<string>> RegistryPuller::pull(
+    const spec::ImageReference& reference,
+    const string& directory)
 {
   return dispatch(
-      process_.get(),
+      process.get(),
       &RegistryPullerProcess::pull,
-      imageName,
-      downloadDir);
-}
-
-
-Try<Owned<RegistryPullerProcess>> RegistryPullerProcess::create(
-    const Flags& flags)
-{
-  Result<double> timeoutSecs = numify<double>(flags.docker_puller_timeout_secs);
-  if ((timeoutSecs.isError()) || (timeoutSecs.get() <= 0)) {
-    return Error(
-        "Failed to create registry puller - invalid timeout value: " +
-        flags.docker_puller_timeout_secs);
-  }
-
-  Try<http::URL> registryUrl = http::URL::parse(flags.docker_registry);
-  if (registryUrl.isError()) {
-    return Error("Failed to parse Docker registry: " + registryUrl.error());
-  }
-
-  Try<http::URL> authServerUrl = http::URL::parse(flags.docker_auth_server);
-  if (authServerUrl.isError()) {
-    return Error("Failed to parse Docker auth server: " +
-                 authServerUrl.error());
-  }
-
-  Try<Owned<RegistryClient>> registry = RegistryClient::create(
-      registryUrl.get(), authServerUrl.get());
-
-  if (registry.isError()) {
-    return Error("Failed to create registry client: " + registry.error());
-  }
-
-  return Owned<RegistryPullerProcess>(new RegistryPullerProcess(
-      registry.get(),
-      Seconds(timeoutSecs.get())));
+      reference,
+      directory);
 }
 
 
 RegistryPullerProcess::RegistryPullerProcess(
-    const Owned<RegistryClient>& registry,
-    const Duration& timeout)
-  : registryClient_(registry),
-    pullTimeout_(timeout) {}
+    const string& _storeDir,
+    const http::URL& _defaultRegistryUrl,
+    const Shared<uri::Fetcher>& _fetcher)
+  : storeDir(_storeDir),
+    defaultRegistryUrl(_defaultRegistryUrl),
+    fetcher(_fetcher) {}
 
 
-Future<pair<string, string>> RegistryPullerProcess::downloadLayer(
-    const Image::Name& imageName,
-    const Path& directory,
-    const string& blobSum,
-    const string& layerId)
+static spec::ImageReference normalize(
+    const spec::ImageReference& _reference,
+    const http::URL& defaultRegistryUrl)
 {
-  VLOG(1) << "Downloading layer '"  << layerId
-          << "' for image '" << stringify(imageName) << "'";
+  spec::ImageReference reference = _reference;
 
-  if (downloadTracker_.contains(layerId)) {
-    VLOG(1) << "Download already in progress for image '"
-            << stringify(imageName) << "', layer '" << layerId << "'";
+  // Determine which registry domain should be used.
+  Option<string> registryDomain;
 
-    return downloadTracker_.at(layerId)->future();
+  if (_reference.has_registry()) {
+    registryDomain = _reference.registry();
+  } else {
+    registryDomain = defaultRegistryUrl.domain.isSome()
+      ? defaultRegistryUrl.domain.get()
+      : Option<string>();
   }
 
-  Owned<Promise<pair<string, string>>> downloadPromise(
-      new Promise<pair<string, string>>());
+  // Check if necessary to add 'library/' prefix for the case that the
+  // registry is docker default 'https://registry-1.docker.io',
+  // because docker official images locate in 'library/' directory.
+  // For details, please see:
+  // https://github.com/docker-library/official-images
+  // https://github.com/docker/docker/blob/v1.10.2/reference/reference.go
+  if (registryDomain.isSome() &&
+      strings::contains(registryDomain.get(), "docker.io") &&
+      !strings::contains(_reference.repository(), "/")) {
+    const string repository = path::join("library", _reference.repository());
 
-  downloadTracker_.insert({layerId, downloadPromise});
+    reference.set_repository(repository);
+  }
 
-  const Path downloadFile(path::join(directory, layerId + ".tar"));
-
-  registryClient_->getBlob(
-      imageName,
-      blobSum,
-      downloadFile)
-    .onAny(process::defer(
-        self(),
-        [this, layerId, downloadPromise, downloadFile](
-            const Future<size_t>& future) {
-          downloadTracker_.erase(layerId);
-
-          if (!future.isReady()) {
-              downloadPromise->fail(
-                  "Failed to download layer '" + layerId + "': " +
-                  (future.isFailed() ? future.failure() : "future discarded"));
-          } else if (future.get() == 0) {
-            // We don't expect Docker registry to return empty response
-            // even with empty layers.
-            downloadPromise->fail(
-                "Failed to download layer '" + layerId + "': no content");
-          } else {
-            downloadPromise->set({layerId, downloadFile});
-          }
-        }));
-
-  return downloadPromise->future();
+  return reference;
 }
 
 
-Future<list<pair<string, string>>> RegistryPullerProcess::pull(
-    const Image::Name& imageName,
-    const Path& directory)
+Future<vector<string>> RegistryPullerProcess::pull(
+    const spec::ImageReference& _reference,
+    const string& directory)
 {
-  // TODO(jojy): Have one outgoing manifest request per image.
-  return registryClient_->getManifest(imageName)
-    .then(process::defer(self(), [this, directory, imageName](
-        const spec::v2::ImageManifest& manifest) {
-      return downloadLayers(manifest, imageName, directory);
-    }))
-    .then(process::defer(self(), [this, directory](
-        const Future<list<pair<string, string>>>& layerFutures)
-        -> Future<list<pair<string, string>>> {
-      return untarLayers(layerFutures, directory);
-    }))
-    .after(pullTimeout_, [imageName](
-        Future<list<pair<string, string>>> future) {
-      future.discard();
+  spec::ImageReference reference = normalize(_reference, defaultRegistryUrl);
 
-      return Failure("Timed out");
+  URI manifestUri;
+  if (reference.has_registry()) {
+    // TODO(jieyu): The user specified registry might contain port. We
+    // need to parse it and set the 'scheme' and 'port' accordingly.
+    manifestUri = uri::docker::manifest(
+        reference.repository(),
+        (reference.has_tag() ? reference.tag() : "latest"),
+        reference.registry());
+  } else {
+    const string registry = defaultRegistryUrl.domain.isSome()
+      ? defaultRegistryUrl.domain.get()
+      : stringify(defaultRegistryUrl.ip.get());
+
+    const Option<int> port = defaultRegistryUrl.port.isSome()
+      ? static_cast<int>(defaultRegistryUrl.port.get())
+      : Option<int>();
+
+    manifestUri = uri::docker::manifest(
+        reference.repository(),
+        (reference.has_tag() ? reference.tag() : "latest"),
+        registry,
+        defaultRegistryUrl.scheme,
+        port);
+  }
+
+  VLOG(1) << "Pulling image '" << reference
+          << "' from '" << manifestUri
+          << "' to '" << directory << "'";
+
+  return fetcher->fetch(manifestUri, directory)
+    .then(defer(self(), &Self::_pull, reference, directory));
+}
+
+
+Future<vector<string>> RegistryPullerProcess::_pull(
+    const spec::ImageReference& reference,
+    const string& directory)
+{
+  Try<string> _manifest = os::read(path::join(directory, "manifest"));
+  if (_manifest.isError()) {
+    return Failure("Failed to read the manifest: " + _manifest.error());
+  }
+
+  Try<spec::v2::ImageManifest> manifest = spec::v2::parse(_manifest.get());
+  if (manifest.isError()) {
+    return Failure("Failed to parse the manifest: " + manifest.error());
+  }
+
+  VLOG(1) << "The manifest for image '" << reference << "' is '"
+          << _manifest.get() << "'";
+
+  // NOTE: This can be a CHECK (i.e., shouldn't happen). However, in
+  // case docker has bugs, we return a Failure instead.
+  if (manifest->fslayers_size() != manifest->history_size()) {
+    return Failure("'fsLayers' and 'history' have different size in manifest");
+  }
+
+  return fetchBlobs(reference, directory, manifest.get())
+    .then(defer(self(),
+                &Self::__pull,
+                reference,
+                directory,
+                manifest.get(),
+                lambda::_1));
+}
+
+
+Future<vector<string>> RegistryPullerProcess::__pull(
+    const spec::ImageReference& reference,
+    const string& directory,
+    const spec::v2::ImageManifest& manifest,
+    const hashset<string>& blobSums)
+{
+  vector<string> layerIds;
+  list<Future<Nothing>> futures;
+
+  for (int i = 0; i < manifest.fslayers_size(); i++) {
+    CHECK(manifest.history(i).has_v1());
+    const spec::v1::ImageManifest& v1 = manifest.history(i).v1();
+    const string& blobSum = manifest.fslayers(i).blobsum();
+
+    // NOTE: We put parent layer ids in front because that's what the
+    // provisioner backends assume.
+    layerIds.insert(layerIds.begin(), v1.id());
+
+    // Skip if the layer is already in the store.
+    if (os::exists(paths::getImageLayerPath(storeDir, v1.id()))) {
+      continue;
+    }
+
+    const string layerPath = path::join(directory, v1.id());
+    const string tar = path::join(directory, blobSum);
+    const string rootfs = paths::getImageLayerRootfsPath(layerPath);
+    const string json = paths::getImageLayerManifestPath(layerPath);
+
+    VLOG(1) << "Extracting layer tar ball '" << tar
+            << " to rootfs '" << rootfs << "'";
+
+    // NOTE: This will create 'layerPath' as well.
+    Try<Nothing> mkdir = os::mkdir(rootfs, true);
+    if (mkdir.isError()) {
+      return Failure(
+          "Failed to create rootfs directory '" + rootfs + "' "
+          "for layer '" + v1.id() + "': " + mkdir.error());
+    }
+
+    Try<Nothing> write = os::write(json, stringify(JSON::protobuf(v1)));
+    if (write.isError()) {
+      return Failure(
+          "Failed to save the layer manifest for layer '" +
+          v1.id() + "': " + write.error());
+    }
+
+    futures.push_back(command::untar(Path(tar), Path(rootfs)));
+  }
+
+  return collect(futures)
+    .then([=]() -> Future<vector<string>> {
+      // Remove the tarballs after the extraction.
+      foreach (const string& blobSum, blobSums) {
+        const string tar = path::join(directory, blobSum);
+
+        Try<Nothing> rm = os::rm(tar);
+        if (rm.isError()) {
+          return Failure(
+              "Failed to remove '" + tar + "' "
+              "after extraction: " + rm.error());
+        }
+      }
+
+      return layerIds;
     });
 }
 
 
-Future<list<pair<string, string>>> RegistryPullerProcess::downloadLayers(
-    const spec::v2::ImageManifest& manifest,
-    const Image::Name& imageName,
-    const Path& directory)
+Future<hashset<string>> RegistryPullerProcess::fetchBlobs(
+    const spec::ImageReference& reference,
+    const string& directory,
+    const spec::v2::ImageManifest& manifest)
 {
-  list<Future<pair<string, string>>> downloadFutures;
-
-  CHECK_EQ(manifest.fslayers_size(), manifest.history_size());
+  // First, find all the blobs that need to be fetched.
+  //
+  // NOTE: There might exist duplicated blob sums in 'fsLayers'. We
+  // just need to fetch one of them.
+  hashset<string> blobSums;
 
   for (int i = 0; i < manifest.fslayers_size(); i++) {
     CHECK(manifest.history(i).has_v1());
+    const spec::v1::ImageManifest& v1 = manifest.history(i).v1();
 
-    downloadFutures.push_back(
-        downloadLayer(imageName,
-                      directory,
-                      manifest.fslayers(i).blobsum(),
-                      manifest.history(i).v1().id()));
+    // Check if the layer is in the store or not. If yes, skip the
+    // unnecessary fetching.
+    if (os::exists(paths::getImageLayerPath(storeDir, v1.id()))) {
+      continue;
+    }
+
+    const string& blobSum = manifest.fslayers(i).blobsum();
+
+    VLOG(1) << "Fetching blob '" << blobSum << "' for layer '"
+            << v1.id() << "' of image '" << reference << "'";
+
+    blobSums.insert(blobSum);
   }
 
-  // TODO(jojy): Delete downloaded files in the directory on discard and
-  // failure?
-  // TODO(jojy): Iterate through the futures and log the failed future.
-  return collect(downloadFutures);
-}
+  // Now, actually fetch the blobs.
+  list<Future<Nothing>> futures;
 
+  foreach (const string& blobSum, blobSums) {
+    URI blobUri;
 
-Future<list<pair<string, string>>> RegistryPullerProcess::untarLayers(
-    const Future<list<pair<string, string>>>& layerFutures,
-    const Path& directory)
-{
-  list<Future<pair<string, string>>> untarFutures;
+    if (reference.has_registry()) {
+      // TODO(jieyu): The user specified registry might contain port. We
+      // need to parse it and set the 'scheme' and 'port' accordingly.
+      blobUri = uri::docker::blob(
+          reference.repository(),
+          blobSum,
+          reference.registry());
+    } else {
+      const string registry = defaultRegistryUrl.domain.isSome()
+        ? defaultRegistryUrl.domain.get()
+        : stringify(defaultRegistryUrl.ip.get());
 
-  pair<string, string> layerInfo;
-  foreach (layerInfo, layerFutures.get()) {
-    VLOG(1) << "Untarring layer '" << layerInfo.first
-            << "' downloaded from registry to directory '" << directory << "'";
-    untarFutures.emplace_back(
-        untarLayer(layerInfo.second, directory, layerInfo.first));
+      const Option<int> port = defaultRegistryUrl.port.isSome()
+        ? static_cast<int>(defaultRegistryUrl.port.get())
+        : Option<int>();
+
+      blobUri = uri::docker::blob(
+          reference.repository(),
+          blobSum,
+          registry,
+          defaultRegistryUrl.scheme,
+          port);
+    }
+
+    futures.push_back(fetcher->fetch(blobUri, directory));
   }
 
-  return collect(untarFutures);
+  return collect(futures)
+    .then([blobSums]() -> hashset<string> { return blobSums; });
 }
 
 } // namespace docker {

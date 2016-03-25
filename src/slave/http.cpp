@@ -14,11 +14,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <map>
 #include <memory>
 #include <sstream>
 #include <string>
-#include <vector>
 
 #include <mesos/executor/executor.hpp>
 
@@ -34,6 +32,7 @@
 
 #include <stout/foreach.hpp>
 #include <stout/json.hpp>
+#include <stout/jsonify.hpp>
 #include <stout/lambda.hpp>
 #include <stout/net.hpp>
 #include <stout/numify.hpp>
@@ -51,7 +50,7 @@
 #include "slave/slave.hpp"
 #include "slave/validation.hpp"
 
-
+using process::AUTHENTICATION;
 using process::Clock;
 using process::DESCRIPTION;
 using process::Future;
@@ -74,111 +73,95 @@ using process::http::UnsupportedMediaType;
 
 using process::metrics::internal::MetricsProcess;
 
-using std::map;
 using std::string;
-using std::vector;
 
 
 namespace mesos {
+
+static void json(JSON::ObjectWriter* writer, const TaskInfo& task)
+{
+  writer->field("id", task.task_id().value());
+  writer->field("name", task.name());
+  writer->field("slave_id", task.slave_id().value());
+  writer->field("resources", Resources(task.resources()));
+
+  if (task.has_command()) {
+    writer->field("command", task.command());
+  }
+  if (task.has_executor()) {
+    writer->field("executor_id", task.executor().executor_id().value());
+  }
+  if (task.has_discovery()) {
+    writer->field("discovery", JSON::Protobuf(task.discovery()));
+  }
+}
+
 namespace internal {
 namespace slave {
-
-
-// Pull in defnitions from common.
-using mesos::internal::model;
 
 // Pull in the process definitions.
 using process::http::Response;
 using process::http::Request;
 
 
-JSON::Object model(const TaskInfo& task)
+static void json(JSON::ObjectWriter* writer, const Executor& executor)
 {
-  JSON::Object object;
-  object.values["id"] = task.task_id().value();
-  object.values["name"] = task.name();
-  object.values["slave_id"] = task.slave_id().value();
-  object.values["resources"] = model(task.resources());
+  writer->field("id", executor.id.value());
+  writer->field("name", executor.info.name());
+  writer->field("source", executor.info.source());
+  writer->field("container", executor.containerId.value());
+  writer->field("directory", executor.directory);
+  writer->field("resources", executor.resources);
 
-  if (task.has_command()) {
-    object.values["command"] = model(task.command());
-  }
-  if (task.has_executor()) {
-    object.values["executor_id"] = task.executor().executor_id().value();
-  }
-  if (task.has_discovery()) {
-    object.values["discovery"] = JSON::protobuf(task.discovery());
-  }
+  writer->field("tasks", [&executor](JSON::ArrayWriter* writer) {
+    foreach (Task* task, executor.launchedTasks.values()) {
+      writer->element(*task);
+    }
+  });
 
-  return object;
+  writer->field("queued_tasks", [&executor](JSON::ArrayWriter* writer) {
+    foreach (const TaskInfo& task, executor.queuedTasks.values()) {
+      writer->element(task);
+    }
+  });
+
+  writer->field("completed_tasks", [&executor](JSON::ArrayWriter* writer) {
+    foreach (const std::shared_ptr<Task>& task, executor.completedTasks) {
+      writer->element(*task);
+    }
+
+    // NOTE: We add 'terminatedTasks' to 'completed_tasks' for
+    // simplicity.
+    // TODO(vinod): Use foreachvalue instead once LinkedHashmap
+    // supports it.
+    foreach (Task* task, executor.terminatedTasks.values()) {
+      writer->element(*task);
+    }
+  });
 }
 
 
-JSON::Object model(const Executor& executor)
+static void json(JSON::ObjectWriter* writer, const Framework& framework)
 {
-  JSON::Object object;
-  object.values["id"] = executor.id.value();
-  object.values["name"] = executor.info.name();
-  object.values["source"] = executor.info.source();
-  object.values["container"] = executor.containerId.value();
-  object.values["directory"] = executor.directory;
-  object.values["resources"] = model(executor.resources);
+  writer->field("id", framework.id().value());
+  writer->field("name", framework.info.name());
+  writer->field("user", framework.info.user());
+  writer->field("failover_timeout", framework.info.failover_timeout());
+  writer->field("checkpoint", framework.info.checkpoint());
+  writer->field("role", framework.info.role());
+  writer->field("hostname", framework.info.hostname());
 
-  JSON::Array tasks;
-  foreach (Task* task, executor.launchedTasks.values()) {
-    tasks.values.push_back(model(*task));
-  }
-  object.values["tasks"] = tasks;
+  writer->field("executors", [&framework](JSON::ArrayWriter* writer) {
+    foreachvalue (Executor* executor, framework.executors) {
+      writer->element(*executor);
+    }
+  });
 
-  JSON::Array queued;
-  foreach (const TaskInfo& task, executor.queuedTasks.values()) {
-    queued.values.push_back(model(task));
-  }
-  object.values["queued_tasks"] = queued;
-
-  JSON::Array completed;
-  foreach (const std::shared_ptr<Task>& task, executor.completedTasks) {
-    completed.values.push_back(model(*task));
-  }
-
-  // NOTE: We add 'terminatedTasks' to 'completed_tasks' for
-  // simplicity.
-  // TODO(vinod): Use foreachvalue instead once LinkedHashmap
-  // supports it.
-  foreach (Task* task, executor.terminatedTasks.values()) {
-    completed.values.push_back(model(*task));
-  }
-  object.values["completed_tasks"] = completed;
-
-  return object;
-}
-
-
-// Returns a JSON object modeled after a Framework.
-JSON::Object model(const Framework& framework)
-{
-  JSON::Object object;
-  object.values["id"] = framework.id().value();
-  object.values["name"] = framework.info.name();
-  object.values["user"] = framework.info.user();
-  object.values["failover_timeout"] = framework.info.failover_timeout();
-  object.values["checkpoint"] = framework.info.checkpoint();
-  object.values["role"] = framework.info.role();
-  object.values["hostname"] = framework.info.hostname();
-
-  JSON::Array executors;
-  foreachvalue (Executor* executor, framework.executors) {
-    executors.values.push_back(model(*executor));
-  }
-  object.values["executors"] = executors;
-
-  JSON::Array completedExecutors;
-  foreach (const Owned<Executor>& executor, framework.completedExecutors) {
-    completedExecutors.values.push_back(model(*executor));
-  }
-  object.values["completed_executors"] = completedExecutors;
-
-  return object;
+  writer->field("completed_executors", [&framework](JSON::ArrayWriter* writer) {
+    foreach (const Owned<Executor>& executor, framework.completedExecutors) {
+      writer->element(*executor);
+    }
+  });
 }
 
 
@@ -203,24 +186,21 @@ string Slave::Http::EXECUTOR_HELP() {
     TLDR(
         "Endpoint for the Executor HTTP API."),
     DESCRIPTION(
-        "This endpoint is used by the executors to interact with the ",
-        "agent via Call/Event messages."
-        "Returns 200 OK iff the initial SUBSCRIBE Call is successful."
-        "This would result in a streaming response via chunked "
-        "transfer encoding. The executors can process the response "
-        "incrementally."
-        "Returns 202 Accepted for all other Call messages iff the "
-        "request is accepted."));
+        "This endpoint is used by the executors to interact with the",
+        "agent via Call/Event messages.",
+        "Returns 200 OK iff the initial SUBSCRIBE Call is successful.",
+        "This would result in a streaming response via chunked",
+        "transfer encoding. The executors can process the response",
+        "incrementally.",
+        "Returns 202 Accepted for all other Call messages iff the",
+        "request is accepted."),
+    AUTHENTICATION(false));
 }
 
 
 Future<Response> Slave::Http::executor(const Request& request) const
 {
   // TODO(anand): Add metrics for rejected requests.
-
-  if (slave->state == Slave::RECOVERING) {
-    return ServiceUnavailable("Agent has not finished recovery");
-  }
 
   if (request.method != "POST") {
     return MethodNotAllowed(
@@ -261,7 +241,6 @@ Future<Response> Slave::Http::executor(const Request& request) const
 
   const executor::Call call = devolve(v1Call);
 
-
   Option<Error> error = validation::executor::call::validate(call);
 
   if (error.isSome()) {
@@ -282,6 +261,10 @@ Future<Response> Slave::Http::executor(const Request& request) const
       return NotAcceptable(
           string("Expecting 'Accept' to allow ") +
           "'" + APPLICATION_PROTOBUF + "' or '" + APPLICATION_JSON + "'");
+    }
+  } else {
+    if (slave->state == Slave::RECOVERING) {
+      return ServiceUnavailable("Agent has not finished recovery");
     }
   }
 
@@ -348,11 +331,16 @@ Future<Response> Slave::Http::executor(const Request& request) const
 
 string Slave::Http::FLAGS_HELP()
 {
-  return HELP(TLDR("Exposes the agent's flag configuration."));
+  return HELP(
+    TLDR("Exposes the agent's flag configuration."),
+    None(),
+    AUTHENTICATION(true));
 }
 
 
-Future<Response> Slave::Http::flags(const Request& request) const
+Future<Response> Slave::Http::flags(
+    const Request& request,
+    const Option<string>& /* principal */) const
 {
   JSON::Object object;
 
@@ -378,7 +366,8 @@ string Slave::Http::HEALTH_HELP()
         "Health check of the Slave."),
     DESCRIPTION(
         "Returns 200 OK iff the Slave is healthy.",
-        "Delayed responses are also indicative of poor health."));
+        "Delayed responses are also indicative of poor health."),
+    AUTHENTICATION(false));
 }
 
 
@@ -394,74 +383,169 @@ string Slave::Http::STATE_HELP() {
         "Information about state of the Slave."),
     DESCRIPTION(
         "This endpoint shows information about the frameworks, executors",
-        "and the slave's master as a JSON object."));
+        "and the slave's master as a JSON object.",
+        "",
+        "Example (**Note**: this is not exhaustive):",
+        "",
+        "```",
+        "{",
+        "    \"version\" : \"0.28.0\",",
+        "    \"git_sha\" : \"9d5889b5a265849886a533965f4aefefd1fbd103\",",
+        "    \"git_branch\" : \"refs/heads/master\",",
+        "    \"git_tag\" : \"0.28.0\",",
+        "    \"build_date\" : \"2016-02-15 10:00:28\"",
+        "    \"build_time\" : 1455559228,",
+        "    \"build_user\" : \"mesos-user\",",
+        "    \"start_time\" : 1455647422.88396,",
+        "    \"id\" : \"e2c38084-f6ea-496f-bce3-b6e07cea5e01-S0\",",
+        "    \"pid\" : \"slave(1)@127.0.1.1:5051\",",
+        "    \"hostname\" : \"localhost\",",
+        "    \"resources\" : {",
+        "         \"ports\" : \"[31000-32000]\",",
+        "         \"mem\" : 127816,",
+        "         \"disk\" : 804211,",
+        "         \"cpus\" : 32",
+        "    },",
+        "    \"attributes\" : {},",
+        "    \"master_hostname\" : \"localhost\",",
+        "    \"log_dir\" : \"/var/log\",",
+        "    \"external_log_file\" : \"mesos.log\",",
+        "    \"frameworks\" : [],",
+        "    \"completed_frameworks\" : [],",
+        "    \"flags\" : {",
+        "         \"gc_disk_headroom\" : \"0.1\",",
+        "         \"isolation\" : \"posix/cpu,posix/mem\",",
+        "         \"containerizers\" : \"mesos\",",
+        "         \"docker_socket\" : \"/var/run/docker.sock\",",
+        "         \"gc_delay\" : \"1weeks\",",
+        "         \"docker_remove_delay\" : \"6hrs\",",
+        "         \"port\" : \"5051\",",
+        "         \"systemd_runtime_directory\" : \"/run/systemd/system\",",
+        "         \"initialize_driver_logging\" : \"true\",",
+        "         \"cgroups_root\" : \"mesos\",",
+        "         \"fetcher_cache_size\" : \"2GB\",",
+        "         \"cgroups_hierarchy\" : \"/sys/fs/cgroup\",",
+        "         \"qos_correction_interval_min\" : \"0ns\",",
+        "         \"cgroups_cpu_enable_pids_and_tids_count\" : \"false\",",
+        "         \"sandbox_directory\" : \"/mnt/mesos/sandbox\",",
+        "         \"docker\" : \"docker\",",
+        "         \"help\" : \"false\",",
+        "         \"docker_stop_timeout\" : \"0ns\",",
+        "         \"master\" : \"127.0.0.1:5050\",",
+        "         \"logbufsecs\" : \"0\",",
+        "         \"docker_registry\" : \"https://registry-1.docker.io\",",
+        "         \"frameworks_home\" : \"\",",
+        "         \"cgroups_enable_cfs\" : \"false\",",
+        "         \"perf_interval\" : \"1mins\",",
+        "         \"docker_kill_orphans\" : \"true\",",
+        "         \"switch_user\" : \"true\",",
+        "         \"logging_level\" : \"INFO\",",
+        "         \"hadoop_home\" : \"\",",
+        "         \"strict\" : \"true\",",
+        "         \"executor_registration_timeout\" : \"1mins\",",
+        "         \"recovery_timeout\" : \"15mins\",",
+        "         \"revocable_cpu_low_priority\" : \"true\",",
+        "         \"docker_store_dir\" : \"/tmp/mesos/store/docker\",",
+        "         \"image_provisioner_backend\" : \"copy\",",
+        "         \"authenticatee\" : \"crammd5\",",
+        "         \"quiet\" : \"false\",",
+        "         \"executor_shutdown_grace_period\" : \"5secs\",",
+        "         \"fetcher_cache_dir\" : \"/tmp/mesos/fetch\",",
+        "         \"default_role\" : \"*\",",
+        "         \"work_dir\" : \"/tmp/mesos\",",
+        "         \"launcher_dir\" : \"/path/to/mesos/build/src\",",
+        "         \"registration_backoff_factor\" : \"1secs\",",
+        "         \"oversubscribed_resources_interval\" : \"15secs\",",
+        "         \"enforce_container_disk_quota\" : \"false\",",
+        "         \"container_disk_watch_interval\" : \"15secs\",",
+        "         \"disk_watch_interval\" : \"1mins\",",
+        "         \"cgroups_limit_swap\" : \"false\",",
+        "         \"hostname_lookup\" : \"true\",",
+        "         \"perf_duration\" : \"10secs\",",
+        "         \"appc_store_dir\" : \"/tmp/mesos/store/appc\",",
+        "         \"recover\" : \"reconnect\",",
+        "         \"version\" : \"false\"",
+        "    },",
+        "}",
+        "```"),
+    AUTHENTICATION(true));
 }
 
 
-Future<Response> Slave::Http::state(const Request& request) const
+Future<Response> Slave::Http::state(
+    const Request& request,
+    const Option<string>& /* principal */) const
 {
-  JSON::Object object;
-  object.values["version"] = MESOS_VERSION;
-
-  if (build::GIT_SHA.isSome()) {
-    object.values["git_sha"] = build::GIT_SHA.get();
+  if (slave->state == Slave::RECOVERING) {
+    return ServiceUnavailable("Agent has not finished recovery");
   }
 
-  if (build::GIT_BRANCH.isSome()) {
-    object.values["git_branch"] = build::GIT_BRANCH.get();
-  }
+  auto state = [this](JSON::ObjectWriter* writer) {
+    writer->field("version", MESOS_VERSION);
 
-  if (build::GIT_TAG.isSome()) {
-    object.values["git_tag"] = build::GIT_TAG.get();
-  }
-
-  object.values["build_date"] = build::DATE;
-  object.values["build_time"] = build::TIME;
-  object.values["build_user"] = build::USER;
-  object.values["start_time"] = slave->startTime.secs();
-  object.values["id"] = slave->info.id().value();
-  object.values["pid"] = string(slave->self());
-  object.values["hostname"] = slave->info.hostname();
-  object.values["resources"] = model(slave->info.resources());
-  object.values["attributes"] = model(slave->info.attributes());
-
-  if (slave->master.isSome()) {
-    Try<string> hostname = net::getHostname(slave->master.get().address.ip);
-    if (hostname.isSome()) {
-      object.values["master_hostname"] = hostname.get();
+    if (build::GIT_SHA.isSome()) {
+      writer->field("git_sha", build::GIT_SHA.get());
     }
-  }
 
-  if (slave->flags.log_dir.isSome()) {
-    object.values["log_dir"] = slave->flags.log_dir.get();
-  }
-
-  if (slave->flags.external_log_file.isSome()) {
-    object.values["external_log_file"] = slave->flags.external_log_file.get();
-  }
-
-  JSON::Array frameworks;
-  foreachvalue (Framework* framework, slave->frameworks) {
-    frameworks.values.push_back(model(*framework));
-  }
-  object.values["frameworks"] = frameworks;
-
-  JSON::Array completedFrameworks;
-  foreach (const Owned<Framework>& framework, slave->completedFrameworks) {
-    completedFrameworks.values.push_back(model(*framework));
-  }
-  object.values["completed_frameworks"] = completedFrameworks;
-
-  JSON::Object flags;
-  foreachpair (const string& name, const flags::Flag& flag, slave->flags) {
-    Option<string> value = flag.stringify(slave->flags);
-    if (value.isSome()) {
-      flags.values[name] = value.get();
+    if (build::GIT_BRANCH.isSome()) {
+      writer->field("git_branch", build::GIT_BRANCH.get());
     }
-  }
-  object.values["flags"] = flags;
 
-  return OK(object, request.url.query.get("jsonp"));
+    if (build::GIT_TAG.isSome()) {
+      writer->field("git_tag", build::GIT_TAG.get());
+    }
+
+    writer->field("build_date", build::DATE);
+    writer->field("build_time", build::TIME);
+    writer->field("build_user", build::USER);
+    writer->field("start_time", slave->startTime.secs());
+
+    writer->field("id", slave->info.id().value());
+    writer->field("pid", string(slave->self()));
+    writer->field("hostname", slave->info.hostname());
+
+    writer->field("resources", Resources(slave->info.resources()));
+    writer->field("attributes", Attributes(slave->info.attributes()));
+
+    if (slave->master.isSome()) {
+      Try<string> hostname = net::getHostname(slave->master.get().address.ip);
+      if (hostname.isSome()) {
+        writer->field("master_hostname", hostname.get());
+      }
+    }
+
+    if (slave->flags.log_dir.isSome()) {
+      writer->field("log_dir", slave->flags.log_dir.get());
+    }
+
+    if (slave->flags.external_log_file.isSome()) {
+      writer->field("external_log_file", slave->flags.external_log_file.get());
+    }
+
+    writer->field("frameworks", [this](JSON::ArrayWriter* writer) {
+      foreachvalue (Framework* framework, slave->frameworks) {
+        writer->element(*framework);
+      }
+    });
+
+    // Model all of the completed frameworks.
+    writer->field("completed_frameworks", [this](JSON::ArrayWriter* writer) {
+      foreach (const Owned<Framework>& framework, slave->completedFrameworks) {
+        writer->element(*framework);
+      }
+    });
+
+    writer->field("flags", [this](JSON::ObjectWriter* writer) {
+      foreachpair (const string& name, const flags::Flag& flag, slave->flags) {
+        Option<string> value = flag.stringify(slave->flags);
+        if (value.isSome()) {
+          writer->field(name, value.get());
+        }
+      }
+    });
+  };
+
+  return OK(jsonify(state), request.url.query.get("jsonp"));
 }
 
 } // namespace slave {
