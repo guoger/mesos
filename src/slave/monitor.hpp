@@ -47,8 +47,8 @@ public:
   ~ResourceMonitor();
 
   process::Future<process::http::Response> containers(
-      const lambda::function<process
-        ::Future<ContainerStatus>(list<ContainerID>)>& status,
+//      const lambda::function<process
+//        ::Future<list<ContainerStatus>>(list<ContainerID>)>& status,
       const process::http::Request& request);
 
 private:

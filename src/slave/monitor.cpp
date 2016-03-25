@@ -89,17 +89,18 @@ public:
   virtual ~ResourceMonitorProcess() {}
 
   Future<http::Response> containers(
-      const lambda::function<process
-        ::Future<ContainerStatus>(list<ContainerID>)>& status,
+//      const lambda::function<process
+//        ::Future<list<ContainerStatus>>(list<ContainerID>)>& status,
       const http::Request& request)
   {
     return usage()
-      .then(defer(
-          self(),
-          &Self::_containers,
-          lambda::_1,
-          status,
-          request));
+      .then(defer(self(), &Self::__statistics, lambda::_1, request));
+//      .then(defer(
+//          self(),
+//          &Self::_containers,
+//          lambda::_1,
+//          status,
+//          request));
   }
 
 protected:
@@ -224,14 +225,14 @@ ResourceMonitor::~ResourceMonitor()
 
 
 process::Future<process::http::Response> ResourceMonitor::containers(
-    const lambda::function<process
-      ::Future<ContainerStatus>(list<ContainerID>)>& status,
+//    const lambda::function<process
+//      ::Future<list<ContainerStatus>>(list<ContainerID>)>& status,
     const process::http::Request& request)
 {
   return dispatch(
       process.get(),
       &ResourceMonitorProcess::containers,
-      status,
+//      status,
       request);
 }
 

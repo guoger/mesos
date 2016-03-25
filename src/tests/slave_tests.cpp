@@ -1548,6 +1548,7 @@ TEST_F(SlaveTest, ContainersEndpointNoExecutors)
 }
 
 
+/*
 // This test checks /containers endpoint with 1 executor running
 TEST_F(SlaveTest, ContainersEndpoint)
 {
@@ -1659,6 +1660,7 @@ TEST_F(SlaveTest, ContainersEndpoint)
   driver.stop();
   driver.join();
 }
+*/
 
 
 // This test ensures that when a slave is shutting down, it will not

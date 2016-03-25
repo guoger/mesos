@@ -398,6 +398,10 @@ public:
   // Returns the resource usage information for all executors.
   process::Future<ResourceUsage> usage();
 
+  // Returns the container status with given ContainerID.
+  Future<list<ContainerStatus>> containerStatus(
+      list<ContainerID> containerIds);
+
   process::Future<process::http::Response> containers(
       const process::http::Request& request);
 

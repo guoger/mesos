@@ -5104,14 +5104,25 @@ Future<ResourceUsage> Slave::usage()
 }
 
 
+Future<list<ContainerStatus>> containerStatus(
+    list<ContainerID> containerIds)
+{
+  Future<list<ContainerStatus>> status;
+  return status;
+}
+
+
 Future<process::http::Response> Slave::containers(
     const process::http::Request& request)
 {
-  return usage()
-    .then(defer(self(), [this, request](ResourceUsage resourceUsage)
-        -> Future<process::http::Response> {
-        return _containers(resourceUsage, request);
-  }));
+  return monitor.containers(
+//      defer(self(), &Self::containerStatus),
+      request);
+//  return usage()
+//    .then(defer(self(), [this, request](ResourceUsage resourceUsage)
+//        -> Future<process::http::Response> {
+//        return _containers(resourceUsage, request);
+//  }));
 }
 
 
