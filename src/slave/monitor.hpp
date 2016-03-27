@@ -17,12 +17,16 @@
 #ifndef __SLAVE_MONITOR_HPP__
 #define __SLAVE_MONITOR_HPP__
 
+#include <list>
+
 #include <mesos/mesos.hpp>
 
 #include <process/future.hpp>
 #include <process/owned.hpp>
 
 #include <stout/lambda.hpp>
+
+using std::list;
 
 namespace mesos {
 namespace internal {
@@ -36,8 +40,14 @@ class ResourceMonitorProcess;
 class ResourceMonitor
 {
 public:
+  /*
   explicit ResourceMonitor(
       const lambda::function<process::Future<ResourceUsage>()>& usage);
+      */
+  explicit ResourceMonitor(
+      Containerizer* containerizer,
+      const lambda::function<process::Future<list<ContainerID>>()>& containerIds);
+
 
   ~ResourceMonitor();
 

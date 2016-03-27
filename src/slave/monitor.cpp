@@ -15,8 +15,11 @@
 // limitations under the License.
 
 #include <string>
+#include <list>
 
 #include <glog/logging.h>
+
+#include "slave/containerizer/containerizer.hpp"
 
 #include <process/collect.hpp>
 #include <process/defer.hpp>
@@ -35,6 +38,7 @@
 using namespace process;
 
 using std::string;
+using std::list;
 
 namespace mesos {
 namespace internal {
@@ -81,9 +85,11 @@ class ResourceMonitorProcess : public Process<ResourceMonitorProcess>
 {
 public:
   explicit ResourceMonitorProcess(
-      const lambda::function<Future<ResourceUsage>()>& _usage)
+      const Containerizer* _containerizer,
+      const lambda::function<Future<list<ContainerID>>()>& _containerIds)
     : ProcessBase("monitor"),
-      usage(_usage),
+//      containerizer(_containerizer),
+      containersIds(_containerIds),
       limiter(2, Seconds(1)) {} // 2 permits per second.
 
   virtual ~ResourceMonitorProcess() {}
@@ -106,16 +112,20 @@ private:
   // Returns the monitoring statistics. Requests have no parameters.
   Future<http::Response> statistics(const http::Request& request)
   {
-    return limiter.acquire()
-      .then(defer(self(), &Self::_statistics, request));
+    return http::OK();
+//    return limiter.acquire()
+//      .then(defer(self(), &Self::_statistics, request));
   }
 
   Future<http::Response> _statistics(const http::Request& request)
   {
+    return http::OK();
+    /*
     return usage()
       .then(defer(self(), &Self::__statistics, lambda::_1, request));
+      */
   }
-
+/*
   Future<http::Response> __statistics(
       const Future<ResourceUsage>& future,
       const http::Request& request)
@@ -147,9 +157,11 @@ private:
 
     return http::OK(result, request.url.query.get("jsonp"));
   }
+*/
+//  const Containerizer* containerizer;
 
   // Callback used to retrieve resource usage information from slave.
-  const lambda::function<Future<ResourceUsage>()> usage;
+  const lambda::function<Future<list<ContainerID>>()> containersIds;
 
   // Used to rate limit the statistics endpoint.
   RateLimiter limiter;
@@ -157,8 +169,9 @@ private:
 
 
 ResourceMonitor::ResourceMonitor(
-    const lambda::function<Future<ResourceUsage>()>& usage)
-  : process(new ResourceMonitorProcess(usage))
+    Containerizer* containerizer,
+    const lambda::function<process::Future<list<ContainerID>>()>& containerIds)
+  : process(new ResourceMonitorProcess(containerizer, containerIds))
 {
   spawn(process.get());
 }

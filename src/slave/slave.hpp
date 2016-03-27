@@ -398,6 +398,8 @@ public:
   // Returns the resource usage information for all executors.
   process::Future<ResourceUsage> usage();
 
+  Future<list<ContainerID>> containerIds();
+
   // Handle the second phase of shutting down an executor for those
   // executors that have not properly shutdown within a timeout.
   void shutdownExecutorTimeout(
