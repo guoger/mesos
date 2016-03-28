@@ -38,6 +38,7 @@
 #include "slave/constants.hpp"
 #include "slave/monitor.hpp"
 
+#include "tests/containerizer.hpp"
 #include "tests/mesos.hpp"
 
 using namespace process;
@@ -123,9 +124,9 @@ TEST(MonitorTest, NoExecutor)
 {
   TestContainerizer containerizer;
   ResourceMonitor monitor(
-      containerizer,
+      &containerizer,
       []() -> list<ContainerID> {
-    return list<ContainerID>;
+        return list<ContainerID>();
   });
 
   UPID upid("monitor", process::address());

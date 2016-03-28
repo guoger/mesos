@@ -5094,6 +5094,8 @@ void Slave::_qosCorrections(const Future<list<QoSCorrection>>& future)
 
 Future<list<ContainerID>> Slave::containerIds()
 {
+  ContainerID id;
+  id.set_value("XXX-YYY");
   list<ContainerID> ids;
   return ids;
 }

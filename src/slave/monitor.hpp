@@ -26,6 +26,8 @@
 
 #include <stout/lambda.hpp>
 
+#include "slave/containerizer/containerizer.hpp"
+
 using std::list;
 
 namespace mesos {

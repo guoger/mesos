@@ -19,8 +19,6 @@
 
 #include <glog/logging.h>
 
-#include "slave/containerizer/containerizer.hpp"
-
 #include <process/collect.hpp>
 #include <process/defer.hpp>
 #include <process/future.hpp>
@@ -112,22 +110,18 @@ private:
   // Returns the monitoring statistics. Requests have no parameters.
   Future<http::Response> statistics(const http::Request& request)
   {
-    return http::OK();
-//    return limiter.acquire()
-//      .then(defer(self(), &Self::_statistics, request));
+    return limiter.acquire()
+      .then(defer(self(), &Self::_statistics, request));
   }
 
   Future<http::Response> _statistics(const http::Request& request)
   {
-    return http::OK();
-    /*
-    return usage()
+    return containersIds()
       .then(defer(self(), &Self::__statistics, lambda::_1, request));
-      */
   }
-/*
+
   Future<http::Response> __statistics(
-      const Future<ResourceUsage>& future,
+      const Future<list<ContainerID>>& future,
       const http::Request& request)
   {
     if (!future.isReady()) {
@@ -138,7 +132,7 @@ private:
     }
 
     JSON::Array result;
-
+    /*
     foreach (const ResourceUsage::Executor& executor,
              future.get().executors()) {
       if (executor.has_statistics()) {
@@ -154,10 +148,10 @@ private:
         result.values.push_back(entry);
       }
     }
-
+    */
     return http::OK(result, request.url.query.get("jsonp"));
   }
-*/
+
 //  const Containerizer* containerizer;
 
   // Callback used to retrieve resource usage information from slave.
