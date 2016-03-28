@@ -186,7 +186,7 @@ TEST(MonitorTest, MissingStatistics)
 }
 
 
-// This test checks the retrieval of ContainerStatus
+// This test checks the retrieval of ContainerStatus with 1 executor
 TEST(MonitorTest, ContainerStatus)
 {
   FrameworkID frameworkId;
@@ -264,6 +264,132 @@ TEST(MonitorTest, ContainerStatus)
   status.values["source"] = "source";
   status.values["statistics"] = JSON::protobuf(statistics);
   status.values["container_status"] = JSON::protobuf(containerStatus);
+  expected.values.push_back(status);
+
+  Try<JSON::Array> result = JSON::parse<JSON::Array>(response.get().body);
+  ASSERT_SOME(result);
+  ASSERT_EQ(expected, result.get());
+}
+
+
+// This test checks the retrieval of ContainerStatus with 2 executors
+TEST(MonitorTest, ContainerStatusTwoExecutors)
+{
+  FrameworkID frameworkId;
+  frameworkId.set_value("framework");
+
+  ExecutorID executorId1;
+  executorId1.set_value("executor-1");
+
+  ExecutorID executorId2;
+  executorId2.set_value("executor-2");
+
+  ExecutorInfo executorInfo1;
+  executorInfo1.mutable_executor_id()->CopyFrom(executorId1);
+  executorInfo1.mutable_framework_id()->CopyFrom(frameworkId);
+  executorInfo1.set_name("executor-name-1");
+  executorInfo1.set_source("source");
+
+  ExecutorInfo executorInfo2;
+  executorInfo2.mutable_executor_id()->CopyFrom(executorId2);
+  executorInfo2.mutable_framework_id()->CopyFrom(frameworkId);
+  executorInfo2.set_name("executor-name-2");
+  executorInfo2.set_source("source");
+
+  ResourceStatistics statistics;
+  statistics.set_cpus_nr_periods(100);
+  statistics.set_cpus_nr_throttled(2);
+  statistics.set_cpus_user_time_secs(4);
+  statistics.set_cpus_system_time_secs(1);
+  statistics.set_cpus_throttled_time_secs(0.5);
+  statistics.set_cpus_limit(1.0);
+  statistics.set_mem_file_bytes(0);
+  statistics.set_mem_anon_bytes(0);
+  statistics.set_mem_mapped_file_bytes(0);
+  statistics.set_mem_rss_bytes(1024);
+  statistics.set_mem_limit_bytes(2048);
+  statistics.set_timestamp(0);
+
+  ContainerID containerId1;
+  containerId1.set_value("fake-container-id-1");
+
+  CgroupInfo_NetCls* netcls1 = new CgroupInfo_NetCls();
+  netcls1->set_classid(42);
+
+  CgroupInfo* cgroupInfo1 = new CgroupInfo;
+  cgroupInfo1->mutable_net_cls()->CopyFrom(*netcls1);
+
+  ContainerStatus containerStatus1;
+  containerStatus1.set_allocated_cgroup_info(cgroupInfo1);
+  NetworkInfo* networkInfo1 = containerStatus1.add_network_infos();
+  networkInfo1->set_ip_address("192.168.1.1");
+
+  ContainerID containerId2;
+  containerId2.set_value("fake-container-id-2");
+
+  CgroupInfo_NetCls* netcls2 = new CgroupInfo_NetCls();
+  netcls2->set_classid(66);
+
+  CgroupInfo* cgroupInfo2 = new CgroupInfo;
+  cgroupInfo2->mutable_net_cls()->CopyFrom(*netcls2);
+
+  ContainerStatus containerStatus2;
+  containerStatus2.set_allocated_cgroup_info(cgroupInfo2);
+  NetworkInfo* networkInfo2 = containerStatus2.add_network_infos();
+  networkInfo2->set_ip_address("192.168.1.2");
+
+  TestContainerizer containerizer;
+
+  EXPECT_CALL(containerizer, status(containerId1))
+    .WillOnce(Return(containerStatus1));
+
+  EXPECT_CALL(containerizer, status(containerId2))
+    .WillOnce(Return(containerStatus2));
+
+  ResourceMonitor monitor(
+      &containerizer,
+      [=]() -> Future<ResourceUsage> {
+        Resources resources = Resources::parse("cpus:1;mem:2").get();
+        ResourceUsage usage;
+
+        ResourceUsage::Executor* executor = usage.add_executors();
+        executor->mutable_executor_info()->CopyFrom(executorInfo2);
+        executor->mutable_allocated()->CopyFrom(resources);
+        executor->mutable_statistics()->CopyFrom(statistics);
+        executor->mutable_container_id()->CopyFrom(containerId2);
+
+        executor = usage.add_executors();
+        executor->mutable_executor_info()->CopyFrom(executorInfo1);
+        executor->mutable_allocated()->CopyFrom(resources);
+        executor->mutable_statistics()->CopyFrom(statistics);
+        executor->mutable_container_id()->CopyFrom(containerId1);
+
+        return usage;
+  });
+
+  http::Request request = http::createRequest(http::URL(), "GET");
+
+  Future<http::Response> response = monitor.containerStatus(request);
+
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(http::OK().status, response);
+  AWAIT_EXPECT_RESPONSE_HEADER_EQ(APPLICATION_JSON, "Content-Type", response);
+
+  JSON::Array expected;
+  JSON::Object status;
+  status.values["executor_id"] = "executor-2";
+  status.values["executor_name"] = "executor-name-2";
+  status.values["framework_id"] = "framework";
+  status.values["source"] = "source";
+  status.values["statistics"] = JSON::protobuf(statistics);
+  status.values["container_status"] = JSON::protobuf(containerStatus2);
+  expected.values.push_back(status);
+
+  status.values["executor_id"] = "executor-1";
+  status.values["executor_name"] = "executor-name-1";
+  status.values["framework_id"] = "framework";
+  status.values["source"] = "source";
+  status.values["statistics"] = JSON::protobuf(statistics);
+  status.values["container_status"] = JSON::protobuf(containerStatus1);
   expected.values.push_back(status);
 
   Try<JSON::Array> result = JSON::parse<JSON::Array>(response.get().body);
