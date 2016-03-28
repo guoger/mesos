@@ -41,7 +41,6 @@
 #include "module/manager.hpp"
 
 #include "slave/flags.hpp"
-#include "slave/monitor.hpp"
 #include "slave/slave.hpp"
 #include "slave/qos_controllers/load.hpp"
 
@@ -55,7 +54,6 @@ using namespace process;
 using mesos::internal::master::Master;
 
 using mesos::internal::slave::LoadQoSController;
-using mesos::internal::slave::ResourceMonitor;
 using mesos::internal::slave::Slave;
 
 using mesos::slave::QoSCorrection;

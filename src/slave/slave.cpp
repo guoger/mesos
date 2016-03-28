@@ -141,7 +141,7 @@ Slave::Slave(const std::string& id,
     files(_files),
     metrics(*this),
     gc(_gc),
-    monitor(defer(self(), &Self::usage)),
+    limiter(2, Seconds(1)),
     statusUpdateManager(_statusUpdateManager),
     masterPingTimeout(DEFAULT_MASTER_PING_TIMEOUT()),
     metaDir(paths::getMetaRootDir(flags.work_dir)),
@@ -739,6 +739,16 @@ void Slave::initialize()
         Http::HEALTH_HELP(),
         [http](const process::http::Request& request) {
           return http.health(request);
+        });
+  route("/monitor/statistics",
+        Http::STATISTICS_HELP(),
+        [http](const process::http::Request& request) {
+          return http.statistics(request);
+        });
+  route("/monitor/statistics.json",
+        Http::STATISTICS_HELP(),
+        [http](const process::http::Request& request) {
+          return http.statistics(request);
         });
 
   // Expose the log file for the webui. Fall back to 'log_dir' if
@@ -4997,6 +5007,47 @@ void Slave::_forwardOversubscribed(const Future<Resources>& oversubscribable)
   delay(flags.oversubscribed_resources_interval,
         self(),
         &Self::forwardOversubscribed);
+}
+
+
+Future<process::http::Response> Slave::statistics(
+    const process::http::Request& request)
+{
+  return usage()
+    .then(defer(self(), &Slave::_statistics, lambda::_1, request));
+}
+
+
+Future<process::http::Response> Slave::_statistics(
+    const process::Future<ResourceUsage>& future,
+    const process::http::Request& request)
+{
+  if (!future.isReady()) {
+    LOG(WARNING) << "Could not collect resource usage: "
+                 << (future.isFailed() ? future.failure() : "discarded");
+
+    return process::http::InternalServerError();
+  }
+
+  JSON::Array result;
+
+  foreach (const ResourceUsage::Executor& executor,
+           future.get().executors()) {
+    if (executor.has_statistics()) {
+      const ExecutorInfo info = executor.executor_info();
+
+      JSON::Object entry;
+      entry.values["framework_id"] = info.framework_id().value();
+      entry.values["executor_id"] = info.executor_id().value();
+      entry.values["executor_name"] = info.name();
+      entry.values["source"] = info.source();
+      entry.values["statistics"] = JSON::protobuf(executor.statistics());
+
+      result.values.push_back(entry);
+    }
+  }
+
+  return process::http::OK(result, request.url.query.get("jsonp"));
 }
 
 

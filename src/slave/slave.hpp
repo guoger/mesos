@@ -42,6 +42,7 @@
 #include <process/http.hpp>
 #include <process/future.hpp>
 #include <process/owned.hpp>
+#include <process/limiter.hpp>
 #include <process/process.hpp>
 #include <process/protobuf.hpp>
 
@@ -71,7 +72,6 @@
 #include "slave/flags.hpp"
 #include "slave/gc.hpp"
 #include "slave/metrics.hpp"
-#include "slave/monitor.hpp"
 #include "slave/paths.hpp"
 #include "slave/state.hpp"
 
@@ -445,10 +445,16 @@ private:
         const process::http::Request& request,
         const Option<std::string>& /* principal */) const;
 
+    // /slave/monitor/statistics
+    // /slave/monitor/statistics.json
+    process::Future<process::http::Response> statistics(
+        const process::http::Request& request) const;
+
     static std::string EXECUTOR_HELP();
     static std::string FLAGS_HELP();
     static std::string HEALTH_HELP();
     static std::string STATE_HELP();
+    static std::string STATISTICS_HELP();
 
   private:
     Slave* slave;
@@ -499,6 +505,13 @@ private:
   void _forwardOversubscribed(
       const process::Future<Resources>& oversubscribable);
 
+  process::Future<process::http::Response> statistics(
+      const process::http::Request& request);
+
+  process::Future<process::http::Response> _statistics(
+      const process::Future<ResourceUsage>& future,
+      const process::http::Request& request);
+
   const Flags flags;
 
   SlaveInfo info;
@@ -532,7 +545,8 @@ private:
 
   GarbageCollector* gc;
 
-  ResourceMonitor monitor;
+  // Used to rate limit the statistics endpoint.
+  RateLimiter limiter;
 
   StatusUpdateManager* statusUpdateManager;
 
