@@ -43,7 +43,7 @@ class ResourceMonitor
 {
 public:
   explicit ResourceMonitor(
-      const Containerizer* containerizer,
+      Containerizer* containerizer,
       const lambda::function<process
       ::Future<list<ContainerID>>()>& containerIds,
       const lambda::function<process::Future<ResourceUsage>()>& usage);

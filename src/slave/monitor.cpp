@@ -81,12 +81,22 @@ class ResourceMonitorProcess : public Process<ResourceMonitorProcess>
 {
 public:
   explicit ResourceMonitorProcess(
+      Containerizer* _containerizer,
+      const lambda::function<Future<list<ContainerID>>()>& _containerIds,
       const lambda::function<Future<ResourceUsage>()>& _usage)
     : ProcessBase("monitor"),
+      containerizer(_containerizer),
+      containerIds(_containerIds),
       usage(_usage),
       limiter(2, Seconds(1)) {} // 2 permits per second.
 
   virtual ~ResourceMonitorProcess() {}
+
+  Future<http::Response> containerStatus(const http::Request& request)
+  {
+    return containerIds()
+      .then(defer(self(), &Self::_containerIds, lambda::_1, request));
+  }
 
 protected:
   virtual void initialize()
@@ -148,6 +158,25 @@ private:
     return http::OK(result, request.url.query.get("jsonp"));
   }
 
+  Future<http::Response> _containerIds(
+      const Future<list<ContainerID>>& future,
+      const http::Request& request)
+  {
+    JSON::Array result;
+    if (future.isReady()) {
+      foreach (const ContainerID& id, future.get()) {
+        containerizer->status(id);
+      }
+    }
+    return http::OK(result, request.url.query.get("jsonp"));
+  }
+
+  // Containerizer used to collect resource usage and container status.
+  Containerizer* containerizer;
+
+  // Callback used to retrieve list of container IDs.
+  const lambda::function<Future<list<ContainerID>>()> containerIds;
+
   // Callback used to retrieve resource usage information from slave.
   const lambda::function<Future<ResourceUsage>()> usage;
 
@@ -157,10 +186,10 @@ private:
 
 
 ResourceMonitor::ResourceMonitor(
-    const Containerizer* containerizer,
+    Containerizer* containerizer,
     const lambda::function<Future<list<ContainerID>>()>& containerIds,
     const lambda::function<Future<ResourceUsage>()>& usage)
-  : process(new ResourceMonitorProcess(usage))
+  : process(new ResourceMonitorProcess(containerizer, containerIds, usage))
 {
   spawn(process.get());
 }
