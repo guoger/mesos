@@ -37,6 +37,7 @@
 #include "slave/constants.hpp"
 #include "slave/monitor.hpp"
 
+#include "tests/containerizer.hpp"
 #include "tests/mesos.hpp"
 
 using namespace process;
@@ -81,16 +82,30 @@ TEST(MonitorTest, Statistics)
   statistics.set_mem_limit_bytes(2048);
   statistics.set_timestamp(0);
 
-  ResourceMonitor monitor([=]() -> Future<ResourceUsage> {
-    Resources resources = Resources::parse("cpus:1;mem:2").get();
+  ContainerID containerId;
+  containerId.set_value("abc-xyz");
 
-    ResourceUsage usage;
-    ResourceUsage::Executor* executor = usage.add_executors();
-    executor->mutable_executor_info()->CopyFrom(executorInfo);
-    executor->mutable_allocated()->CopyFrom(resources);
-    executor->mutable_statistics()->CopyFrom(statistics);
+  TestContainerizer containerizer;
 
-    return usage;
+  ResourceMonitor monitor(
+      &containerizer,
+      [=]() -> Future<list<ContainerID>> {
+        list<ContainerID> containerIds;
+        containerIds.push_back(containerId);
+
+        return containerIds;
+      },
+      [=]() -> Future<ResourceUsage> {
+        Resources resources = Resources::parse("cpus:1;mem:2").get();
+
+        ResourceUsage usage;
+        ResourceUsage::Executor* executor = usage.add_executors();
+        executor->mutable_executor_info()->CopyFrom(executorInfo);
+        executor->mutable_allocated()->CopyFrom(resources);
+        executor->mutable_statistics()->CopyFrom(statistics);
+        executor->mutable_container_id()->CopyFrom(containerId);
+
+        return usage;
   });
 
   UPID upid("monitor", process::address());
@@ -119,8 +134,14 @@ TEST(MonitorTest, Statistics)
 // endpoint when there is no executor running.
 TEST(MonitorTest, NoExecutor)
 {
-  ResourceMonitor monitor([]() -> Future<ResourceUsage> {
-    return ResourceUsage();
+  TestContainerizer containerizer;
+  ResourceMonitor monitor(
+      &containerizer,
+      []() -> Future<list<ContainerID>> {
+        return list<ContainerID>();
+      },
+      []() -> Future<ResourceUsage> {
+        return ResourceUsage();
   });
 
   UPID upid("monitor", process::address());
@@ -137,27 +158,41 @@ TEST(MonitorTest, NoExecutor)
 // endpoint when statistics is missing in ResourceUsage.
 TEST(MonitorTest, MissingStatistics)
 {
-  ResourceMonitor monitor([]() -> Future<ResourceUsage> {
-    FrameworkID frameworkId;
-    frameworkId.set_value("framework");
+  FrameworkID frameworkId;
+  frameworkId.set_value("framework");
 
-    ExecutorID executorId;
-    executorId.set_value("executor");
+  ExecutorID executorId;
+  executorId.set_value("executor");
 
-    ExecutorInfo executorInfo;
-    executorInfo.mutable_executor_id()->CopyFrom(executorId);
-    executorInfo.mutable_framework_id()->CopyFrom(frameworkId);
-    executorInfo.set_name("name");
-    executorInfo.set_source("source");
+  ExecutorInfo executorInfo;
+  executorInfo.mutable_executor_id()->CopyFrom(executorId);
+  executorInfo.mutable_framework_id()->CopyFrom(frameworkId);
+  executorInfo.set_name("name");
+  executorInfo.set_source("source");
 
-    Resources resources = Resources::parse("cpus:1;mem:2").get();
+  Resources resources = Resources::parse("cpus:1;mem:2").get();
 
-    ResourceUsage usage;
-    ResourceUsage::Executor* executor = usage.add_executors();
-    executor->mutable_executor_info()->CopyFrom(executorInfo);
-    executor->mutable_allocated()->CopyFrom(resources);
+  ContainerID containerId;
+  containerId.set_value("abc-xyz");
 
-    return usage;
+  TestContainerizer containerizer;
+
+  ResourceMonitor monitor(
+      &containerizer,
+      [=]() -> Future<list<ContainerID>> {
+        list<ContainerID> containerIds;
+        containerIds.push_back(containerId);
+
+        return containerIds;
+  },
+      [=]() -> Future<ResourceUsage> {
+        ResourceUsage usage;
+        ResourceUsage::Executor* executor = usage.add_executors();
+        executor->mutable_executor_info()->CopyFrom(executorInfo);
+        executor->mutable_allocated()->CopyFrom(resources);
+        executor->mutable_container_id()->CopyFrom(containerId);
+
+        return usage;
   });
 
   UPID upid("monitor", process::address());

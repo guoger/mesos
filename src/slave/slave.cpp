@@ -141,7 +141,9 @@ Slave::Slave(const std::string& id,
     files(_files),
     metrics(*this),
     gc(_gc),
-    monitor(defer(self(), &Self::usage)),
+    monitor(_containerizer,
+        defer(self(), &Self::containerIds),
+        defer(self(), &Self::usage)),
     statusUpdateManager(_statusUpdateManager),
     masterPingTimeout(DEFAULT_MASTER_PING_TIMEOUT()),
     metaDir(paths::getMetaRootDir(flags.work_dir)),
@@ -5089,6 +5091,12 @@ void Slave::_qosCorrections(const Future<list<QoSCorrection>>& future)
                    << " is not supported";
     }
   }
+}
+
+
+Future<list<ContainerID>> Slave::containerIds()
+{
+  return list<ContainerID>();
 }
 
 

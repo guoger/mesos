@@ -395,6 +395,9 @@ public:
       const process::Future<std::list<
           mesos::slave::QoSCorrection>>& correction);
 
+  // Returns a list of ContainerID
+  process::Future<list<ContainerID>> containerIds();
+
   // Returns the resource usage information for all executors.
   process::Future<ResourceUsage> usage();
 

@@ -157,6 +157,8 @@ private:
 
 
 ResourceMonitor::ResourceMonitor(
+    const Containerizer* containerizer,
+    const lambda::function<Future<list<ContainerID>>()>& containerIds,
     const lambda::function<Future<ResourceUsage>()>& usage)
   : process(new ResourceMonitorProcess(usage))
 {
