@@ -14,6 +14,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <list>
 #include <string>
 
 #include <glog/logging.h>
@@ -34,6 +35,7 @@
 
 using namespace process;
 
+using std::list;
 using std::string;
 
 namespace mesos {
@@ -82,11 +84,9 @@ class ResourceMonitorProcess : public Process<ResourceMonitorProcess>
 public:
   explicit ResourceMonitorProcess(
       Containerizer* _containerizer,
-      const lambda::function<Future<list<ContainerID>>()>& _containerIds,
       const lambda::function<Future<ResourceUsage>()>& _usage)
     : ProcessBase("monitor"),
       containerizer(_containerizer),
-      containerIds(_containerIds),
       usage(_usage),
       limiter(2, Seconds(1)) {} // 2 permits per second.
 
@@ -94,8 +94,8 @@ public:
 
   Future<http::Response> containerStatus(const http::Request& request)
   {
-    return containerIds()
-      .then(defer(self(), &Self::_containerIds, lambda::_1, request));
+    return usage()
+      .then(defer(self(), &Self::_containerStatus, lambda::_1, request));
   }
 
 protected:
@@ -158,24 +158,72 @@ private:
     return http::OK(result, request.url.query.get("jsonp"));
   }
 
-  Future<http::Response> _containerIds(
-      const Future<list<ContainerID>>& future,
+  Future<http::Response> _containerStatus(
+      const Future<ResourceUsage>& usageFuture,
       const http::Request& request)
   {
+    if (!usageFuture.isReady()) {
+      LOG(WARNING) << "Could not collect resource usage: "
+                   << (usageFuture
+                       .isFailed() ? usageFuture.failure() : "discarded");
+
+      return http::InternalServerError();
+    }
+
+    list<Future<ContainerStatus>> futures;
+
+    foreach (const ResourceUsage::Executor& executor,
+             usageFuture.get().executors()) {
+      futures.push_back(containerizer->status(executor.container_id()));
+    }
+
+    return await(futures)
+      .then(defer(self(),
+          &Self::__containerStatus,
+          futures,
+          usageFuture,
+          request));
+  }
+
+  Future<http::Response> __containerStatus(
+      const list<Future<ContainerStatus>>& statusFutures,
+      const Future<ResourceUsage>& usageFuture,
+      const http::Request& request)
+  {
+    CHECK_EQ(statusFutures.size(), (size_t) usageFuture->executors_size());
+
     JSON::Array result;
-    if (future.isReady()) {
-      foreach (const ContainerID& id, future.get()) {
-        containerizer->status(id);
+
+    size_t i = 0;
+    foreach (const Future<ContainerStatus>& future, statusFutures) {
+      const ResourceUsage::Executor& executor =
+          usageFuture.get().executors(i++);
+      JSON::Object entry;
+
+      if (executor.has_statistics()) {
+        const ExecutorInfo info = executor.executor_info();
+        entry.values["framework_id"] = info.framework_id().value();
+        entry.values["executor_id"] = info.executor_id().value();
+        entry.values["executor_name"] = info.name();
+        entry.values["source"] = info.source();
+        entry.values["statistics"] = JSON::protobuf(executor.statistics());
+
+        if (future.isReady()) {
+          entry.values["container_status"] = JSON::protobuf(future.get());
+        } else {
+          LOG(WARNING) << "Failed to get container status for executor '"
+                       << executor.executor_info().executor_id() << "'";
+        }
+
+        result.values.push_back(entry);
       }
     }
+
     return http::OK(result, request.url.query.get("jsonp"));
   }
 
-  // Containerizer used to collect resource usage and container status.
+  // Containerizer used to collect container status.
   Containerizer* containerizer;
-
-  // Callback used to retrieve list of container IDs.
-  const lambda::function<Future<list<ContainerID>>()> containerIds;
 
   // Callback used to retrieve resource usage information from slave.
   const lambda::function<Future<ResourceUsage>()> usage;
@@ -187,9 +235,8 @@ private:
 
 ResourceMonitor::ResourceMonitor(
     Containerizer* containerizer,
-    const lambda::function<Future<list<ContainerID>>()>& containerIds,
     const lambda::function<Future<ResourceUsage>()>& usage)
-  : process(new ResourceMonitorProcess(containerizer, containerIds, usage))
+  : process(new ResourceMonitorProcess(containerizer, usage))
 {
   spawn(process.get());
 }
@@ -199,6 +246,16 @@ ResourceMonitor::~ResourceMonitor()
 {
   terminate(process.get());
   wait(process.get());
+}
+
+
+Future<http::Response> ResourceMonitor::containerStatus(
+    const http::Request& request)
+{
+  return dispatch(
+      process.get(),
+      &ResourceMonitorProcess::containerStatus,
+      request);
 }
 
 } // namespace slave {

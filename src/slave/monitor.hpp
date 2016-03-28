@@ -44,11 +44,12 @@ class ResourceMonitor
 public:
   explicit ResourceMonitor(
       Containerizer* containerizer,
-      const lambda::function<process
-      ::Future<list<ContainerID>>()>& containerIds,
       const lambda::function<process::Future<ResourceUsage>()>& usage);
 
   ~ResourceMonitor();
+
+  process::Future<process::http::Response> containerStatus(
+      const process::http::Request& request);
 
 private:
   process::Owned<ResourceMonitorProcess> process;
