@@ -589,8 +589,35 @@ string Slave::Http::STATISTICS_HELP()
 
 Future<Response> Slave::Http::statistics(const Request& request) const
 {
-  return slave->limiter.acquire()
-    .then(defer(slave->self(), &Slave::statistics, request));
+  return slave->statisticsLimiter.acquire()
+    .then(defer(slave->self(), &Slave::usage))
+    .then([=](const Future<ResourceUsage>& usage) -> Future<Response> {
+      JSON::Array result;
+
+      foreach (const ResourceUsage::Executor& executor,
+               usage.get().executors()) {
+        if (executor.has_statistics()) {
+          const ExecutorInfo info = executor.executor_info();
+
+          JSON::Object entry;
+          entry.values["framework_id"] = info.framework_id().value();
+          entry.values["executor_id"] = info.executor_id().value();
+          entry.values["executor_name"] = info.name();
+          entry.values["source"] = info.source();
+          entry.values["statistics"] = JSON::protobuf(executor.statistics());
+
+          result.values.push_back(entry);
+        }
+      }
+
+      return process::http::OK(result, request.url.query.get("jsonp"));
+    })
+    .repair([](const Future<Response>& future) {
+      LOG(WARNING) << "Could not collect resource usage: "
+                   << (future.isFailed() ? future.failure() : "discarded");
+
+      return process::http::InternalServerError();
+    });
 }
 
 } // namespace slave {

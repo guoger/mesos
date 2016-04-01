@@ -141,7 +141,7 @@ Slave::Slave(const std::string& id,
     files(_files),
     metrics(*this),
     gc(_gc),
-    limiter(2, Seconds(1)),
+    statisticsLimiter(2, Seconds(1)),
     statusUpdateManager(_statusUpdateManager),
     masterPingTimeout(DEFAULT_MASTER_PING_TIMEOUT()),
     metaDir(paths::getMetaRootDir(flags.work_dir)),
@@ -5010,47 +5010,6 @@ void Slave::_forwardOversubscribed(const Future<Resources>& oversubscribable)
 }
 
 
-Future<process::http::Response> Slave::statistics(
-    const process::http::Request& request)
-{
-  return usage()
-    .then(defer(self(), &Slave::_statistics, lambda::_1, request));
-}
-
-
-Future<process::http::Response> Slave::_statistics(
-    const process::Future<ResourceUsage>& future,
-    const process::http::Request& request)
-{
-  if (!future.isReady()) {
-    LOG(WARNING) << "Could not collect resource usage: "
-                 << (future.isFailed() ? future.failure() : "discarded");
-
-    return process::http::InternalServerError();
-  }
-
-  JSON::Array result;
-
-  foreach (const ResourceUsage::Executor& executor,
-           future.get().executors()) {
-    if (executor.has_statistics()) {
-      const ExecutorInfo info = executor.executor_info();
-
-      JSON::Object entry;
-      entry.values["framework_id"] = info.framework_id().value();
-      entry.values["executor_id"] = info.executor_id().value();
-      entry.values["executor_name"] = info.name();
-      entry.values["source"] = info.source();
-      entry.values["statistics"] = JSON::protobuf(executor.statistics());
-
-      result.values.push_back(entry);
-    }
-  }
-
-  return process::http::OK(result, request.url.query.get("jsonp"));
-}
-
-
 void Slave::qosCorrections()
 {
   qosController->corrections()
@@ -5198,6 +5157,8 @@ Future<ResourceUsage> Slave::usage()
   // Owned (or C++14 lambda generalized capture is supported).
   Owned<ResourceUsage> usage(new ResourceUsage());
   list<Future<ResourceStatistics>> futures;
+
+  std::cout << "Slave::usage" << std::endl;
 
   foreachvalue (const Framework* framework, frameworks) {
     foreachvalue (const Executor* executor, framework->executors) {

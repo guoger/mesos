@@ -1701,6 +1701,39 @@ TEST_F(SlaveTest, StatisticsEndpointMissingStatistics)
 }
 
 
+// This test verifies the correct response of /monitor/statistics endpoint
+// when ResourceUsage collection fails.
+TEST_F(SlaveTest, StatisticsEndpointGetResourceUsageFailed)
+{
+  Try<Owned<cluster::Master>> master = StartMaster();
+  ASSERT_SOME(master);
+
+  MockExecutor exec(DEFAULT_EXECUTOR_ID);
+  TestContainerizer containerizer(&exec);
+  StandaloneMasterDetector detector(master.get()->pid);
+
+  MockSlave slave(CreateSlaveFlags(), &detector, &containerizer);
+
+  EXPECT_CALL(slave, usage())
+    .WillOnce(Return(Failure("Resource Collection Failure")));
+
+  spawn(slave);
+
+  Future<Response> response = process::http::get(
+      slave.self(),
+      "monitor/statistics",
+      None(),
+      createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+
+  AWAIT_READY(response);
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(
+      http::InternalServerError().status, response);
+
+  terminate(slave);
+  wait(slave);
+}
+
+
 // This is an end-to-end test that verifies that the slave returns the
 // correct ResourceUsage based on the currently running executors, and
 // the values returned by the /monitor/statistics endpoint are as expected.

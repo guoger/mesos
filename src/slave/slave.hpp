@@ -396,7 +396,7 @@ public:
           mesos::slave::QoSCorrection>>& correction);
 
   // Returns the resource usage information for all executors.
-  process::Future<ResourceUsage> usage();
+  virtual process::Future<ResourceUsage> usage();
 
   // Handle the second phase of shutting down an executor for those
   // executors that have not properly shutdown within a timeout.
@@ -505,13 +505,6 @@ private:
   void _forwardOversubscribed(
       const process::Future<Resources>& oversubscribable);
 
-  process::Future<process::http::Response> statistics(
-      const process::http::Request& request);
-
-  process::Future<process::http::Response> _statistics(
-      const process::Future<ResourceUsage>& future,
-      const process::http::Request& request);
-
   const Flags flags;
 
   SlaveInfo info;
@@ -546,7 +539,7 @@ private:
   GarbageCollector* gc;
 
   // Used to rate limit the statistics endpoint.
-  RateLimiter limiter;
+  RateLimiter statisticsLimiter;
 
   StatusUpdateManager* statusUpdateManager;
 
