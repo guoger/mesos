@@ -397,6 +397,9 @@ public:
   // Returns the resource usage information for all executors.
   virtual process::Future<ResourceUsage> usage();
 
+  // Returns the resource usage information for all executors.
+  virtual Future<std::list<JSON::Object>> containersStatus();
+
   // Handle the second phase of shutting down an executor for those
   // executors that have not properly shutdown within a timeout.
   void shutdownExecutorTimeout(
@@ -450,17 +453,26 @@ private:
     process::Future<process::http::Response> statistics(
         const process::http::Request& request) const;
 
+    // /slave/containers
+    process::Future<process::http::Response> containers(
+        const process::http::Request& request) const;
+
     static std::string EXECUTOR_HELP();
     static std::string FLAGS_HELP();
     static std::string HEALTH_HELP();
     static std::string STATE_HELP();
     static std::string STATISTICS_HELP();
+    static std::string CONTAINERS_HELP();
 
   private:
     Slave* slave;
 
     // Used to rate limit the statistics endpoint.
     Shared<RateLimiter> statisticsLimiter;
+
+    process::Future<process::http::Response> _containers(
+        const Future<ResourceUsage>& usage,
+        const process::http::Request& request) const;
   };
 
   friend struct Framework;

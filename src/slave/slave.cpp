@@ -26,6 +26,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include <mesos/type_utils.hpp>
@@ -104,6 +105,7 @@ using std::list;
 using std::map;
 using std::set;
 using std::string;
+using std::tuple;
 using std::vector;
 
 using process::async;
@@ -750,6 +752,11 @@ void Slave::initialize()
         Http::STATISTICS_HELP(),
         [http](const process::http::Request& request) {
           return http.statistics(request);
+        });
+  route("/containers",
+        Http::CONTAINERS_HELP(),
+        [http](const process::http::Request& request) {
+          return http.containers(request);
         });
 
   // Expose the log file for the webui. Fall back to 'log_dir' if
@@ -5205,6 +5212,79 @@ Future<ResourceUsage> Slave::usage()
         }
 
         return Future<ResourceUsage>(*usage);
+      });
+}
+
+
+Future<list<JSON::Object>> Slave::containersStatus()
+{
+  typedef list<Future<ContainerStatus>> statusList;
+  typedef list<Future<ResourceStatistics>> statsList;
+
+  Owned<list<JSON::Object>> results(new list<JSON::Object>());
+  statusList statusFutures;
+  statsList statsFutures;
+
+  foreachvalue (const Framework* framework, frameworks) {
+    foreachvalue (const Executor* executor, framework->executors) {
+      const ExecutorInfo& info = executor->info;
+      const ContainerID& containerId = executor->containerId;
+
+      JSON::Object obj;
+      obj.values["container_id"] = containerId.value();
+      obj.values["framework_id"] = info.framework_id().value();
+      obj.values["executor_id"] = info.executor_id().value();
+      obj.values["executor_name"] = info.name();
+      obj.values["source"] = info.source();
+      results->push_back(obj);
+
+      statusFutures.push_back(containerizer->status(executor->containerId));
+      statsFutures.push_back(containerizer->usage(executor->containerId));
+    }
+  }
+
+  return await(await(statusFutures), await(statsFutures)).then(
+      [results](const tuple<Future<statusList>, Future<statsList>>& t) {
+        const statusList& status = std::get<0>(t).get();
+        const statsList& stats = std::get<1>(t).get();
+
+        statusList::const_iterator statusIter = status.begin();
+        statsList::const_iterator statsIter = stats.begin();
+        list<JSON::Object>::iterator resultsIter = results->begin();
+
+        while (statusIter != status.end() &&
+               statsIter != stats.end() &&
+               resultsIter != results->end()) {
+          if (statusIter->isReady()) {
+            resultsIter->values["container_status"] =
+                JSON::protobuf(statusIter->get());
+          } else {
+            LOG(WARNING) << "Failed to get container status for executor '"
+                         << resultsIter->values["executor_id"] << "'"
+                         << " of framework "
+                         << resultsIter->values["framework_id"] << ": "
+                         << (statusIter->isFailed() ? statusIter->failure()
+                                               : "discarded");
+          }
+
+          if (statsIter->isReady()) {
+            resultsIter->values["statistics"] =
+                JSON::protobuf(statsIter->get());
+          } else {
+            LOG(WARNING) << "Failed to get resource statistics for executor '"
+                         << resultsIter->values["executor_id"] << "'"
+                         << " of framework "
+                         << resultsIter->values["framework_id"] << ": "
+                         << (statsIter->isFailed() ? statsIter->failure()
+                                               : "discarded");
+          }
+
+          statusIter++;
+          statsIter++;
+          resultsIter++;
+        }
+
+        return Future<list<JSON::Object>>(*results);
       });
 }
 

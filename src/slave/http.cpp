@@ -620,6 +620,71 @@ Future<Response> Slave::Http::statistics(const Request& request) const
     });
 }
 
+
+string Slave::Http::CONTAINERS_HELP()
+{
+  return HELP(
+      TLDR(
+          "Retrieve container status and usage information."),
+      DESCRIPTION(
+          "Returns the current resource consumption data and status for",
+          "containers running under this slave.",
+          "",
+          "Example (**Note**: this is not exhaustive):",
+          "",
+          "```",
+          "[{",
+          "    \"container_id\":\"container\",",
+          "    \"container_status\":",
+          "    {",
+          "        \"network_infos\":",
+          "        [{\"ip_addresses\":[{\"ip_address\":\"192.168.1.1\"}]}]",
+          "    }",
+          "    \"executor_id\":\"executor\",",
+          "    \"executor_name\":\"name\",",
+          "    \"framework_id\":\"framework\",",
+          "    \"source\":\"source\",",
+          "    \"statistics\":",
+          "    {",
+          "        \"cpus_limit\":8.25,",
+          "        \"cpus_nr_periods\":769021,",
+          "        \"cpus_nr_throttled\":1046,",
+          "        \"cpus_system_time_secs\":34501.45,",
+          "        \"cpus_throttled_time_secs\":352.597023453,",
+          "        \"cpus_user_time_secs\":96348.84,",
+          "        \"mem_anon_bytes\":4845449216,",
+          "        \"mem_file_bytes\":260165632,",
+          "        \"mem_limit_bytes\":7650410496,",
+          "        \"mem_mapped_file_bytes\":7159808,",
+          "        \"mem_rss_bytes\":5105614848,",
+          "        \"timestamp\":1388534400.0",
+          "    }",
+          "}]",
+          "```"));
+}
+
+
+Future<Response> Slave::Http::containers(const Request& request) const
+{
+  return slave->containersStatus()
+    .then([=](const Future<std::list<JSON::Object>>& future)
+        -> Future<Response> {
+      JSON::Array result;
+      // Convert list<JSON::Object> to JSON::Array
+      foreach (const JSON::Object& obj, future.get()) {
+        result.values.push_back(obj);
+      }
+
+      return process::http::OK(result, request.url.query.get("jsonp"));
+    })
+    .repair([](const Future<Response>& future) {
+      LOG(WARNING) << "Could not collect container status: "
+                   << (future.isFailed() ? future.failure() : "discarded");
+
+      return process::http::InternalServerError();
+    });
+}
+
 } // namespace slave {
 } // namespace internal {
 } // namespace mesos {
