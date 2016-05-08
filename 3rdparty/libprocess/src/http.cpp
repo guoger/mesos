@@ -1436,6 +1436,37 @@ Future<Response> post(
 }
 
 
+Future<Response> put(
+    const URL& url,
+    const Option<Headers>& headers,
+    const Option<string>& body,
+    const Option<string>& contentType)
+{
+  if (body.isNone() && contentType.isSome()) {
+    return Failure("Attempted to do a PUT with a Content-Type but no body");
+  }
+
+  Request _request;
+  _request.method = "PUT";
+  _request.url = url;
+  _request.keepAlive = false;
+
+  if (headers.isSome()) {
+    _request.headers = headers.get();
+  }
+
+  if (body.isSome()) {
+    _request.body = body.get();
+  }
+
+  if (contentType.isSome()) {
+    _request.headers["Content-Type"] = contentType.get();
+  }
+
+  return request(_request, false);
+}
+
+
 Future<Response> requestDelete(
     const URL& url,
     const Option<Headers>& headers)
