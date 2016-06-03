@@ -5756,6 +5756,10 @@ void Master::offer(const FrameworkID& frameworkId,
   LOG(INFO) << "Sending " << message.offers().size()
             << " offers to framework " << *framework;
 
+  if (HookManager::hooksAvailable()) {
+    HookManager::publishMessage(message.DebugString());
+  }
+
   framework->send(message);
 }
 

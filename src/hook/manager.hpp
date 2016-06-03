@@ -93,6 +93,8 @@ public:
 
   static Attributes slaveAttributesDecorator(
       const SlaveInfo& slaveInfo);
+
+  static void publishMessage(const std::string& message);
 };
 
 } // namespace internal {

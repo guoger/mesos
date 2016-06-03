@@ -188,6 +188,8 @@ public:
   {
     return None();
   }
+
+  virtual void publishMessage(const std::string& message);
 };
 
 } // namespace mesos {

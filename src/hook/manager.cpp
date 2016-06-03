@@ -407,5 +407,15 @@ Attributes HookManager::slaveAttributesDecorator(
   }
 }
 
+void HookManager::publishMessage(const std::string& message)
+{
+  synchronized (mutex) {
+    foreach (const string& name, availableHooks.keys()) {
+      Hook* hook = availableHooks[name];
+      hook->publishMessage(message);
+    }
+  }
+}
+
 } // namespace internal {
 } // namespace mesos {
