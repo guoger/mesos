@@ -39,6 +39,7 @@
 #include <mesos/state/storage.hpp>
 
 #include <mesos/zookeeper/detector.hpp>
+#include <mesos/etcd/url.hpp>
 
 #include <process/limiter.hpp>
 #include <process/owned.hpp>
@@ -190,6 +191,11 @@ int main(int argc, char** argv)
             "  `zk://username:password@host1:port1,host2:port2,.../path`\n"
             "  `file:///path/to/file` (where file contains one of the above)\n"
             "NOTE: Not required if master is run in standalone mode (non-HA).");
+
+  Option<string> etcd;
+  flags.add(&etcd,
+            "etcd",
+            "etcd cluster used for replicated_log");
 
   // Optional IP discover script that will set the Master IP.
   // If set, its output is expected to be a valid parseable IP string.
@@ -412,6 +418,27 @@ int main(int argc, char** argv)
           flags.zk_session_timeout,
           path::join(url.get().path, "log_replicas"),
           url.get().authentication,
+          flags.log_auto_initialize,
+          "registrar/");
+    } else if (etcd.isSome()) {
+      // Use replicated log with Etcd.
+      if (flags.quorum.isNone()) {
+        EXIT(EXIT_FAILURE)
+          << "Need to specify --quorum for replicated log based"
+          << " registry when using Etcd";
+      }
+
+      Try<etcd::URL> url = etcd::URL::parse(etcd.get());
+      if (url.isError()) {
+        EXIT(EXIT_FAILURE) << "Error parsing Etcd URL: " << url.error();
+      }
+
+      log = new Log(
+          flags.quorum.get(),
+          path::join(flags.work_dir.get(), "replicated_log"),
+          url.get(),
+          // Temporarily reuse zk_session_timeout
+          flags.zk_session_timeout,
           flags.log_auto_initialize,
           "registrar/");
     } else {

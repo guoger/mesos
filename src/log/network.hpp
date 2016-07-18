@@ -25,9 +25,12 @@
 #include <string>
 
 #include <mesos/zookeeper/group.hpp>
+#include <mesos/etcd/url.hpp>
+#include <mesos/etcd/client.hpp>
 
 #include <process/collect.hpp>
 #include <process/executor.hpp>
+#include <process/future.hpp>
 #include <process/protobuf.hpp>
 
 #include <stout/duration.hpp>
@@ -71,6 +74,9 @@ public:
 
   // Set the PIDs that are part of this network.
   void set(const std::set<process::UPID>& pids);
+
+  virtual process::Future<Nothing> join(
+      const std::string& pid) const;
 
   // Returns a future which gets set when the network size satisfies
   // the constraint specified by 'size' and 'mode'. For example, if
@@ -141,6 +147,61 @@ private:
   // the 'executor' before we delete the 'group' so that we don't get
   // spurious fatal errors when the 'group' is being deleted.
   process::Executor executor;
+};
+
+
+class EtcdNetworkProcess : public ProtobufProcess<EtcdNetworkProcess>
+{
+public:
+  EtcdNetworkProcess(
+      const etcd::URL& url,
+      const Duration& timeout,
+      const std::set<process::UPID>& _base);
+
+  process::Future<Nothing> join(const std::string& pid);
+
+  process::Future<Option<etcd::Node>> watch();
+
+private:
+  etcd::EtcdClient client;
+  const Duration ttl;
+  // The set of PIDs that are always in the network.
+  std::set<process::UPID> base;
+  process::Future<Option<etcd::Node>> watching;
+  uint64_t waitIndex;
+
+  process::Future<Nothing> _join(
+      const process::Future<Option<etcd::Node>>& node);
+
+  process::Future<Nothing> __join(
+      const etcd::Node& node);
+
+  process::Future<Option<etcd::Node>> repair(
+      const process::Future<Option<etcd::Node>>&);
+};
+
+
+class EtcdNetwork : public Network
+{
+public:
+  EtcdNetwork(
+      const etcd::URL& url,
+      const Duration& ttl,
+      const std::set<process::UPID>& base);
+
+  process::Future<Nothing> join(const std::string& pid) const;
+
+private:
+  const etcd::URL url;
+  std::set<process::UPID> base;
+  process::Future<Option<etcd::Node>> node;
+  EtcdNetworkProcess* process;
+  process::Executor executor;
+
+  process::Future<Option<etcd::Node>> _join(const std::string& pid);
+
+  void watch();
+  void _watch();
 };
 
 
@@ -355,6 +416,13 @@ inline void Network::remove(const process::UPID& pid)
 inline void Network::set(const std::set<process::UPID>& pids)
 {
   process::dispatch(process, &NetworkProcess::set, pids);
+}
+
+
+inline process::Future<Nothing> Network::join(
+    const std::string& pid) const
+{
+  UNREACHABLE();
 }
 
 

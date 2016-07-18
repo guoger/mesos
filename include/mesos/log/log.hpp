@@ -24,6 +24,7 @@
 #include <string>
 
 #include <mesos/zookeeper/authentication.hpp>
+#include <mesos/etcd/url.hpp>
 
 #include <process/future.hpp>
 #include <process/process.hpp>
@@ -205,6 +206,13 @@ public:
       const Duration& timeout,
       const std::string& znode,
       const Option<zookeeper::Authentication>& auth = None(),
+      bool autoInitialize = false,
+      const Option<std::string>& metricsPrefix = None());
+
+  Log(int quorum,
+      const std::string& path,
+      const etcd::URL& url,
+      const Duration& timeout,
       bool autoInitialize = false,
       const Option<std::string>& metricsPrefix = None());
 

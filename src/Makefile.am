@@ -738,6 +738,8 @@ nodist_v1scheduler_HEADERS =						\
 
 zookeeperdir = $(pkgincludedir)/zookeeper
 
+etcddir = $(pkgincludedir)/etcd
+
 zookeeper_HEADERS =							\
   $(top_srcdir)/include/mesos/zookeeper/authentication.hpp		\
   $(top_srcdir)/include/mesos/zookeeper/contender.hpp			\
@@ -746,6 +748,10 @@ zookeeper_HEADERS =							\
   $(top_srcdir)/include/mesos/zookeeper/url.hpp				\
   $(top_srcdir)/include/mesos/zookeeper/watcher.hpp			\
   $(top_srcdir)/include/mesos/zookeeper/zookeeper.hpp
+
+etcd_HEADERS =							\
+  $(top_srcdir)/include/mesos/etcd/url.hpp					\
+  $(top_srcdir)/include/mesos/etcd/client.hpp
 
 
 # We even use a convenience library for most of Mesos so that we can
@@ -889,7 +895,9 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   zookeeper/contender.cpp						\
   zookeeper/detector.cpp						\
   zookeeper/zookeeper.cpp						\
-  zookeeper/group.cpp
+  zookeeper/group.cpp							\
+  etcd/client.cpp								\
+  etcd/url.cpp
 
 libmesos_no_3rdparty_la_SOURCES +=					\
   authentication/cram_md5/authenticatee.hpp				\
@@ -1204,6 +1212,7 @@ liblog_la_SOURCES =							\
   log/coordinator.cpp							\
   log/leveldb.cpp							\
   log/log.cpp								\
+  log/network.cpp							\
   log/recover.cpp							\
   log/replica.cpp							\
   log/tool/benchmark.cpp						\
