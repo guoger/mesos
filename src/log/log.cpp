@@ -74,7 +74,8 @@ LogProcess::LogProcess(
     network(new Network(pids + (UPID) replica->pid())),
     autoInitialize(_autoInitialize),
     group(nullptr),
-    metrics(*this, metricsPrefix) {}
+    metrics(*this, metricsPrefix),
+    etcd(false) {}
 
 
 LogProcess::LogProcess(
@@ -97,7 +98,28 @@ LogProcess::LogProcess(
         Set<UPID>((UPID) replica->pid()))),
     autoInitialize(_autoInitialize),
     group(new zookeeper::Group(servers, timeout, znode, auth)),
-    metrics(*this, metricsPrefix) {}
+    metrics(*this, metricsPrefix),
+    etcd(false) {}
+
+
+LogProcess::LogProcess(
+    size_t _quorum,
+    const string& path,
+    const etcd::URL& url,
+    const Duration& timeout,
+    bool _autoInitialize,
+    const Option<string>& metricsPrefix)
+  : ProcessBase(ID::generate("log")),
+    quorum(_quorum),
+    replica(new Replica(path)),
+    network(new EtcdNetwork(
+        url,
+        timeout,
+        Set<UPID>((UPID) replica->pid()))),
+    autoInitialize(_autoInitialize),
+    group(nullptr),
+    metrics(*this, metricsPrefix),
+    etcd(true) {}
 
 
 void LogProcess::initialize()
@@ -117,6 +139,10 @@ void LogProcess::initialize()
       .onReady(defer(self(), &Self::watch, replica->pid(), lambda::_1))
       .onFailed(defer(self(), &Self::failed, lambda::_1))
       .onDiscarded(defer(self(), &Self::discarded));
+  }
+
+  if (etcd) {
+    network->join(replica->pid());
   }
 
   // Start the recovery.
@@ -676,6 +702,29 @@ Log::Log(
         timeout,
         znode,
         auth,
+        autoInitialize,
+        metricsPrefix);
+
+  spawn(process);
+}
+
+
+Log::Log(
+    int quorum,
+    const string& path,
+    const etcd::URL& url,
+    const Duration& timeout,
+    bool autoInitialize,
+    const Option<string>& metricsPrefix)
+{
+  GOOGLE_PROTOBUF_VERIFY_VERSION;
+
+  process =
+    new LogProcess(
+        quorum,
+        path,
+        url,
+        timeout,
         autoInitialize,
         metricsPrefix);
 
