@@ -75,6 +75,7 @@ using testing::Invoke;
 using testing::Return;
 
 using mesos::log::Log;
+using mesos::log::Network;
 
 namespace mesos {
 namespace internal {

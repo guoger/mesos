@@ -19,8 +19,19 @@
 
 #include <process/protobuf.hpp>
 
+namespace mesos {
+namespace internal {
+namespace log {
+
 // Forward declaration.
 class NetworkProcess;
+
+} // namespace log {
+} // namespace internal {
+} // namespace mesos {
+
+namespace mesos {
+namespace log {
 
 // A "network" is a collection of protobuf processes (may be local
 // and/or remote). A network abstracts away the details of maintaining
@@ -80,7 +91,10 @@ private:
   Network(const Network&);
   Network& operator=(const Network&);
 
-  NetworkProcess* process;
+  internal::log::NetworkProcess* process;
 };
+
+} // namespace log {
+} // namespace mesos {
 
 #endif // __MESOS_LOG_NETWORK_HPP__

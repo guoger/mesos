@@ -41,6 +41,10 @@
 
 #include "logging/logging.hpp"
 
+namespace mesos {
+namespace internal {
+namespace log {
+
 class NetworkProcess : public ProtobufProcess<NetworkProcess>
 {
 public:
@@ -54,7 +58,9 @@ public:
 
   void set(const std::set<process::UPID>& _pids);
 
-  process::Future<size_t> watch(size_t size, Network::WatchMode mode);
+  process::Future<size_t> watch(
+      size_t size,
+      mesos::log::Network::WatchMode mode);
 
   // Sends a request to each of the groups members and returns a set
   // of futures that represent their responses.
@@ -96,11 +102,11 @@ protected:
 private:
   struct Watch
   {
-    Watch(size_t _size, Network::WatchMode _mode)
+    Watch(size_t _size, mesos::log::Network::WatchMode _mode)
       : size(_size), mode(_mode) {}
 
     size_t size;
-    Network::WatchMode mode;
+    mesos::log::Network::WatchMode mode;
     process::Promise<size_t> promise;
   };
 
@@ -113,12 +119,18 @@ private:
 
   // Returns true if the current size of the network satisfies the
   // constraint specified by 'size' and 'mode'.
-  bool satisfied(size_t size, Network::WatchMode mode);
+  bool satisfied(size_t size, mesos::log::Network::WatchMode mode);
 
   std::set<process::UPID> pids;
   std::list<Watch*> watches;
 };
 
+} // namespace log {
+} // namespace internal {
+} // namespace mesos {
+
+namespace mesos {
+namespace log {
 
 template <typename Req, typename Res>
 process::Future<std::set<process::Future<Res> > > Network::broadcast(
@@ -126,8 +138,12 @@ process::Future<std::set<process::Future<Res> > > Network::broadcast(
     const Req& req,
     const std::set<process::UPID>& filter) const
 {
-  return process::dispatch(process, &NetworkProcess::broadcast<Req, Res>,
-                           protocol, req, filter);
+  return process::dispatch(
+      process,
+      &internal::log::NetworkProcess::broadcast<Req, Res>,
+      protocol,
+      req,
+      filter);
 }
 
 
@@ -137,10 +153,14 @@ process::Future<Nothing> Network::broadcast(
     const std::set<process::UPID>& filter) const
 {
   // Need to disambiguate overloaded function.
-  Nothing (NetworkProcess::*broadcast)(const M&, const std::set<process::UPID>&)
-    = &NetworkProcess::broadcast<M>;
+  Nothing (internal::log::NetworkProcess::*broadcast)(
+      const M&, const std::set<process::UPID>&)
+    = &internal::log::NetworkProcess::broadcast<M>;
 
   return process::dispatch(process, broadcast, m, filter);
 }
+
+} // namespace log {
+} // namespace mesos {
 
 #endif // __NETWORK_HPP__

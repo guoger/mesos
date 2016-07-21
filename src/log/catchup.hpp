@@ -45,7 +45,7 @@ namespace log {
 extern process::Future<Nothing> catchup(
     size_t quorum,
     const process::Shared<Replica>& replica,
-    const process::Shared<Network>& network,
+    const process::Shared<mesos::log::Network>& network,
     const Option<uint64_t>& proposal,
     const IntervalSet<uint64_t>& positions,
     const Duration& timeout = Seconds(10));

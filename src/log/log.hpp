@@ -87,7 +87,7 @@ private:
 
   const size_t quorum;
   process::Shared<Replica> replica;
-  process::Shared<Network> network;
+  process::Shared<mesos::log::Network> network;
   const bool autoInitialize;
 
   // For replica recovery.
@@ -191,7 +191,7 @@ private:
   void failed(const std::string& message, const std::string& reason);
 
   const size_t quorum;
-  const process::Shared<Network> network;
+  const process::Shared<mesos::log::Network> network;
 
   process::Future<process::Shared<Replica>> recovering;
   std::list<process::Promise<Nothing>*> promises;

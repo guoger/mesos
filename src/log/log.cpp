@@ -50,6 +50,7 @@ using std::set;
 using std::string;
 
 using mesos::log::Log;
+using mesos::log::Network;
 
 using mesos::internal::log::LogProcess;
 using mesos::internal::log::LogReaderProcess;

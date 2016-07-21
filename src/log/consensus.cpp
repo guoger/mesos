@@ -37,6 +37,7 @@
 using namespace process;
 
 using std::set;
+using mesos::log::Network;
 
 namespace mesos {
 namespace internal {

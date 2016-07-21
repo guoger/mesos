@@ -22,7 +22,11 @@
 #include <mesos/log/network.hpp>
 #include <mesos/zookeeper/group.hpp>
 
-class ZooKeeperNetwork : public Network
+namespace mesos {
+namespace internal {
+namespace log {
+
+class ZooKeeperNetwork : public mesos::log::Network
 {
 public:
   ZooKeeperNetwork(
@@ -60,5 +64,9 @@ private:
   // spurious fatal errors when the 'group' is being deleted.
   process::Executor executor;
 };
+
+} // namespace log {
+} // namespace internal {
+} // namespace mesos {
 
 #endif // __LOG_ZOOKEEPER_NETWORK_HPP__

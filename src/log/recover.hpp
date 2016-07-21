@@ -52,7 +52,7 @@ namespace log {
 extern process::Future<process::Owned<Replica> > recover(
     size_t quorum,
     const process::Owned<Replica>& replica,
-    const process::Shared<Network>& network,
+    const process::Shared<mesos::log::Network>& network,
     bool autoInitialize = false);
 
 } // namespace log {

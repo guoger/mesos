@@ -20,6 +20,10 @@
 
 #include <stout/set.hpp>
 
+namespace mesos {
+namespace internal {
+namespace log {
+
 ZooKeeperNetwork::ZooKeeperNetwork(
     const std::string& servers,
     const Duration& timeout,
@@ -114,3 +118,7 @@ void ZooKeeperNetwork::collected(
 
   watch(memberships.get());
 }
+
+} // namespace log {
+} // namespace internal {
+} // namespace mesos {

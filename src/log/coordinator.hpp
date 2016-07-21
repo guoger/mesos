@@ -43,7 +43,7 @@ public:
   Coordinator(
       size_t _quorum,
       const process::Shared<Replica>& _replica,
-      const process::Shared<Network>& _network);
+      const process::Shared<mesos::log::Network>& _network);
 
   ~Coordinator();
 

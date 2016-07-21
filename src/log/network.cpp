@@ -18,6 +18,12 @@
 
 #include "network.hpp"
 
+using mesos::log::Network;
+using mesos::internal::log::NetworkProcess;
+
+namespace mesos {
+namespace log {
+
 Network::Network()
 {
   process = new NetworkProcess();
@@ -64,6 +70,12 @@ process::Future<size_t> Network::watch(
   return process::dispatch(process, &NetworkProcess::watch, size, mode);
 }
 
+} // namespace log {
+} // namespace mesos {
+
+namespace mesos {
+namespace internal {
+namespace log {
 
 NetworkProcess::NetworkProcess()
   : ProcessBase(process::ID::generate("log-network"))
@@ -190,3 +202,7 @@ bool NetworkProcess::satisfied(size_t size, Network::WatchMode mode)
       UNREACHABLE();
   }
 }
+
+} // namespace log {
+} // namespace internal {
+} // namespace mesos {
