@@ -108,73 +108,17 @@ private:
 class NetworkProcess : public ProtobufProcess<NetworkProcess>
 {
 public:
-  NetworkProcess() : ProcessBase(process::ID::generate("log-network")) {}
+  NetworkProcess();
 
-  explicit NetworkProcess(const std::set<process::UPID>& pids)
-    : ProcessBase(process::ID::generate("log-network"))
-  {
-    set(pids);
-  }
+  explicit NetworkProcess(const std::set<process::UPID>& pids);
 
-  void add(const process::UPID& pid)
-  {
-    // Link in order to keep a socket open (more efficient).
-    //
-    // We force a reconnect to avoid sending on a "stale" socket. In
-    // general when linking to a remote process, the underlying TCP
-    // connection may become "stale". RFC 793 refers to this as a
-    // "half-open" connection: the RST is not sent upon the death
-    // of the peer and a RST will only be received once further
-    // data is sent on the socket.
-    //
-    // "Half-open" (aka "stale") connections are typically addressed
-    // via keep-alives (see RFC 1122 4.2.3.6) to periodically probe
-    // the connection. In this case, we can rely on the (re-)addition
-    // of the network member to create a new connection.
-    //
-    // See MESOS-5576 for a scenario where reconnecting helps avoid
-    // dropped messages.
-    link(pid, RemoteConnection::RECONNECT);
+  void add(const process::UPID& pid);
 
-    pids.insert(pid);
+  void remove(const process::UPID& pid);
 
-    // Update any pending watches.
-    update();
-  }
+  void set(const std::set<process::UPID>& _pids);
 
-  void remove(const process::UPID& pid)
-  {
-    // TODO(benh): unlink(pid);
-    pids.erase(pid);
-
-    // Update any pending watches.
-    update();
-  }
-
-  void set(const std::set<process::UPID>& _pids)
-  {
-    pids.clear();
-    foreach (const process::UPID& pid, _pids) {
-      add(pid); // Also does a link.
-    }
-
-    // Update any pending watches.
-    update();
-  }
-
-  process::Future<size_t> watch(size_t size, Network::WatchMode mode)
-  {
-    if (satisfied(size, mode)) {
-      return pids.size();
-    }
-
-    Watch* watch = new Watch(size, mode);
-    watches.push_back(watch);
-
-    // TODO(jieyu): Consider deleting 'watch' if the returned future
-    // is discarded by the user.
-    return watch->promise.future();
-  }
+  process::Future<size_t> watch(size_t size, Network::WatchMode mode);
 
   // Sends a request to each of the groups members and returns a set
   // of futures that represent their responses.
@@ -211,14 +155,7 @@ public:
   }
 
 protected:
-  virtual void finalize()
-  {
-    foreach (Watch* watch, watches) {
-      watch->promise.fail("Network is being terminated");
-      delete watch;
-    }
-    watches.clear();
-  }
+  virtual void finalize();
 
 private:
   struct Watch
@@ -236,95 +173,15 @@ private:
   NetworkProcess& operator=(const NetworkProcess&);
 
   // Notifies the change of the network.
-  void update()
-  {
-    const size_t size = watches.size();
-    for (size_t i = 0; i < size; i++) {
-      Watch* watch = watches.front();
-      watches.pop_front();
-
-      if (satisfied(watch->size, watch->mode)) {
-        watch->promise.set(pids.size());
-        delete watch;
-      } else {
-        watches.push_back(watch);
-      }
-    }
-  }
+  void update();
 
   // Returns true if the current size of the network satisfies the
   // constraint specified by 'size' and 'mode'.
-  bool satisfied(size_t size, Network::WatchMode mode)
-  {
-    switch (mode) {
-      case Network::EQUAL_TO:
-        return pids.size() == size;
-      case Network::NOT_EQUAL_TO:
-        return pids.size() != size;
-      case Network::LESS_THAN:
-        return pids.size() < size;
-      case Network::LESS_THAN_OR_EQUAL_TO:
-        return pids.size() <= size;
-      case Network::GREATER_THAN:
-        return pids.size() > size;
-      case Network::GREATER_THAN_OR_EQUAL_TO:
-        return pids.size() >= size;
-      default:
-        LOG(FATAL) << "Invalid watch mode";
-        UNREACHABLE();
-    }
-  }
+  bool satisfied(size_t size, Network::WatchMode mode);
 
   std::set<process::UPID> pids;
   std::list<Watch*> watches;
 };
-
-
-inline Network::Network()
-{
-  process = new NetworkProcess();
-  process::spawn(process);
-}
-
-
-inline Network::Network(const std::set<process::UPID>& pids)
-{
-  process = new NetworkProcess(pids);
-  process::spawn(process);
-}
-
-
-inline Network::~Network()
-{
-  process::terminate(process);
-  process::wait(process);
-  delete process;
-}
-
-
-inline void Network::add(const process::UPID& pid)
-{
-  process::dispatch(process, &NetworkProcess::add, pid);
-}
-
-
-inline void Network::remove(const process::UPID& pid)
-{
-  process::dispatch(process, &NetworkProcess::remove, pid);
-}
-
-
-inline void Network::set(const std::set<process::UPID>& pids)
-{
-  process::dispatch(process, &NetworkProcess::set, pids);
-}
-
-
-inline process::Future<size_t> Network::watch(
-    size_t size, Network::WatchMode mode) const
-{
-  return process::dispatch(process, &NetworkProcess::watch, size, mode);
-}
 
 
 template <typename Req, typename Res>
