@@ -278,7 +278,7 @@ public:
   }
 
   Future<Option<Node>> create(
-      const string& key,
+      const Option<string>& key,
       const Option<string>& value,
       const Option<Duration>& ttl,
       const Option<bool> prevExist,
@@ -319,7 +319,7 @@ private:
 
 
 Future<Option<Node>> EtcdClientProcess::create(
-  const string& key,
+  const Option<string>& key,
   const Option<string>& value,
   const Option<Duration>& ttl,
   const Option<bool> prevExist,
@@ -332,7 +332,11 @@ Future<Option<Node>> EtcdClientProcess::create(
 
   foreach (const URL::Server& server, etcdURL.servers) {
     // TODO(benh): Use HTTPS after supported in libprocess.
-    http::URL url("http", server.host, server.port, "/v2/keys" + key);
+    http::URL url(
+        "http",
+        server.host,
+        server.port,
+        key.isSome() ? "/v2/keys" + key.get() : etcdURL.path);
 
     if (refresh.isSome() && refresh.get()) {
       url.query["refresh"] = stringify(refresh.get());
@@ -637,7 +641,7 @@ EtcdClient::EtcdClient(const URL& url, const Option<Duration>& defaultTTL)
 
 
 process::Future<Option<Node>> EtcdClient::create(
-  const std::string& key,
+  const Option<std::string>& key,
   const Option<std::string>& value,
   const Option<Duration>& ttl,
   const Option<bool> prevExist,

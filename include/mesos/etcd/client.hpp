@@ -41,7 +41,7 @@ public:
   EtcdClient(const URL& url, const Option<Duration>& defaultTTL = None());
 
   process::Future<Option<Node>> create(
-      const std::string& key,
+      const Option<std::string>& key,
       const Option<std::string>& value,
       const Option<Duration>& ttl = None(),
       const Option<bool> prevExist = None(),
