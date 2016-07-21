@@ -1217,7 +1217,8 @@ liblog_la_SOURCES =							\
   log/tool/benchmark.cpp						\
   log/tool/initialize.cpp						\
   log/tool/read.cpp							\
-  log/tool/replica.cpp
+  log/tool/replica.cpp						\
+  log/zookeeper/network.cpp
 liblog_la_SOURCES +=							\
   log/catchup.hpp							\
   log/consensus.hpp							\
@@ -1233,6 +1234,7 @@ liblog_la_SOURCES +=							\
   log/tool/initialize.hpp						\
   log/tool/read.hpp							\
   log/tool/replica.hpp							\
+  log/zookeeper/network.hpp					\
   messages/log.hpp							\
   messages/log.proto
 nodist_liblog_la_SOURCES = $(CXX_LOG_PROTOS)

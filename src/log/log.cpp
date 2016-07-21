@@ -40,6 +40,7 @@
 #include "log/network.hpp"
 #include "log/recover.hpp"
 #include "log/replica.hpp"
+#include "log/zookeeper/network.hpp"
 
 using namespace process;
 
