@@ -17,7 +17,10 @@
 #ifndef __LOG_ZOOKEEPER_NETWORK_HPP__
 #define __LOG_ZOOKEEPER_NETWORK_HPP__
 
-#include "log/network.hpp"
+#include <set>
+
+#include <mesos/log/network.hpp>
+#include <mesos/zookeeper/group.hpp>
 
 class ZooKeeperNetwork : public Network
 {

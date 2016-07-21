@@ -556,7 +556,8 @@ nodist_fetcher_HEADERS =						\
 logdir = $(pkgincludedir)/log
 
 log_HEADERS =								\
-  $(top_srcdir)/include/mesos/log/log.hpp
+  $(top_srcdir)/include/mesos/log/log.hpp					\
+  $(top_srcdir)/include/mesos/log/network.hpp
 
 maintenancedir = $(pkgincludedir)/maintenance
 

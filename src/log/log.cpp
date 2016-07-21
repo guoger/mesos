@@ -19,6 +19,7 @@
 #include <stdint.h>
 
 #include <mesos/log/log.hpp>
+#include <mesos/log/network.hpp>
 
 #include <process/defer.hpp>
 #include <process/dispatch.hpp>

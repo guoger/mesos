@@ -24,6 +24,7 @@
 #include <set>
 #include <string>
 
+#include <mesos/log/network.hpp>
 #include <mesos/zookeeper/group.hpp>
 
 #include <process/collect.hpp>
@@ -39,71 +40,6 @@
 #include <stout/unreachable.hpp>
 
 #include "logging/logging.hpp"
-
-// Forward declaration.
-class NetworkProcess;
-
-// A "network" is a collection of protobuf processes (may be local
-// and/or remote). A network abstracts away the details of maintaining
-// which processes are waiting to receive messages and requests in the
-// presence of failures and dynamic reconfiguration.
-class Network
-{
-public:
-  enum WatchMode
-  {
-    EQUAL_TO,
-    NOT_EQUAL_TO,
-    LESS_THAN,
-    LESS_THAN_OR_EQUAL_TO,
-    GREATER_THAN,
-    GREATER_THAN_OR_EQUAL_TO
-  };
-
-  Network();
-  explicit Network(const std::set<process::UPID>& pids);
-  virtual ~Network();
-
-  // Adds a PID to this network.
-  void add(const process::UPID& pid);
-
-  // Removes a PID from this network.
-  void remove(const process::UPID& pid);
-
-  // Set the PIDs that are part of this network.
-  void set(const std::set<process::UPID>& pids);
-
-  // Returns a future which gets set when the network size satisfies
-  // the constraint specified by 'size' and 'mode'. For example, if
-  // 'size' is 2 and 'mode' is GREATER_THAN, then the returned future
-  // will get set when the size of the network is greater than 2.
-  process::Future<size_t> watch(
-      size_t size,
-      WatchMode mode = NOT_EQUAL_TO) const;
-
-  // Sends a request to each member of the network and returns a set
-  // of futures that represent their responses.
-  template <typename Req, typename Res>
-  process::Future<std::set<process::Future<Res> > > broadcast(
-      const Protocol<Req, Res>& protocol,
-      const Req& req,
-      const std::set<process::UPID>& filter = std::set<process::UPID>()) const;
-
-  // Sends a message to each member of the network. The returned
-  // future is set when the message is broadcasted.
-  template <typename M>
-  process::Future<Nothing> broadcast(
-      const M& m,
-      const std::set<process::UPID>& filter = std::set<process::UPID>()) const;
-
-private:
-  // Not copyable, not assignable.
-  Network(const Network&);
-  Network& operator=(const Network&);
-
-  NetworkProcess* process;
-};
-
 
 class NetworkProcess : public ProtobufProcess<NetworkProcess>
 {

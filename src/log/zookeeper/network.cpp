@@ -16,6 +16,10 @@
 
 #include "network.hpp"
 
+#include <process/collect.hpp>
+
+#include <stout/set.hpp>
+
 ZooKeeperNetwork::ZooKeeperNetwork(
     const std::string& servers,
     const Duration& timeout,
