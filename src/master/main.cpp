@@ -427,8 +427,22 @@ int main(int argc, char** argv)
           url.get().authentication,
           flags.log_auto_initialize,
           "registrar/");
+    } else if (flags.pid_group.isSome()) {
+      // Use replicated log with pid group module.
+      if (flags.quorum.isNone()) {
+        EXIT(EXIT_FAILURE)
+          << "Need to specify --quorum for replicated log based"
+          << " registry when using pid_group module";
+      }
+
+      log = new Log(
+          flags.quorum.get(),
+          path::join(flags.work_dir.get(), "replicated_log"),
+          flags.pid_group.get(),
+          flags.log_auto_initialize,
+          "registrar/");
     } else {
-      // Use replicated log without ZooKeeper.
+      // Use replicated log without ZooKeeper or pid_group module.
       log = new Log(
           1,
           path::join(flags.work_dir.get(), "replicated_log"),
