@@ -420,8 +420,22 @@ int main(int argc, char** argv)
           url.get().authentication,
           flags.log_auto_initialize,
           "registrar/");
+    } else if (flags.log_network.isSome()) {
+      // Use replicated log with log network module.
+      if (flags.quorum.isNone()) {
+        EXIT(EXIT_FAILURE)
+          << "Need to specify --quorum for replicated log based"
+          << " registry when using log_network module";
+      }
+
+      log = new Log(
+          flags.quorum.get(),
+          path::join(flags.work_dir.get(), "replicated_log"),
+          flags.log_network.get(),
+          flags.log_auto_initialize,
+          "registrar/");
     } else {
-      // Use replicated log without ZooKeeper.
+      // Use replicated log without ZooKeeper or log network module.
       log = new Log(
           1,
           path::join(flags.work_dir.get(), "replicated_log"),
