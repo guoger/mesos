@@ -573,7 +573,8 @@ module_HEADERS =							\
   $(top_srcdir)/include/mesos/module/qos_controller.hpp			\
   $(top_srcdir)/include/mesos/module/resource_estimator.hpp		\
   $(top_srcdir)/include/mesos/module/contender.hpp			\
-  $(top_srcdir)/include/mesos/module/detector.hpp
+  $(top_srcdir)/include/mesos/module/detector.hpp			\
+  $(top_srcdir)/include/mesos/module/pid_group.hpp
 
 nodist_module_HEADERS =							\
   ../include/mesos/module/module.pb.h
