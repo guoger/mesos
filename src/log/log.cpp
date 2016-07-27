@@ -111,6 +111,21 @@ LogProcess::LogProcess(
     metrics(*this, metricsPrefix) {}
 
 
+LogProcess::LogProcess(
+    size_t _quorum,
+    const std::string& path,
+    const std::string& pidGroupModule,
+    bool _autoInitialize,
+    const Option<std::string>& metricsPrefix)
+  : ProcessBase(ID::generate("log")),
+    quorum(_quorum),
+    replica(new Replica(path)),
+    pidGroup(createPIDGroup(pidGroupModule, replica->pid())),
+    autoInitialize(_autoInitialize),
+    group(nullptr),
+    metrics(*this, metricsPrefix) {}
+
+
 PIDGroup* LogProcess::createPIDGroup(
     const string& pidGroupModule,
     const process::UPID& upid)
@@ -704,6 +719,27 @@ Log::Log(
         timeout,
         znode,
         auth,
+        autoInitialize,
+        metricsPrefix);
+
+  spawn(process);
+}
+
+
+Log::Log(
+    int quorum,
+    const string& path,
+    const string& pidGroupModule,
+    bool autoInitialize,
+    const Option<std::string>& metricsPrefix)
+{
+  GOOGLE_PROTOBUF_VERIFY_VERSION;
+
+  process =
+    new LogProcess(
+        quorum,
+        path,
+        pidGroupModule,
         autoInitialize,
         metricsPrefix);
 
