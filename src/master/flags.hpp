@@ -89,6 +89,7 @@ public:
   size_t max_completed_tasks_per_framework;
   Option<std::string> master_contender;
   Option<std::string> master_detector;
+  Option<std::string> log_network;
 
 #ifdef WITH_NETWORK_ISOLATOR
   Option<size_t> max_executors_per_agent;

@@ -549,12 +549,20 @@ mesos::internal::master::Flags::Flags()
       "The symbol name of the master contender to use.\n"
       "This symbol should exist in a module specified through\n"
       "the --modules flag. Cannot be used in conjunction with --zk.\n"
-      "Must be used in conjunction with --master_detector.");
+      "Must be used in conjunction with --master_detector and --log_network.");
 
   add(&Flags::master_detector,
       "master_detector",
       "The symbol name of the master detector to use. This symbol\n"
       "should exist in a module specified through the --modules flag.\n"
       "Cannot be used in conjunction with --zk.\n"
-      "Must be used in conjunction with --master_contender.");
+      "Must be used in conjunction with --master_contender and --log_network.");
+
+  add(&Flags::log_network,
+      "log_network",
+      "The symbol name of the log network to use. This symbol\n"
+      "should exist in a module specified through the --modules flag.\n"
+      "Cannot be used in conjunction with --zk.\n"
+      "Must be used in conjunction with --master_contender and\n"
+      "--master_detector.");
 }
