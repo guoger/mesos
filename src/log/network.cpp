@@ -16,13 +16,39 @@
 
 #include <mesos/log/network.hpp>
 
+#include <mesos/module/network.hpp>
+
+#include "module/manager.hpp"
+
 #include "network.hpp"
+
+using std::string;
 
 using mesos::log::Network;
 using mesos::internal::log::NetworkProcess;
 
 namespace mesos {
 namespace log {
+
+Network* Network::create(
+    const string& logNetworkModule,
+    const process::UPID& pid)
+{
+  Parameters params;
+  Parameter* param = params.add_parameter();
+  param->set_key("pid");
+  param->set_value(pid);
+
+  Try<Network*> network =
+    modules::ModuleManager::create<Network>(logNetworkModule, params);
+  if (network.isError()) {
+    EXIT(EXIT_FAILURE)
+      << "Failed to create a log network: " << network.error();
+  }
+
+  return network.get();
+}
+
 
 Network::Network()
 {

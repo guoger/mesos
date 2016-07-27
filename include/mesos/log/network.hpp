@@ -40,6 +40,10 @@ namespace log {
 class Network
 {
 public:
+  static Network* create(
+      const std::string& logNetworkModule,
+      const process::UPID& pid);
+
   enum WatchMode
   {
     EQUAL_TO,
