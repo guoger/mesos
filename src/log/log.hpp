@@ -59,6 +59,13 @@ public:
       bool _autoInitialize,
       const Option<std::string>& metricsPrefix);
 
+  LogProcess(
+      size_t _quorum,
+      const std::string& path,
+      const std::string& logNetworkModule,
+      bool _autoInitialize,
+      const Option<std::string>& metricsPrefix);
+
   // Recovers the log by catching up if needed. Returns a shared
   // pointer to the local replica if the recovery succeeds.
   process::Future<process::Shared<Replica>> recover();

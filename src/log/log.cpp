@@ -103,6 +103,21 @@ LogProcess::LogProcess(
     metrics(*this, metricsPrefix) {}
 
 
+LogProcess::LogProcess(
+    size_t _quorum,
+    const std::string& path,
+    const std::string& logNetworkModule,
+    bool _autoInitialize,
+    const Option<std::string>& metricsPrefix)
+  : ProcessBase(ID::generate("log")),
+    quorum(_quorum),
+    replica(new Replica(path)),
+    network(Network::create(logNetworkModule, replica->pid())),
+    autoInitialize(_autoInitialize),
+    group(nullptr),
+    metrics(*this, metricsPrefix) {}
+
+
 void LogProcess::initialize()
 {
   if (group != nullptr) {
@@ -679,6 +694,27 @@ Log::Log(
         timeout,
         znode,
         auth,
+        autoInitialize,
+        metricsPrefix);
+
+  spawn(process);
+}
+
+
+Log::Log(
+    int quorum,
+    const string& path,
+    const string& logNetworkModule,
+    bool autoInitialize,
+    const Option<std::string>& metricsPrefix)
+{
+  GOOGLE_PROTOBUF_VERIFY_VERSION;
+
+  process =
+    new LogProcess(
+        quorum,
+        path,
+        logNetworkModule,
         autoInitialize,
         metricsPrefix);
 
