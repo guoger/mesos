@@ -251,18 +251,26 @@ int main(int argc, char** argv)
     os::setenv("LIBPROCESS_ADVERTISE_PORT", flags.advertise_port.get());
   }
 
-  if (flags.zk.isNone()) {
-    if (flags.master_contender.isSome() ^ flags.master_detector.isSome()) {
+  if (zk.isNone()) {
+    if (!(flags.master_contender.isSome() &&
+          flags.master_detector.isSome() &&
+          flags.pid_group.isSome()) &&
+        (flags.master_contender.isSome() ||
+         flags.master_detector.isSome() ||
+         flags.pid_group.isSome()))
+    {
       EXIT(EXIT_FAILURE)
-        << flags.usage("Both --master_contender and --master_detector should "
-                       "be specified or omitted.");
+        << flags.usage("All of --master_contender, --master_detector and "
+                       "--pid_group should be specified or omitted.");
     }
   } else {
-    if (flags.master_contender.isSome() || flags.master_detector.isSome()) {
+    if (flags.master_contender.isSome() ||
+        flags.master_detector.isSome() ||
+        flags.pid_group.isSome()) {
       EXIT(EXIT_FAILURE)
         << flags.usage("Only one of --zk or the "
-                       "--master_contender/--master_detector "
-                       "pair should be specified.");
+                       "--master_contender/--master_detector/--pid_group "
+                       "tuple should be specified.");
     }
   }
 
