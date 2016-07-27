@@ -100,9 +100,12 @@ public:
             "kind is '" + expectedKind + "'");
       }
 
-      T* instance =
-        module->create(
-            params.isSome() ? params.get() : moduleParameters[moduleName]);
+      Parameters parameters(moduleParameters[moduleName]);
+      if (params.isSome()) {
+        parameters.MergeFrom(params.get());
+      }
+
+      T* instance = module->create(parameters);
       if (instance == nullptr) {
         return Error("Error creating Module instance for '" + moduleName + "'");
       }

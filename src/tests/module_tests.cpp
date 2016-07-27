@@ -314,30 +314,43 @@ TEST_F(ModuleTest, ValidParameters)
 }
 
 
-// Tests overriding of module parameters programatically.
-TEST_F(ModuleTest, OverrideJson)
+// Tests merging of module parameters where runtime parameters
+// take precedence.
+TEST_F(ModuleTest, ParametersMergeWithPriority)
 {
   Modules modules = getModules(
       DEFAULT_MODULE_LIBRARY_NAME,
-      DEFAULT_MODULE_NAME,
-      "operation",
-      "sum");
+      DEFAULT_MODULE_NAME);
+  Modules::Library* library = modules.mutable_libraries(0);
+  Modules::Library::Module* _module = library->mutable_modules(0);
+  Parameter* parameter = _module->add_parameters();
+  parameter->set_key("key1");
+  parameter->set_value("foo");
+  parameter = _module->add_parameters();
+  parameter->set_key("key2");
+  parameter->set_value("bar");
 
   EXPECT_SOME(ModuleManager::load(modules));
 
   Parameters parameters;
-  Parameter* parameter = parameters.add_parameter();
-  parameter->set_key("foo");
-  parameter->set_value("foovalue");
+  parameter = parameters.add_parameter();
+  parameter->set_key("key2");
+  parameter->set_value("baz");
+
+  parameter = parameters.add_parameter();
+  parameter->set_key("key3");
+  parameter->set_value("qux");
 
   module = ModuleManager::create<TestModule>(DEFAULT_MODULE_NAME, parameters);
   EXPECT_SOME(module);
 
-  parameters = module.get()->parameters();
+  parameter = parameters.add_parameter();
+  parameter->set_key("key1");
+  parameter->set_value("foo");
 
-  EXPECT_EQ(1, parameters.parameter_size());
-  EXPECT_EQ("foo", parameters.parameter(0).key());
-  EXPECT_EQ("foovalue", parameters.parameter(0).value());
+  Parameters _parameters = module.get()->parameters();
+
+  ::testing::UnorderedElementsAre(parameters, _parameters);
 }
 
 
