@@ -208,6 +208,15 @@ public:
       bool autoInitialize = false,
       const Option<std::string>& metricsPrefix = None());
 
+  // Creates a new replicated log that assumes the specified quorum
+  // size, is backed by a file at the specified path, and coordinates
+  // with other replicas associated with the specified pid_group module.
+  Log(int quorum,
+      const std::string& path,
+      const std::string& pidGoupModule,
+      bool autoInitialize = false,
+      const Option<std::string>& metricsPrefix = None());
+
   ~Log();
 
   // Returns a position based off of the bytes recovered from

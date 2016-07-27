@@ -65,6 +65,13 @@ public:
       bool _autoInitialize,
       const Option<std::string>& metricsPrefix);
 
+  LogProcess(
+      size_t _quorum,
+      const std::string& path,
+      const std::string& pidGroupModule,
+      bool _autoInitialize,
+      const Option<std::string>& metricsPrefix);
+
   static process::PIDGroup* createPIDGroup(
       const std::string& pidGroupModule,
       const process::UPID& upid);
