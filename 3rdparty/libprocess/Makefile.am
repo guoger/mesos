@@ -117,6 +117,7 @@ BUNDLED_DEPS += $(PICOJSON)-stamp
 endif
 
 if WITH_BUNDLED_PROTOBUF
+PROTOBUF_INCLUDE_FLAGS = -I$(PROTOBUF)/src
 BUNDLED_DEPS += $(PROTOBUF)-build-stamp
 endif
 
@@ -150,6 +151,7 @@ libprocess_la_SOURCES =		\
   src/logging.cpp		\
   src/metrics/metrics.cpp	\
   src/pid.cpp			\
+  src/pid_group.cpp		\
   src/poll_socket.cpp		\
   src/poll_socket.hpp		\
   src/profiler.cpp		\
@@ -185,7 +187,8 @@ libprocess_la_CPPFLAGS =			\
   $(HTTP_PARSER_INCLUDE_FLAGS)			\
   $(LIB_EV_INCLUDE_FLAGS)			\
   $(PICOJSON_INCLUDE_FLAGS)			\
-  $(STOUT_INCLUDE_FLAGS)			\
+  $(PROTOBUF_INCLUDE_FLAGS)			\
+  $(STOUT_INCLUDE_FLAGS)				\
   $(AM_CPPFLAGS)
 
 if ENABLE_LIBEVENT
@@ -228,6 +231,7 @@ libprocess_tests_SOURCES =					\
   src/tests/metrics_tests.cpp					\
   src/tests/mutex_tests.cpp					\
   src/tests/owned_tests.cpp					\
+  src/tests/pid_group_tests.cpp					\
   src/tests/process_tests.cpp					\
   src/tests/profiler_tests.cpp					\
   src/tests/queue_tests.cpp					\
