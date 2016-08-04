@@ -14,8 +14,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef __NETWORK_HPP__
-#define __NETWORK_HPP__
+#ifndef __PID_GROUP_ZOOKEEPER_HPP__
+#define __PID_GROUP_ZOOKEEPER_HPP__
 
 #include <list>
 #include <set>
@@ -35,49 +35,15 @@
 #include <stout/option.hpp>
 #include <stout/set.hpp>
 
+#include "log/pid_group/zookeeper.hpp"
+
 #include "logging/logging.hpp"
 
-class ZooKeeperPIDGroup : public process::PIDGroup
-{
-public:
-  ZooKeeperPIDGroup(
-      const std::string& servers,
-      const Duration& timeout,
-      const std::string& znode,
-      const Option<zookeeper::Authentication>& auth,
-      const std::set<process::UPID>& base = std::set<process::UPID>());
+namespace mesos {
+namespace internal {
+namespace log {
 
-private:
-  typedef ZooKeeperPIDGroup This;
-
-  // Not copyable, not assignable.
-  ZooKeeperPIDGroup(const ZooKeeperPIDGroup&);
-  ZooKeeperPIDGroup& operator=(const ZooKeeperPIDGroup&);
-
-  // Helper that sets up a watch on the group.
-  void watch(const std::set<zookeeper::Group::Membership>& expected);
-
-  // Invoked when the group memberships have changed.
-  void watched(const process::Future<std::set<zookeeper::Group::Membership>>&);
-
-  // Invoked when group members data has been collected.
-  void collected(
-      const process::Future<std::list<Option<std::string>>>& datas);
-
-  zookeeper::Group group;
-  process::Future<std::set<zookeeper::Group::Membership>> memberships;
-
-  // The set of PIDs that are always in the PID group.
-  std::set<process::UPID> base;
-
-  // NOTE: The declaration order here is important. We want to delete
-  // the 'executor' before we delete the 'group' so that we don't get
-  // spurious fatal errors when the 'group' is being deleted.
-  process::Executor executor;
-};
-
-
-inline ZooKeeperPIDGroup::ZooKeeperPIDGroup(
+ZooKeeperPIDGroup::ZooKeeperPIDGroup(
     const std::string& servers,
     const Duration& timeout,
     const std::string& znode,
@@ -93,16 +59,17 @@ inline ZooKeeperPIDGroup::ZooKeeperPIDGroup(
 }
 
 
-inline void ZooKeeperPIDGroup::watch(
+void ZooKeeperPIDGroup::watch(
     const std::set<zookeeper::Group::Membership>& expected)
 {
   memberships = group.watch(expected);
   memberships
-    .onAny(executor.defer(lambda::bind(&This::watched, this, lambda::_1)));
+    .onAny(executor.defer(
+        lambda::bind(&ZooKeeperPIDGroup::watched, this, lambda::_1)));
 }
 
 
-inline void ZooKeeperPIDGroup::watched(
+void ZooKeeperPIDGroup::watched(
     const process::Future<std::set<zookeeper::Group::Membership> >&)
 {
   if (memberships.isFailed()) {
@@ -132,11 +99,12 @@ inline void ZooKeeperPIDGroup::watched(
              datas.discard();
              return process::Failure("Timed out");
            })
-    .onAny(executor.defer(lambda::bind(&This::collected, this, lambda::_1)));
+    .onAny(executor.defer(
+        lambda::bind(&ZooKeeperPIDGroup::collected, this, lambda::_1)));
 }
 
 
-inline void ZooKeeperPIDGroup::collected(
+void ZooKeeperPIDGroup::collected(
     const process::Future<std::list<Option<std::string> > >& datas)
 {
   if (datas.isFailed()) {
@@ -172,4 +140,9 @@ inline void ZooKeeperPIDGroup::collected(
   watch(memberships.get());
 }
 
-#endif // __NETWORK_HPP__
+} // namespace log {
+} // namespace internal {
+} // namespace mesos {
+
+
+#endif // __PID_GROUP_ZOOKEEPER_HPP__

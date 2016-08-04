@@ -34,7 +34,9 @@
 #include <stout/nothing.hpp>
 
 #include "log/coordinator.hpp"
-#include "log/network.hpp"
+
+#include "log/pid_group/zookeeper.hpp"
+
 #include "log/recover.hpp"
 #include "log/replica.hpp"
 
