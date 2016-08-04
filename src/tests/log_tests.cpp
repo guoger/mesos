@@ -47,7 +47,6 @@
 #include "log/catchup.hpp"
 #include "log/coordinator.hpp"
 #include "log/leveldb.hpp"
-#include "log/network.hpp"
 #include "log/storage.hpp"
 #include "log/recover.hpp"
 #include "log/replica.hpp"
@@ -79,55 +78,6 @@ using mesos::log::Log;
 namespace mesos {
 namespace internal {
 namespace tests {
-
-
-TEST(NetworkTest, Watch)
-{
-  UPID pid1 = ProcessBase().self();
-  UPID pid2 = ProcessBase().self();
-
-  Network network;
-
-  // Test the default parameter.
-  Future<size_t> future = network.watch(1u);
-  AWAIT_READY(future);
-  EXPECT_EQ(0u, future.get());
-
-  future = network.watch(2u, Network::NOT_EQUAL_TO);
-  AWAIT_READY(future);
-  EXPECT_EQ(0u, future.get());
-
-  future = network.watch(0u, Network::GREATER_THAN_OR_EQUAL_TO);
-  AWAIT_READY(future);
-  EXPECT_EQ(0u, future.get());
-
-  future = network.watch(1u, Network::LESS_THAN);
-  AWAIT_READY(future);
-  EXPECT_EQ(0u, future.get());
-
-  network.add(pid1);
-
-  future = network.watch(1u, Network::EQUAL_TO);
-  AWAIT_READY(future);
-  EXPECT_EQ(1u, future.get());
-
-  future = network.watch(1u, Network::GREATER_THAN);
-  ASSERT_TRUE(future.isPending());
-
-  network.add(pid2);
-
-  AWAIT_READY(future);
-  EXPECT_EQ(2u, future.get());
-
-  future = network.watch(1u, Network::LESS_THAN_OR_EQUAL_TO);
-  ASSERT_TRUE(future.isPending());
-
-  network.remove(pid2);
-
-  AWAIT_READY(future);
-  EXPECT_EQ(1u, future.get());
-}
-
 
 template <typename T>
 class LogStorageTest : public TemporaryDirectoryTest {};
@@ -606,7 +556,7 @@ TEST_F(CoordinatorTest, Elect)
   pids.insert(replica1->pid());
   pids.insert(replica2->pid());
 
-  Shared<Network> network(new Network(pids));
+  Shared<PIDGroup> network(new PIDGroup(pids));
 
   Coordinator coord(2, replica1, network);
 
@@ -648,7 +598,7 @@ TEST_F(CoordinatorTest, ElectWithClockPaused)
   pids.insert(replica1->pid());
   pids.insert(replica2->pid());
 
-  Shared<Network> network(new Network(pids));
+  Shared<PIDGroup> network(new PIDGroup(pids));
 
   Coordinator coord(2, replica1, network);
 
@@ -679,7 +629,7 @@ TEST_F(CoordinatorTest, AppendRead)
   pids.insert(replica1->pid());
   pids.insert(replica2->pid());
 
-  Shared<Network> network(new Network(pids));
+  Shared<PIDGroup> network(new PIDGroup(pids));
 
   Coordinator coord(2, replica1, network);
 
@@ -728,7 +678,7 @@ TEST_F(CoordinatorTest, AppendReadError)
   pids.insert(replica1->pid());
   pids.insert(replica2->pid());
 
-  Shared<Network> network(new Network(pids));
+  Shared<PIDGroup> network(new PIDGroup(pids));
 
   Coordinator coord(2, replica1, network);
 
@@ -774,7 +724,7 @@ TEST_F(CoordinatorTest, AppendDiscarded)
   pids.insert(replica1->pid());
   pids.insert(replica2->pid());
 
-  Shared<Network> network(new Network(pids));
+  Shared<PIDGroup> network(new PIDGroup(pids));
 
   Coordinator coord(2, replica1, network);
 
@@ -817,7 +767,7 @@ TEST_F(CoordinatorTest, ElectNoQuorum)
   set<UPID> pids;
   pids.insert(replica->pid());
 
-  Shared<Network> network(new Network(pids));
+  Shared<PIDGroup> network(new PIDGroup(pids));
 
   Coordinator coord(2, replica, network);
 
@@ -851,7 +801,7 @@ TEST_F(CoordinatorTest, AppendNoQuorum)
   pids.insert(replica1->pid());
   pids.insert(replica2->pid());
 
-  Shared<Network> network(new Network(pids));
+  Shared<PIDGroup> network(new PIDGroup(pids));
 
   Coordinator coord(2, replica1, network);
 
@@ -895,7 +845,7 @@ TEST_F(CoordinatorTest, Failover)
   pids.insert(replica1->pid());
   pids.insert(replica2->pid());
 
-  Shared<Network> network1(new Network(pids));
+  Shared<PIDGroup> network1(new PIDGroup(pids));
 
   Coordinator coord1(2, replica1, network1);
 
@@ -915,7 +865,7 @@ TEST_F(CoordinatorTest, Failover)
     EXPECT_EQ(1u, position);
   }
 
-  Shared<Network> network2(new Network(pids));
+  Shared<PIDGroup> network2(new PIDGroup(pids));
 
   Coordinator coord2(2, replica2, network2);
 
@@ -954,7 +904,7 @@ TEST_F(CoordinatorTest, Demoted)
   pids.insert(replica1->pid());
   pids.insert(replica2->pid());
 
-  Shared<Network> network1(new Network(pids));
+  Shared<PIDGroup> network1(new PIDGroup(pids));
 
   Coordinator coord1(2, replica1, network1);
 
@@ -974,7 +924,7 @@ TEST_F(CoordinatorTest, Demoted)
     EXPECT_EQ(1u, position1);
   }
 
-  Shared<Network> network2(new Network(pids));
+  Shared<PIDGroup> network2(new PIDGroup(pids));
 
   Coordinator coord2(2, replica2, network2);
 
@@ -1033,7 +983,7 @@ TEST_F(CoordinatorTest, Fill)
   pids.insert(replica1->pid());
   pids.insert(replica2->pid());
 
-  Shared<Network> network1(new Network(pids));
+  Shared<PIDGroup> network1(new PIDGroup(pids));
 
   Coordinator coord1(2, replica1, network1);
 
@@ -1059,7 +1009,7 @@ TEST_F(CoordinatorTest, Fill)
   pids.insert(replica2->pid());
   pids.insert(replica3->pid());
 
-  Shared<Network> network2(new Network(pids));
+  Shared<PIDGroup> network2(new PIDGroup(pids));
 
   Coordinator coord2(2, replica3, network2);
 
@@ -1113,7 +1063,7 @@ TEST_F(CoordinatorTest, NotLearnedFill)
   pids.insert(replica1->pid());
   pids.insert(replica2->pid());
 
-  Shared<Network> network1(new Network(pids));
+  Shared<PIDGroup> network1(new PIDGroup(pids));
 
   Coordinator coord1(2, replica1, network1);
 
@@ -1139,7 +1089,7 @@ TEST_F(CoordinatorTest, NotLearnedFill)
   pids.insert(replica2->pid());
   pids.insert(replica3->pid());
 
-  Shared<Network> network2(new Network(pids));
+  Shared<PIDGroup> network2(new PIDGroup(pids));
 
   Coordinator coord2(2, replica3, network2);
 
@@ -1185,7 +1135,7 @@ TEST_F(CoordinatorTest, MultipleAppends)
   pids.insert(replica1->pid());
   pids.insert(replica2->pid());
 
-  Shared<Network> network(new Network(pids));
+  Shared<PIDGroup> network(new PIDGroup(pids));
 
   Coordinator coord(2, replica1, network);
 
@@ -1239,7 +1189,7 @@ TEST_F(CoordinatorTest, MultipleAppendsNotLearnedFill)
   pids.insert(replica1->pid());
   pids.insert(replica2->pid());
 
-  Shared<Network> network1(new Network(pids));
+  Shared<PIDGroup> network1(new PIDGroup(pids));
 
   Coordinator coord1(2, replica1, network1);
 
@@ -1261,7 +1211,7 @@ TEST_F(CoordinatorTest, MultipleAppendsNotLearnedFill)
   pids.insert(replica2->pid());
   pids.insert(replica3->pid());
 
-  Shared<Network> network2(new Network(pids));
+  Shared<PIDGroup> network2(new PIDGroup(pids));
 
   Coordinator coord2(2, replica3, network2);
 
@@ -1308,7 +1258,7 @@ TEST_F(CoordinatorTest, Truncate)
   pids.insert(replica1->pid());
   pids.insert(replica2->pid());
 
-  Shared<Network> network(new Network(pids));
+  Shared<PIDGroup> network(new PIDGroup(pids));
 
   Coordinator coord(2, replica1, network);
 
@@ -1374,7 +1324,7 @@ TEST_F(CoordinatorTest, TruncateNotLearnedFill)
   pids.insert(replica1->pid());
   pids.insert(replica2->pid());
 
-  Shared<Network> network1(new Network(pids));
+  Shared<PIDGroup> network1(new PIDGroup(pids));
 
   Coordinator coord1(2, replica1, network1);
 
@@ -1402,7 +1352,7 @@ TEST_F(CoordinatorTest, TruncateNotLearnedFill)
   pids.insert(replica2->pid());
   pids.insert(replica3->pid());
 
-  Shared<Network> network2(new Network(pids));
+  Shared<PIDGroup> network2(new PIDGroup(pids));
 
   Coordinator coord2(2, replica3, network2);
 
@@ -1459,7 +1409,7 @@ TEST_F(CoordinatorTest, TruncateLearnedFill)
   pids.insert(replica1->pid());
   pids.insert(replica2->pid());
 
-  Shared<Network> network1(new Network(pids));
+  Shared<PIDGroup> network1(new PIDGroup(pids));
 
   Coordinator coord1(2, replica1, network1);
 
@@ -1487,7 +1437,7 @@ TEST_F(CoordinatorTest, TruncateLearnedFill)
   pids.insert(replica2->pid());
   pids.insert(replica3->pid());
 
-  Shared<Network> network2(new Network(pids));
+  Shared<PIDGroup> network2(new PIDGroup(pids));
 
   Coordinator coord2(2, replica3, network2);
 
@@ -1555,7 +1505,7 @@ TEST_F(CoordinatorTest, RecoveryRace)
   MockReplica* replica3(new MockReplica(path3));
 
   set<UPID> pids{replica1->pid(), replica2->pid(), replica3->pid()};
-  Shared<Network> network(new Network(pids));
+  Shared<PIDGroup> network(new PIDGroup(pids));
 
   // Set when each replica transitions from EMPTY -> STARTING; the
   // replica will then block until the associated "continue" promise
@@ -1694,7 +1644,7 @@ TEST_F(RecoverTest, RacingCatchup)
   pids.insert(replica2->pid());
   pids.insert(replica3->pid());
 
-  Shared<Network> network1(new Network(pids));
+  Shared<PIDGroup> network1(new PIDGroup(pids));
 
   Coordinator coord1(3, replica1, network1);
 
@@ -1717,7 +1667,7 @@ TEST_F(RecoverTest, RacingCatchup)
   pids.insert(replica4->pid());
   pids.insert(replica5->pid());
 
-  Shared<Network> network2(new Network(pids));
+  Shared<PIDGroup> network2(new PIDGroup(pids));
 
   Future<Owned<Replica>> recovering4 = recover(3, replica4, network2);
   Future<Owned<Replica>> recovering5 = recover(3, replica5, network2);
@@ -1794,7 +1744,7 @@ TEST_F(RecoverTest, CatchupRetry)
   pids.insert(replica1->pid());
   pids.insert(replica2->pid());
 
-  Shared<Network> network1(new Network(pids));
+  Shared<PIDGroup> network1(new PIDGroup(pids));
 
   Coordinator coord(2, replica1, network1);
 
@@ -1817,7 +1767,7 @@ TEST_F(RecoverTest, CatchupRetry)
 
   pids.insert(replica3->pid());
 
-  Shared<Network> network2(new Network(pids));
+  Shared<PIDGroup> network2(new PIDGroup(pids));
 
   // Drop a promise request to replica1 so that the catch-up process
   // won't be able to get a quorum of explicit promises. Also, since
@@ -1868,7 +1818,7 @@ TEST_F(RecoverTest, AutoInitialization)
   pids.insert(replica2->pid());
   pids.insert(replica3->pid());
 
-  Shared<Network> network(new Network(pids));
+  Shared<PIDGroup> network(new PIDGroup(pids));
 
   Future<Owned<Replica>> recovering1 = recover(2, replica1, network, true);
   Future<Owned<Replica>> recovering2 = recover(2, replica2, network, true);
@@ -1943,7 +1893,7 @@ TEST_F(RecoverTest, AutoInitializationRetry)
   pids.insert(replica2->pid());
   pids.insert(replica3->pid());
 
-  Shared<Network> network(new Network(pids));
+  Shared<PIDGroup> network(new PIDGroup(pids));
 
   // Simulate the case where replica3 is temporarily removed.
   DROP_PROTOBUF(RecoverRequest(), _, Eq(replica3->pid()));

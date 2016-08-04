@@ -20,6 +20,7 @@
 
 #include <process/collect.hpp>
 #include <process/id.hpp>
+#include <process/pid_group.hpp>
 #include <process/process.hpp>
 #include <process/timer.hpp>
 
@@ -45,13 +46,13 @@ public:
   CatchUpProcess(
       size_t _quorum,
       const Shared<Replica>& _replica,
-      const Shared<Network>& _network,
+      const Shared<PIDGroup>& _pidGroup,
       uint64_t _proposal,
       uint64_t _position)
     : ProcessBase(ID::generate("log-catch-up")),
       quorum(_quorum),
       replica(_replica),
-      network(_network),
+      pidGroup(_pidGroup),
       position(_position),
       proposal(_proposal) {}
 
@@ -106,7 +107,7 @@ private:
 
   void fill()
   {
-    filling = log::fill(quorum, network, proposal, position);
+    filling = log::fill(quorum, pidGroup, proposal, position);
     filling.onAny(defer(self(), &Self::filled));
   }
 
@@ -130,7 +131,7 @@ private:
 
   const size_t quorum;
   const Shared<Replica> replica;
-  const Shared<Network> network;
+  const Shared<PIDGroup> pidGroup;
   const uint64_t position;
 
   uint64_t proposal;
@@ -147,7 +148,7 @@ private:
 static Future<uint64_t> catchup(
     size_t quorum,
     const Shared<Replica>& replica,
-    const Shared<Network>& network,
+    const Shared<PIDGroup>& pidGroup,
     uint64_t proposal,
     uint64_t position)
 {
@@ -155,7 +156,7 @@ static Future<uint64_t> catchup(
     new CatchUpProcess(
         quorum,
         replica,
-        network,
+        pidGroup,
         proposal,
         position);
 
@@ -175,14 +176,14 @@ public:
   BulkCatchUpProcess(
       size_t _quorum,
       const Shared<Replica>& _replica,
-      const Shared<Network>& _network,
+      const Shared<PIDGroup>& _pidGroup,
       uint64_t _proposal,
       const Interval<uint64_t>& _positions,
       const Duration& _timeout)
     : ProcessBase(ID::generate("log-bulk-catch-up")),
       quorum(_quorum),
       replica(_replica),
-      network(_network),
+      pidGroup(_pidGroup),
       positions(_positions),
       timeout(_timeout),
       proposal(_proposal) {}
@@ -231,7 +232,7 @@ private:
 
     // Store the future so that we can discard it if the user wants to
     // cancel the catch-up operation.
-    catching = log::catchup(quorum, replica, network, proposal, current)
+    catching = log::catchup(quorum, replica, pidGroup, proposal, current)
       .onDiscarded(defer(self(), &Self::discarded))
       .onFailed(defer(self(), &Self::failed))
       .onReady(defer(self(), &Self::succeeded));
@@ -273,7 +274,7 @@ private:
 
   const size_t quorum;
   const Shared<Replica> replica;
-  const Shared<Network> network;
+  const Shared<PIDGroup> pidGroup;
   const Interval<uint64_t> positions;
   const Duration timeout;
 
@@ -288,7 +289,7 @@ private:
 static Future<Nothing> catchup(
     size_t quorum,
     const Shared<Replica>& replica,
-    const Shared<Network>& network,
+    const Shared<PIDGroup>& pidGroup,
     const Option<uint64_t>& proposal,
     const Interval<uint64_t>& positions,
     const Duration& timeout)
@@ -297,7 +298,7 @@ static Future<Nothing> catchup(
     new BulkCatchUpProcess(
         quorum,
         replica,
-        network,
+        pidGroup,
         proposal.getOrElse(0),
         positions,
         timeout);
@@ -316,7 +317,7 @@ static Future<Nothing> catchup(
 Future<Nothing> catchup(
     size_t quorum,
     const Shared<Replica>& replica,
-    const Shared<Network>& network,
+    const Shared<PIDGroup>& pidGroup,
     const Option<uint64_t>& proposal,
     const IntervalSet<uint64_t>& positions,
     const Duration& timeout)
@@ -325,7 +326,7 @@ Future<Nothing> catchup(
   Future<Nothing> (*f)(
       size_t quorum,
       const Shared<Replica>& replica,
-      const Shared<Network>& network,
+      const Shared<PIDGroup>& pidGroup,
       const Option<uint64_t>& proposal,
       const Interval<uint64_t>& positions,
       const Duration& timeout) = &catchup;
@@ -338,7 +339,7 @@ Future<Nothing> catchup(
             f,
             quorum,
             replica,
-            network,
+            pidGroup,
             proposal,
             interval,
             timeout));

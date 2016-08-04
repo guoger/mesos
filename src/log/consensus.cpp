@@ -22,6 +22,7 @@
 #include <process/defer.hpp>
 #include <process/delay.hpp>
 #include <process/id.hpp>
+#include <process/pid_group.hpp>
 #include <process/process.hpp>
 
 #include <stout/check.hpp>
@@ -69,12 +70,12 @@ class ExplicitPromiseProcess : public Process<ExplicitPromiseProcess>
 public:
   ExplicitPromiseProcess(
       size_t _quorum,
-      const Shared<Network>& _network,
+      const Shared<PIDGroup>& _pidGroup,
       uint64_t _proposal,
       uint64_t _position)
     : ProcessBase(ID::generate("log-explicit-promise")),
       quorum(_quorum),
-      network(_network),
+      pidGroup(_pidGroup),
       proposal(_proposal),
       position(_position),
       responsesReceived(0),
@@ -92,9 +93,9 @@ protected:
         static_cast<void(*)(const UPID&, bool)>(terminate), self(), true));
 
     // Wait until there are enough (i.e., quorum of) replicas in the
-    // network. This is because if there are less than quorum number
-    // of replicas in the network, the operation will not finish.
-    network->watch(quorum, Network::GREATER_THAN_OR_EQUAL_TO)
+    // PID group. This is because if there are less than quorum number
+    // of replicas in the PID group, the operation will not finish.
+    pidGroup->watch(quorum, PIDGroup::GREATER_THAN_OR_EQUAL_TO)
       .onAny(defer(self(), &Self::watched, lambda::_1));
   }
 
@@ -126,7 +127,7 @@ private:
     request.set_proposal(proposal);
     request.set_position(position);
 
-    network->broadcast(protocol::promise, request)
+    pidGroup->broadcast(protocol::promise, request)
       .onAny(defer(self(), &Self::broadcasted, lambda::_1));
   }
 
@@ -255,7 +256,7 @@ private:
   }
 
   const size_t quorum;
-  const Shared<Network> network;
+  const Shared<PIDGroup> pidGroup;
   const uint64_t proposal;
   const uint64_t position;
 
@@ -275,11 +276,11 @@ class ImplicitPromiseProcess : public Process<ImplicitPromiseProcess>
 public:
   ImplicitPromiseProcess(
       size_t _quorum,
-      const Shared<Network>& _network,
+      const Shared<PIDGroup>& _pidGroup,
       uint64_t _proposal)
     : ProcessBase(ID::generate("log-implicit-promise")),
       quorum(_quorum),
-      network(_network),
+      pidGroup(_pidGroup),
       proposal(_proposal),
       responsesReceived(0),
       ignoresReceived(0) {}
@@ -296,9 +297,9 @@ protected:
         static_cast<void(*)(const UPID&, bool)>(terminate), self(), true));
 
     // Wait until there are enough (i.e., quorum of) replicas in the
-    // network. This is because if there are less than quorum number
-    // of replicas in the network, the operation will not finish.
-    network->watch(quorum, Network::GREATER_THAN_OR_EQUAL_TO)
+    // PID group. This is because if there are less than quorum number
+    // of replicas in the PID group, the operation will not finish.
+    pidGroup->watch(quorum, PIDGroup::GREATER_THAN_OR_EQUAL_TO)
       .onAny(defer(self(), &Self::watched, lambda::_1));
   }
 
@@ -329,7 +330,7 @@ private:
 
     request.set_proposal(proposal);
 
-    network->broadcast(protocol::promise, request)
+    pidGroup->broadcast(protocol::promise, request)
       .onAny(defer(self(), &Self::broadcasted, lambda::_1));
   }
 
@@ -418,7 +419,7 @@ private:
   }
 
   const size_t quorum;
-  const Shared<Network> network;
+  const Shared<PIDGroup> pidGroup;
   const uint64_t proposal;
 
   PromiseRequest request;
@@ -437,12 +438,12 @@ class WriteProcess : public Process<WriteProcess>
 public:
   WriteProcess(
       size_t _quorum,
-      const Shared<Network>& _network,
+      const Shared<PIDGroup>& _pidGroup,
       uint64_t _proposal,
       const Action& _action)
     : ProcessBase(ID::generate("log-write")),
       quorum(_quorum),
-      network(_network),
+      pidGroup(_pidGroup),
       proposal(_proposal),
       action(_action),
       responsesReceived(0),
@@ -460,9 +461,9 @@ protected:
         static_cast<void(*)(const UPID&, bool)>(terminate), self(), true));
 
     // Wait until there are enough (i.e., quorum of) replicas in the
-    // network. This is because if there are less than quorum number
-    // of replicas in the network, the operation will not finish.
-    network->watch(quorum, Network::GREATER_THAN_OR_EQUAL_TO)
+    // PID group. This is because if there are less than quorum number
+    // of replicas in the PID group, the operation will not finish.
+    pidGroup->watch(quorum, PIDGroup::GREATER_THAN_OR_EQUAL_TO)
       .onAny(defer(self(), &Self::watched, lambda::_1));
   }
 
@@ -511,7 +512,7 @@ private:
         LOG(FATAL) << "Unknown Action::Type " << action.type();
     }
 
-    network->broadcast(protocol::write, request)
+    pidGroup->broadcast(protocol::write, request)
       .onAny(defer(self(), &Self::broadcasted, lambda::_1));
   }
 
@@ -588,7 +589,7 @@ private:
   }
 
   const size_t quorum;
-  const Shared<Network> network;
+  const Shared<PIDGroup> pidGroup;
   const uint64_t proposal;
   const Action action;
 
@@ -607,12 +608,12 @@ class FillProcess : public Process<FillProcess>
 public:
   FillProcess(
       size_t _quorum,
-      const Shared<Network>& _network,
+      const Shared<PIDGroup>& _pidGroup,
       uint64_t _proposal,
       uint64_t _position)
     : ProcessBase(ID::generate("log-fill")),
       quorum(_quorum),
-      network(_network),
+      pidGroup(_pidGroup),
       position(_position),
       proposal(_proposal) {}
 
@@ -644,7 +645,7 @@ protected:
 private:
   void runPromisePhase()
   {
-    promising = log::promise(quorum, network, proposal, position);
+    promising = log::promise(quorum, pidGroup, proposal, position);
     promising.onAny(defer(self(), &Self::checkPromisePhase));
   }
 
@@ -704,7 +705,7 @@ private:
   {
     CHECK(!action.has_learned() || !action.learned());
 
-    writing = log::write(quorum, network, proposal, action);
+    writing = log::write(quorum, pidGroup, proposal, action);
     writing.onAny(defer(self(), &Self::checkWritePhase, action));
   }
 
@@ -740,7 +741,7 @@ private:
     // broadcasted before the fill process completes. Some users may
     // rely on this invariant (e.g. checking if the local replica has
     // learned the action).
-    log::learn(network, action)
+    log::learn(pidGroup, action)
       .onAny(defer(self(), &Self::checkLearnPhase, action, lambda::_1));
   }
 
@@ -777,7 +778,7 @@ private:
   }
 
   const size_t quorum;
-  const Shared<Network> network;
+  const Shared<PIDGroup> pidGroup;
   const uint64_t position;
 
   uint64_t proposal;
@@ -795,7 +796,7 @@ private:
 
 Future<PromiseResponse> promise(
     size_t quorum,
-    const Shared<Network>& network,
+    const Shared<PIDGroup>& pidGroup,
     uint64_t proposal,
     const Option<uint64_t>& position)
 {
@@ -803,7 +804,7 @@ Future<PromiseResponse> promise(
     ImplicitPromiseProcess* process =
       new ImplicitPromiseProcess(
           quorum,
-          network,
+          pidGroup,
           proposal);
 
     Future<PromiseResponse> future = process->future();
@@ -813,7 +814,7 @@ Future<PromiseResponse> promise(
     ExplicitPromiseProcess* process =
       new ExplicitPromiseProcess(
           quorum,
-          network,
+          pidGroup,
           proposal,
           position.get());
 
@@ -826,14 +827,14 @@ Future<PromiseResponse> promise(
 
 Future<WriteResponse> write(
     size_t quorum,
-    const Shared<Network>& network,
+    const Shared<PIDGroup>& pidGroup,
     uint64_t proposal,
     const Action& action)
 {
   WriteProcess* process =
     new WriteProcess(
         quorum,
-        network,
+        pidGroup,
         proposal,
         action);
 
@@ -843,7 +844,7 @@ Future<WriteResponse> write(
 }
 
 
-Future<Nothing> learn(const Shared<Network>& network, const Action& action)
+Future<Nothing> learn(const Shared<PIDGroup>& pidGroup, const Action& action)
 {
   LearnedMessage message;
   message.mutable_action()->CopyFrom(action);
@@ -852,20 +853,20 @@ Future<Nothing> learn(const Shared<Network>& network, const Action& action)
     message.mutable_action()->set_learned(true);
   }
 
-  return network->broadcast(message);
+  return pidGroup->broadcast(message);
 }
 
 
 Future<Action> fill(
     size_t quorum,
-    const Shared<Network>& network,
+    const Shared<PIDGroup>& pidGroup,
     uint64_t proposal,
     uint64_t position)
 {
   FillProcess* process =
     new FillProcess(
         quorum,
-        network,
+        pidGroup,
         proposal,
         position);
 

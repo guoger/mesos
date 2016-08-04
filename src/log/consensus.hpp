@@ -20,13 +20,12 @@
 #include <stdint.h>
 
 #include <process/future.hpp>
+#include <process/pid_group.hpp>
 #include <process/shared.hpp>
 
 #include <stout/none.hpp>
 #include <stout/nothing.hpp>
 #include <stout/option.hpp>
-
-#include "log/network.hpp"
 
 #include "messages/log.hpp"
 
@@ -80,7 +79,7 @@ namespace log {
 // these responses.
 extern process::Future<PromiseResponse> promise(
     size_t quorum,
-    const process::Shared<Network>& network,
+    const process::Shared<process::PIDGroup>& pidGroup,
     uint64_t proposal,
     const Option<uint64_t>& position = None());
 
@@ -97,7 +96,7 @@ extern process::Future<PromiseResponse> promise(
 // we set the 'okay' field to true.
 extern process::Future<WriteResponse> write(
     size_t quorum,
-    const process::Shared<Network>& network,
+    const process::Shared<process::PIDGroup>& pidGroup,
     uint64_t proposal,
     const Action& action);
 
@@ -109,7 +108,7 @@ extern process::Future<WriteResponse> write(
 // log position. No need to wait for responses from replicas. When
 // the future is ready, the learned message has been broadcasted.
 extern process::Future<Nothing> learn(
-    const process::Shared<Network>& network,
+    const process::Shared<process::PIDGroup>& pidGroup,
     const Action& action);
 
 
@@ -123,7 +122,7 @@ extern process::Future<Nothing> learn(
 // operation succeeds.
 extern process::Future<Action> fill(
     size_t quorum,
-    const process::Shared<Network>& network,
+    const process::Shared<process::PIDGroup>& pidGroup,
     uint64_t proposal,
     uint64_t position);
 

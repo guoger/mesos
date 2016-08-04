@@ -21,8 +21,11 @@
 
 #include <mesos/log/log.hpp>
 
+#include <mesos/zookeeper/group.hpp>
+
 #include <process/future.hpp>
 #include <process/owned.hpp>
+#include <process/pid_group.hpp>
 #include <process/process.hpp>
 #include <process/shared.hpp>
 
@@ -87,7 +90,7 @@ private:
 
   const size_t quorum;
   process::Shared<Replica> replica;
-  process::Shared<Network> network;
+  process::Shared<process::PIDGroup> pidGroup;
   const bool autoInitialize;
 
   // For replica recovery.
@@ -191,7 +194,7 @@ private:
   void failed(const std::string& message, const std::string& reason);
 
   const size_t quorum;
-  const process::Shared<Network> network;
+  const process::Shared<process::PIDGroup> pidGroup;
 
   process::Future<process::Shared<Replica>> recovering;
   std::list<process::Promise<Nothing>*> promises;
