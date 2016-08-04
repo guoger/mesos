@@ -54,6 +54,10 @@ public:
   explicit PIDGroup(const std::set<process::UPID>& pids);
   virtual ~PIDGroup();
 
+  // This interface is used to initialize `base` iff pids are not available
+  // at construction time, which is the case for PIDGroup modules.
+  virtual void initialize(const process::UPID& _base);
+
   // Adds a PID to this PID group.
   void add(const process::UPID& pid);
 
@@ -85,6 +89,10 @@ public:
   process::Future<Nothing> broadcast(
       const M& m,
       const std::set<process::UPID>& filter = std::set<process::UPID>()) const;
+
+protected:
+  // The set of PIDs that are always in the PID group.
+  std::set<process::UPID> base;
 
 private:
   // Not copyable, not assignable.
