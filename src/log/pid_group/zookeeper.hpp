@@ -63,9 +63,6 @@ private:
   zookeeper::Group group;
   process::Future<std::set<zookeeper::Group::Membership> > memberships;
 
-  // The set of PIDs that are always in the PID group.
-  std::set<process::UPID> base;
-
   // NOTE: The declaration order here is important. We want to delete
   // the 'executor' before we delete the 'group' so that we don't get
   // spurious fatal errors when the 'group' is being deleted.

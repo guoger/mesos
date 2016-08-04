@@ -49,8 +49,9 @@ ZooKeeperPIDGroup::ZooKeeperPIDGroup(
     const std::string& znode,
     const Option<zookeeper::Authentication>& auth,
     const std::set<process::UPID>& _base)
-  : group(servers, timeout, znode, auth),
-    base(_base)
+  : PIDGroup(_base),
+    group(servers, timeout, znode, auth)
+
 {
   // PIDs from the base set are in the PID group from beginning.
   set(base);
