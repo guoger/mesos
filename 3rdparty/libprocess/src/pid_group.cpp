@@ -164,6 +164,7 @@ PIDGroup::PIDGroup()
 
 
 PIDGroup::PIDGroup(const std::set<process::UPID>& pids)
+  : base(pids)
 {
   process = new PIDGroupProcess(pids);
   process::spawn(process);
@@ -175,6 +176,12 @@ PIDGroup::~PIDGroup()
   process::terminate(process);
   process::wait(process);
   delete process;
+}
+
+
+void PIDGroup::initialize(const process::UPID& _base)
+{
+  // No-op.
 }
 
 
