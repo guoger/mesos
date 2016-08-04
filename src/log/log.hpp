@@ -25,6 +25,7 @@
 
 #include <process/future.hpp>
 #include <process/owned.hpp>
+#include <process/pid.hpp>
 #include <process/pid_group.hpp>
 #include <process/process.hpp>
 #include <process/shared.hpp>
@@ -63,6 +64,10 @@ public:
       const Option<zookeeper::Authentication>& auth,
       bool _autoInitialize,
       const Option<std::string>& metricsPrefix);
+
+  static process::PIDGroup* createPIDGroup(
+      const std::string& pidGroupModule,
+      const process::UPID& upid);
 
   // Recovers the log by catching up if needed. Returns a shared
   // pointer to the local replica if the recovery succeeds.
