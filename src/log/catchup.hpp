@@ -20,6 +20,7 @@
 #include <stdint.h>
 
 #include <process/future.hpp>
+#include <process/pid_group.hpp>
 #include <process/shared.hpp>
 
 #include <stout/duration.hpp>
@@ -27,7 +28,6 @@
 #include <stout/nothing.hpp>
 #include <stout/option.hpp>
 
-#include "log/network.hpp"
 #include "log/replica.hpp"
 
 namespace mesos {
@@ -45,7 +45,7 @@ namespace log {
 extern process::Future<Nothing> catchup(
     size_t quorum,
     const process::Shared<Replica>& replica,
-    const process::Shared<Network>& network,
+    const process::Shared<process::PIDGroup>& pidGroup,
     const Option<uint64_t>& proposal,
     const IntervalSet<uint64_t>& positions,
     const Duration& timeout = Seconds(10));

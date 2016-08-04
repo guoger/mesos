@@ -21,11 +21,11 @@
 
 #include <process/future.hpp>
 #include <process/owned.hpp>
+#include <process/pid_group.hpp>
 #include <process/shared.hpp>
 
 #include <stout/nothing.hpp>
 
-#include "log/network.hpp"
 #include "log/replica.hpp"
 
 namespace mesos {
@@ -52,7 +52,7 @@ namespace log {
 extern process::Future<process::Owned<Replica>> recover(
     size_t quorum,
     const process::Owned<Replica>& replica,
-    const process::Shared<Network>& network,
+    const process::Shared<process::PIDGroup>& pidGroup,
     bool autoInitialize = false);
 
 } // namespace log {

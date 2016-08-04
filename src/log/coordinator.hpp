@@ -22,11 +22,11 @@
 #include <string>
 
 #include <process/future.hpp>
+#include <process/pid_group.hpp>
 #include <process/shared.hpp>
 
 #include <stout/option.hpp>
 
-#include "log/network.hpp"
 #include "log/replica.hpp"
 
 namespace mesos {
@@ -43,7 +43,7 @@ public:
   Coordinator(
       size_t _quorum,
       const process::Shared<Replica>& _replica,
-      const process::Shared<Network>& _network);
+      const process::Shared<process::PIDGroup>& _pidGroup);
 
   ~Coordinator();
 

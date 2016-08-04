@@ -20,11 +20,15 @@
 
 #include <mesos/log/log.hpp>
 
+#include <mesos/zookeeper/group.hpp>
+
+#include <process/check.hpp>
 #include <process/defer.hpp>
 #include <process/dispatch.hpp>
 #include <process/future.hpp>
 #include <process/id.hpp>
 #include <process/owned.hpp>
+#include <process/pid_group.hpp>
 #include <process/process.hpp>
 #include <process/shared.hpp>
 
@@ -71,7 +75,7 @@ LogProcess::LogProcess(
   : ProcessBase(ID::generate("log")),
     quorum(_quorum),
     replica(new Replica(path)),
-    network(new Network(pids + (UPID) replica->pid())),
+    pidGroup(new PIDGroup(pids + (UPID) replica->pid())),
     autoInitialize(_autoInitialize),
     group(nullptr),
     metrics(*this, metricsPrefix) {}
@@ -89,7 +93,7 @@ LogProcess::LogProcess(
   : ProcessBase(ID::generate("log")),
     quorum(_quorum),
     replica(new Replica(path)),
-    network(new ZooKeeperNetwork(
+    pidGroup(new ZooKeeperPIDGroup(
         servers,
         timeout,
         znode,
@@ -142,13 +146,13 @@ void LogProcess::finalize()
 
   delete group;
 
-  // Wait for the shared pointers 'network' and 'replica' to become
+  // Wait for the shared pointers 'pidGroup' and 'replica' to become
   // unique (i.e., no other reference to them). These calls should not
   // be blocking for too long because at this moment, all operations
   // should have been cancelled or are being cancelled. We do this
   // because we want to make sure that after the log is deleted, all
   // operations associated with this log are terminated.
-  network.own().await();
+  pidGroup.own().await();
   replica.own().await();
 }
 
@@ -190,7 +194,7 @@ Future<Shared<Replica>> LogProcess::recover()
       log::recover(
           quorum,
           replica.own().get(),
-          network,
+          pidGroup,
           autoInitialize)
       .onAny(defer(self(), &Self::_recover));
   }
@@ -462,7 +466,7 @@ Log::Position LogReaderProcess::position(uint64_t value)
 LogWriterProcess::LogWriterProcess(Log* log)
   : ProcessBase(ID::generate("log-writer")),
     quorum(log->process->quorum),
-    network(log->process->network),
+    pidGroup(log->process->pidGroup),
     recovering(dispatch(log->process, &LogProcess::recover)),
     coordinator(nullptr),
     error(None()) {}
@@ -548,7 +552,7 @@ Future<Option<Log::Position>> LogWriterProcess::_start()
 
   CHECK_READY(recovering);
 
-  coordinator = new Coordinator(quorum, recovering.get(), network);
+  coordinator = new Coordinator(quorum, recovering.get(), pidGroup);
 
   LOG(INFO) << "Attempting to start the writer";
 

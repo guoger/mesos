@@ -23,6 +23,7 @@
 #include <process/defer.hpp>
 #include <process/dispatch.hpp>
 #include <process/id.hpp>
+#include <process/pid_group.hpp>
 #include <process/process.hpp>
 
 #include <stout/none.hpp>
@@ -47,11 +48,11 @@ public:
   CoordinatorProcess(
       size_t _quorum,
       const Shared<Replica>& _replica,
-      const Shared<Network>& _network)
+      const Shared<PIDGroup>& _pidGroup)
     : ProcessBase(ID::generate("log-coordinator")),
       quorum(_quorum),
       replica(_replica),
-      network(_network),
+      pidGroup(_pidGroup),
       state(INITIAL),
       proposal(0),
       index(0) {}
@@ -106,7 +107,7 @@ private:
 
   const size_t quorum;
   const Shared<Replica> replica;
-  const Shared<Network> network;
+  const Shared<PIDGroup> pidGroup;
 
   // The current state of the coordinator. A coordinator needs to be
   // elected first to perform append and truncate operations. If one
@@ -185,7 +186,7 @@ Future<Nothing> CoordinatorProcess::updateProposal(uint64_t promised)
 
 Future<PromiseResponse> CoordinatorProcess::runPromisePhase()
 {
-  return log::promise(quorum, network, proposal);
+  return log::promise(quorum, pidGroup, proposal);
 }
 
 
@@ -245,7 +246,7 @@ Future<Nothing> CoordinatorProcess::catchupMissingPositions(
   // implicitly promised positions and this just shortcuts that
   // process. See more details in MESOS-1165. We don't update the
   // class member 'proposal' here as it's for implicit promises.
-  return log::catchup(quorum, replica, network, proposal + 1, positions);
+  return log::catchup(quorum, replica, pidGroup, proposal + 1, positions);
 }
 
 
@@ -365,7 +366,7 @@ Future<Option<uint64_t>> CoordinatorProcess::write(const Action& action)
 
 Future<WriteResponse> CoordinatorProcess::runWritePhase(const Action& action)
 {
-  return log::write(quorum, network, proposal, action);
+  return log::write(quorum, pidGroup, proposal, action);
 }
 
 
@@ -389,7 +390,7 @@ Future<Option<uint64_t>> CoordinatorProcess::checkWritePhase(
 
 Future<Nothing> CoordinatorProcess::runLearnPhase(const Action& action)
 {
-  return log::learn(network, action);
+  return log::learn(pidGroup, action);
 }
 
 
@@ -446,9 +447,9 @@ void CoordinatorProcess::writingAborted()
 Coordinator::Coordinator(
     size_t quorum,
     const Shared<Replica>& replica,
-    const Shared<Network>& network)
+    const Shared<PIDGroup>& pidGroup)
 {
-  process = new CoordinatorProcess(quorum, replica, network);
+  process = new CoordinatorProcess(quorum, replica, pidGroup);
   spawn(process);
 }
 

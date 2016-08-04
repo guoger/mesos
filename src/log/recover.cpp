@@ -21,9 +21,11 @@
 
 #include <mesos/type_utils.hpp>
 
+#include <process/check.hpp>
 #include <process/defer.hpp>
 #include <process/delay.hpp>
 #include <process/id.hpp>
+#include <process/pid_group.hpp>
 #include <process/process.hpp>
 
 #include <stout/check.hpp>
@@ -51,11 +53,11 @@ namespace log {
 // This class is responsible for executing the log recover protocol.
 // Any time a replica in non-VOTING status starts, we will run this
 // protocol. We first broadcast a recover request to all the replicas
-// in the network, and then collect recover responses to decide what
+// in the PID group, and then collect recover responses to decide what
 // status the local replica should be in next. The details of the
 // recover protocol is shown as follows:
 //
-// A) Broadcast a RecoverRequest to all replicas in the network.
+// A) Broadcast a RecoverRequest to all replicas in the PID group.
 // B) Collect RecoverResponse from each replica
 //   B1) If a quorum of replicas are found in VOTING status (no matter
 //       what status the local replica is in currently), the local
@@ -79,13 +81,13 @@ class RecoverProtocolProcess : public Process<RecoverProtocolProcess>
 public:
   RecoverProtocolProcess(
       size_t _quorum,
-      const Shared<Network>& _network,
+      const Shared<PIDGroup>& _pidGroup,
       const Metadata::Status& _status,
       bool _autoInitialize,
       const Duration& _timeout)
     : ProcessBase(ID::generate("log-recover-protocol")),
       quorum(_quorum),
-      network(_network),
+      pidGroup(_pidGroup),
       status(_status),
       autoInitialize(_autoInitialize),
       timeout(_timeout),
@@ -134,8 +136,8 @@ private:
             << "recovery protocol, expected quroum size: " << stringify(quorum);
 
     // Wait until there are enough (i.e., quorum of) replicas in the
-    // network to avoid unnecessary retries.
-    chain = network->watch(quorum, Network::GREATER_THAN_OR_EQUAL_TO)
+    // PID group to avoid unnecessary retries.
+    chain = pidGroup->watch(quorum, PIDGroup::GREATER_THAN_OR_EQUAL_TO)
       .then(defer(self(), &Self::broadcast))
       .then(defer(self(), &Self::receive))
       .after(timeout, lambda::bind(&Self::timedout, lambda::_1, timeout))
@@ -147,7 +149,7 @@ private:
     VLOG(2) << "Broadcasting recover request to all replicas";
 
     // Broadcast recover request to all replicas.
-    return network->broadcast(protocol::recover, RecoverRequest())
+    return pidGroup->broadcast(protocol::recover, RecoverRequest())
       .then(defer(self(), &Self::broadcasted, lambda::_1));
   }
 
@@ -348,7 +350,7 @@ private:
   }
 
   const size_t quorum;
-  const Shared<Network> network;
+  const Shared<PIDGroup> pidGroup;
   const Metadata::Status status;
   const bool autoInitialize;
   const Duration timeout;
@@ -368,7 +370,7 @@ private:
 // recover protocol if it cannot be finished within 'timeout'.
 static Future<RecoverResponse> runRecoverProtocol(
     size_t quorum,
-    const Shared<Network>& network,
+    const Shared<PIDGroup>& pidGroup,
     const Metadata::Status& status,
     bool autoInitialize,
     const Duration& timeout = Seconds(10))
@@ -376,7 +378,7 @@ static Future<RecoverResponse> runRecoverProtocol(
   RecoverProtocolProcess* process =
     new RecoverProtocolProcess(
         quorum,
-        network,
+        pidGroup,
         status,
         autoInitialize,
         timeout);
@@ -435,12 +437,12 @@ public:
   RecoverProcess(
       size_t _quorum,
       const Owned<Replica>& _replica,
-      const Shared<Network>& _network,
+      const Shared<PIDGroup>& _pidGroup,
       bool _autoInitialize)
     : ProcessBase(ID::generate("log-recover")),
       quorum(_quorum),
       replica(_replica),
-      network(_network),
+      pidGroup(_pidGroup),
       autoInitialize(_autoInitialize) {}
 
   Future<Owned<Replica>> future() { return promise.future(); }
@@ -480,7 +482,7 @@ private:
       // No need to do recovery.
       return Nothing();
     } else {
-      return runRecoverProtocol(quorum, network, status, autoInitialize)
+      return runRecoverProtocol(quorum, pidGroup, status, autoInitialize)
         .then(defer(self(), &Self::_recover, lambda::_1));
     }
   }
@@ -558,7 +560,7 @@ private:
     // Since we do not know what proposal number to use (the log is
     // empty), we use none and leave log::catchup to automatically
     // bump the proposal number.
-    return log::catchup(quorum, shared, network, None(), positions)
+    return log::catchup(quorum, shared, pidGroup, None(), positions)
       .then(defer(self(), &Self::getReplicaOwnership, shared))
       .then(defer(self(), &Self::updateReplicaStatus, Metadata::VOTING));
   }
@@ -615,7 +617,7 @@ private:
 
   const size_t quorum;
   Owned<Replica> replica;
-  const Shared<Network> network;
+  const Shared<PIDGroup> pidGroup;
   const bool autoInitialize;
 
   Future<Nothing> chain;
@@ -627,14 +629,14 @@ private:
 Future<Owned<Replica>> recover(
     size_t quorum,
     const Owned<Replica>& replica,
-    const Shared<Network>& network,
+    const Shared<PIDGroup>& pidGroup,
     bool autoInitialize)
 {
   RecoverProcess* process =
     new RecoverProcess(
         quorum,
         replica,
-        network,
+        pidGroup,
         autoInitialize);
 
   Future<Owned<Replica>> future = process->future();
