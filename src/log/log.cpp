@@ -20,6 +20,8 @@
 
 #include <mesos/log/log.hpp>
 
+#include <mesos/module/pid_group.hpp>
+
 #include <mesos/zookeeper/group.hpp>
 
 #include <process/check.hpp>
@@ -35,10 +37,13 @@
 #include <process/metrics/metrics.hpp>
 
 #include <stout/check.hpp>
+#include <stout/exit.hpp>
 #include <stout/foreach.hpp>
 #include <stout/lambda.hpp>
 #include <stout/nothing.hpp>
 #include <stout/set.hpp>
+
+#include "module/manager.hpp"
 
 #include "log/coordinator.hpp"
 
@@ -104,6 +109,23 @@ LogProcess::LogProcess(
     autoInitialize(_autoInitialize),
     group(new zookeeper::Group(servers, timeout, znode, auth)),
     metrics(*this, metricsPrefix) {}
+
+
+PIDGroup* LogProcess::createPIDGroup(
+    const string& pidGroupModule,
+    const process::UPID& upid)
+{
+  Try<PIDGroup*> pidGroup =
+    modules::ModuleManager::create<PIDGroup>(pidGroupModule);
+  if (pidGroup.isError()) {
+    EXIT(EXIT_FAILURE)
+      << "Failed to create a pid group: " << pidGroup.error();
+  }
+
+  pidGroup.get()->initialize(upid);
+
+  return pidGroup.get();
+}
 
 
 void LogProcess::initialize()
