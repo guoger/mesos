@@ -1219,6 +1219,7 @@ liblog_la_SOURCES =							\
   log/coordinator.cpp							\
   log/leveldb.cpp							\
   log/log.cpp								\
+  log/pid_group/zookeeper.hpp						\
   log/recover.cpp							\
   log/replica.cpp							\
   log/tool/benchmark.cpp						\
@@ -1231,7 +1232,7 @@ liblog_la_SOURCES +=							\
   log/coordinator.hpp							\
   log/leveldb.hpp							\
   log/log.hpp								\
-  log/network.hpp							\
+  log/pid_group/zookeeper.cpp						\
   log/recover.hpp							\
   log/replica.hpp							\
   log/storage.hpp							\
