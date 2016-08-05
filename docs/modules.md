@@ -222,30 +222,33 @@ Isolator modules enable experimenting with specialized isolation and monitoring
 capabilities. Examples of these could be 3rdparty resource isolation mechanisms
 for GPGPU hardware, networking, etc.
 
-### Master Contender and Detector
+### Master Contender, Detector and PIDGroup
 
 Contender and Detector modules enable developers to implement custom leader
-election and master detection mechanisms, other than relying on Zookeeper by
-default.
+election and master detection mechanisms. PIDGroup is used by replicated log
+to detect all masters in cluster. These modules work together as a replacement
+of ZooKeeper.
 
 An example for such modules could be to use distributed Key-Value storage such
 as [etcd](https://coreos.com/etcd/) and [consul](https://www.consul.io/).
 
-To load custom contender and detector module, you need to:
+To load custom contender, detector and pid_group module, you need to:
 
 - Supply `--modules` when running Mesos master,
 
-- Specify selected contender and detector modules with `--master_contender` and
-`--master_detector` flags on Mesos Master and `--master_detector` on Mesos Slave.
+- Specify selected contender, detector and pid_group modules with
+`--master_contender`, `--master_detector` and `--pid_group` flags on
+Mesos Master and `--master_detector` on Mesos Agent.
 
 For example, the following command runs Mesos master with
-`org_apache_mesos_TestMasterContender` and `org_apache_mesos_TestMasterDetector`:
+`org_apache_mesos_TestMasterContender`, `org_apache_mesos_TestMasterDetector`
+and `org_apache_mesos_TestPIDGroup`:
 
-`./bin/mesos-master.sh --modules="file://<path-to-modules-config>.json" --master_contender=org_apache_mesos_TestMasterContender --master_detector=org_apache_mesos_TestMasterDetector`
+    ./bin/mesos-master.sh --modules="file://<path-to-modules-config>.json" --master_contender=org_apache_mesos_TestMasterContender --master_detector=org_apache_mesos_TestMasterDetector --pid_group=org_apache_mesos_TestPIDGroup
 
 And this one runs Mesos slave with `org_apache_mesos_TestMasterDetector`:
 
-`./bin/mesos-slave.sh --modules="file://<path-to-modules-config>.json" --master_detector=org_apache_mesos_TestMasterDetector`
+    ./bin/mesos-slave.sh --modules="file://<path-to-modules-config>.json" --master_detector=org_apache_mesos_TestMasterDetector
 
 ## Writing Mesos modules
 
