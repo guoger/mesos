@@ -171,6 +171,9 @@ message ContainerLaunchInfo {
   // (POSIX only) The rlimits requested for the container.
   // The rlimits are set while launching the container.
   optional RLimitInfo rlimits = 8;
+  
+  // (Linux only) Seccomp profile file path
+  optional string seccomp_profile = 9;
 }
 
 

@@ -17,6 +17,7 @@
 #include <errno.h>
 #ifdef __linux__
 #include <sched.h>
+#include <seccomp.h>
 #include <signal.h>
 #endif // __linux__
 #include <string.h>
@@ -40,6 +41,7 @@
 #include "linux/capabilities.hpp"
 #include "linux/fs.hpp"
 #include "linux/ns.hpp"
+#include "linux/seccomp.hpp"
 #endif
 
 #ifndef __WINDOWS__
@@ -60,6 +62,7 @@ using std::vector;
 using mesos::internal::capabilities::Capabilities;
 using mesos::internal::capabilities::Capability;
 using mesos::internal::capabilities::ProcessCapabilities;
+using mesos::internal::seccomp::SeccompProfile;
 #endif // __linux__
 
 namespace mesos {
@@ -145,6 +148,10 @@ MesosContainerizerLaunch::Flags::Flags()
   add(&Flags::capabilities,
       "capabilities",
       "Capabilities the command can use.");
+
+  add(&Flags::seccomp_profile,
+      "seccomp_profile",
+      "seccomp_profile file path.");
 
   add(&Flags::unshare_namespace_mnt,
       "unshare_namespace_mnt",
@@ -599,6 +606,12 @@ int MesosContainerizerLaunch::execute()
 #endif // __WINDOWS__
 
 #ifdef __linux__
+  CHECK(os::exists(flags.working_directory.get() + "/seccomp_profile"));
+
+  std::cout << "$$$$ here" << std::endl;
+  SeccompProfile sp;
+  sp.set();
+
   if (flags.capabilities.isSome()) {
     Try<ProcessCapabilities> capabilities = capabilitiesManager->get();
     if (capabilities.isError()) {

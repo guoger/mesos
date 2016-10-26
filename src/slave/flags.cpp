@@ -509,6 +509,10 @@ mesos::internal::slave::Flags::Flags()
       "       \"SYS_ADMIN\"\n"
       "     ]\n"
       "}");
+
+  add(&Flags::seccomp_profile,
+      "seccomp_profile",
+      "File storing seccomp rules.");
 #endif
 
   add(&Flags::firewall_rules,

@@ -2058,6 +2058,30 @@ message CapabilityInfo {
 
 
 /**
+ * Seccomp
+ */
+message SeccompInfo {
+  enum Action {
+    SCMP_ACT_ERRNO_ = 1;
+    SCMP_ACT_ALLOW_ = 2;
+  }
+  
+  enum Architecture {
+    SCMP_ARCH_X86_64_ = 1;
+  }
+  
+  message Syscall {
+    required string name = 1;
+    required Action action = 2;
+  }
+  
+  required Action default_action = 1;
+  repeated Architecture architectures = 2;
+  repeated Syscall syscalls = 3;
+}
+
+
+/**
  * Encapsulation for Linux specific configuration.
  * E.g, capabilities, limits etc.
  */
