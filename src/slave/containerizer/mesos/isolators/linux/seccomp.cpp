@@ -41,15 +41,6 @@ Try<Isolator*> LinuxSeccompIsolatorProcess::create(const Flags& flags)
     return Error("Linux seccomp isolator requires root permissions");
   }
 
-  // TODO(guoger) check absolute path
-  if (flags.seccomp_profile.isNone()) {
-    return Error("Linux seccomp isolator requries a profile file.");
-  }
-
-  if (!os::exists(flags.seccomp_profile.get())) {
-    return Error("File does not exist!");
-  }
-
   return new MesosIsolator(
       Owned<MesosIsolatorProcess>(new LinuxSeccompIsolatorProcess(flags)));
 }
@@ -60,33 +51,6 @@ Future<Option<ContainerLaunchInfo>> LinuxSeccompIsolatorProcess::prepare(
     const ContainerConfig& containerConfig)
 {
   CHECK_SOME(flags.seccomp_profile);
-  CHECK_EQ(containerConfig.has_directory(), 1);
-  Result<string> profile = os::realpath(flags.seccomp_profile.get());
-  if (!profile.isSome()) {
-    return Failure("Failed to determine real path of profile file: " +
-        profile.error());
-  }
-
-  std::cout << profile.get() << std::endl;
-
-  const string target = containerConfig.directory() + "/seccomp_profile";
-
-  Try<Nothing> touch = os::touch(target);
-  if (touch.isError()) {
-    return Failure("Failed to create the bind mount point: " + touch.error());
-  }
-
-  // TODO(guoger) should not mount to work dir. But where?
-  Try<Nothing> mount = fs::mount(
-      profile.get(),
-      target,
-      None(),
-      MS_BIND,
-      nullptr);
-  if (mount.isError()) {
-    return Failure("Failed to bind mount from '" + profile.get() + "' to '" +
-        target + mount.error());
-  }
 
 //  Try<string> read = os::read(flags.seccomp_profile.get());
 //  if (read.isError()) {
@@ -104,8 +68,9 @@ Future<Option<ContainerLaunchInfo>> LinuxSeccompIsolatorProcess::prepare(
 //
 //  std::cout << "##### " << parse.get().DebugString() << std::endl;
   ContainerLaunchInfo launchInfo;
-  launchInfo.set_seccomp_profile(flags.seccomp_profile.get());
+//  launchInfo.set_seccomp_profile(flags.seccomp_profile.get());
 //  launchInfo.mutable_seccomp_info()->CopyFrom(parse.get());
+  launchInfo.mutable_seccomp_profile()->CopyFrom(flags.seccomp_profile.get());
 
   return launchInfo;
 }
@@ -120,20 +85,20 @@ Future<Nothing> LinuxSeccompIsolatorProcess::isolate(
 }
 
 
-Try<SeccompInfo> LinuxSeccompIsolatorProcess::parseSeccompInfo(const string& s)
-{
-  Try<JSON::Object> json = JSON::parse<JSON::Object>(s);
-  if (json.isError()) {
-    return ::Error("JSON parse failed: " + json.error());
-  }
-
-  Try<SeccompInfo> parse = ::protobuf::parse<SeccompInfo>(json.get());
-  if (parse.isError()) {
-    return ::Error("Protobuf parse failed: " + parse.error());
-  }
-
-  return parse.get();
-}
+//Try<SeccompInfo> LinuxSeccompIsolatorProcess::parseSeccompInfo(const string& s)
+//{
+//  Try<JSON::Object> json = JSON::parse<JSON::Object>(s);
+//  if (json.isError()) {
+//    return ::Error("JSON parse failed: " + json.error());
+//  }
+//
+//  Try<SeccompInfo> parse = ::protobuf::parse<SeccompInfo>(json.get());
+//  if (parse.isError()) {
+//    return ::Error("Protobuf parse failed: " + parse.error());
+//  }
+//
+//  return parse.get();
+//}
 
 } // namespace slave {
 } // namespace internal {

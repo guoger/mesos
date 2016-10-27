@@ -173,7 +173,7 @@ message ContainerLaunchInfo {
   optional RLimitInfo rlimits = 8;
   
   // (Linux only) Seccomp profile file path
-  optional string seccomp_profile = 9;
+  optional SeccompInfo seccomp_profile = 9;
 }
 
 

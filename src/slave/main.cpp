@@ -360,6 +360,10 @@ int main(int argc, char** argv)
         << "Failed to initialize systemd: " + initialize.error();
     }
   }
+
+  if (flags.seccomp_profile.isSome()) {
+    std::cout << "##### seccomp_profile: " << flags.seccomp_profile.get().DebugString() << std::endl;
+  }
 #endif // __linux__
 
   Fetcher fetcher;

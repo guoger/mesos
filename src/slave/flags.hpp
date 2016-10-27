@@ -103,7 +103,7 @@ public:
   bool systemd_enable_support;
   std::string systemd_runtime_directory;
   Option<CapabilityInfo> allowed_capabilities;
-  Option<std::string> seccomp_profile;
+  Option<SeccompInfo> seccomp_profile;
 #endif
   Option<Firewall> firewall_rules;
   Option<Path> credential;

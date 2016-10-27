@@ -504,6 +504,9 @@ int MesosContainerizerLaunch::execute()
 #endif // __WINDOWS__
 
 #ifdef __linux__
+  if (flags.seccomp_profile.isSome()) {
+    std::cout << "#### Seccomp_profile: " << flags.seccomp_profile.get().DebugString() << std::endl;
+  }
   // Initialize capabilities support if necessary.
   Try<Capabilities> capabilitiesManager = Error("Not initialized");
 
@@ -606,9 +609,6 @@ int MesosContainerizerLaunch::execute()
 #endif // __WINDOWS__
 
 #ifdef __linux__
-  CHECK(os::exists(flags.working_directory.get() + "/seccomp_profile"));
-
-  std::cout << "$$$$ here" << std::endl;
   SeccompProfile sp;
   sp.set();
 

@@ -1223,7 +1223,7 @@ Future<bool> MesosContainerizerProcess::_launch(
   JSON::Array preExecCommands;
   Option<CapabilityInfo> capabilities;
   Option<RLimitInfo> rlimits;
-  Option<string> seccomp_profile;
+  Option<SeccompInfo> seccomp_profile;
 
   // TODO(jieyu): We should use Option here. If no namespace is
   // required, we should pass None() to 'launcher->fork'.

@@ -456,6 +456,13 @@ ostream& operator<<(std::ostream& stream, const CapabilityInfo& capabilityInfo)
 }
 
 
+ostream& operator<<(std::ostream& stream, const SeccompInfo& seccompInfo)
+{
+  return stream << JSON::protobuf(seccompInfo);
+}
+
+
+
 ostream& operator<<(ostream& stream, const CommandInfo& commandInfo)
 {
   return stream << JSON::protobuf(commandInfo);

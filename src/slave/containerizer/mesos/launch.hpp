@@ -52,7 +52,7 @@ public:
     Option<JSON::Array> pre_exec_commands;
 #ifdef __linux__
     Option<CapabilityInfo> capabilities;
-    Option<std::string> seccomp_profile;
+    Option<SeccompInfo> seccomp_profile;
     bool unshare_namespace_mnt;
 #endif // __linux__
   };

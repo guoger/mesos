@@ -35,7 +35,7 @@ private:
   LinuxSeccompIsolatorProcess(const Flags& _flags)
     : flags(_flags) {}
 
-  Try<mesos::SeccompInfo> parseSeccompInfo(const std::string& s);
+//  Try<mesos::SeccompInfo> parseSeccompInfo(const std::string& s);
 
   const Flags flags;
 };
