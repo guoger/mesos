@@ -17,7 +17,6 @@
 #include <errno.h>
 #ifdef __linux__
 #include <sched.h>
-#include <seccomp.h>
 #include <signal.h>
 #endif // __linux__
 #include <string.h>
@@ -609,8 +608,14 @@ int MesosContainerizerLaunch::execute()
 #endif // __WINDOWS__
 
 #ifdef __linux__
-  SeccompProfile sp;
-  sp.set();
+  if (flags.seccomp_profile.isSome()) {
+    SeccompProfile sp(flags.seccomp_profile.get());
+    Try<int> res = sp.set();
+    if (res.isError()) {
+      std::cout << "###### Seccomp error!" << std::endl;
+      exitWithStatus(EXIT_FAILURE);
+    }
+  }
 
   if (flags.capabilities.isSome()) {
     Try<ProcessCapabilities> capabilities = capabilitiesManager->get();

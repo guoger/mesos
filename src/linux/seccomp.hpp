@@ -17,39 +17,60 @@
 #ifndef __LINUX_SECCOMP_HPP__
 #define __LINUX_SECCOMP_HPP__
 
+#include <process/future.hpp>
+
 #include <seccomp.h>
+
+#include <mesos/mesos.hpp>
+
+using namespace process;
 
 namespace mesos {
 namespace internal {
 namespace seccomp {
 
 extern "C" {
-extern void* seccomp_init(uint32_t def_action);
-extern int seccomp_reset(void* ctx, uint32_t def_action);
+void* seccomp_init(uint32_t def_action);
+int seccomp_reset(void* ctx, uint32_t def_action);
+int seccomp_rule_add(void* ctx, uint32_t action,
+                     int syscall, unsigned int arg_cnt);
+int seccomp_load(void*);
 }
 
 class SeccompProfile
 {
 public:
-  SeccompProfile() {}
+  SeccompProfile(const SeccompInfo& _seccompInfo) : seccompInfo(_seccompInfo) {}
 
-  void set()
+  Try<int> set()
   {
-    void* ctx = seccomp_init(SCMP_ACT_KILL);
+    void* ctx = seccomp_init(SCMP_ACT_ALLOW);
     if (ctx == nullptr) {
       std::cout << "##### oh crap!" << std::endl;
+      return Error("Couldn't create seccomp ctx!");
     }
 
     std::cout << "##### created ctx!" << std::endl;
 
     int rc = -1;
-    rc = seccomp_reset(ctx, SCMP_ACT_KILL);
+    rc = seccomp_rule_add(ctx, SCMP_ACT_KILL, SCMP_SYS(acct), 0);
     if (rc < 0) {
-      std::cout << "##### oh crapppp!" << std::endl;
+      std::cout << "Failed to add rule" << std::endl;
+      return Error("Failed to add rule!");
     }
+    std::cout << "rule added" << std::endl;
 
-    std::cout << "##### deleted ctx!" << std::endl;
+    rc = seccomp_load(ctx);
+    if (rc < 0) {
+      std::cout << "Failed to load rule" << std::endl;
+      return Error("Failed to load rule!");
+    }
+    std::cout << "rule loaded" << std::endl;
+    return 1;
   }
+
+private:
+  const SeccompInfo seccompInfo;
 };
 
 } // namespace seccomp {

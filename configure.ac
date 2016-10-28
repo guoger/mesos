@@ -229,6 +229,12 @@ AC_ARG_ENABLE([ssl],
                              default: no]),
               [enable_ssl=yes], [])
 
+AC_ARG_ENABLE([seccomp],
+              AS_HELP_STRING([--enable-seccomp],
+                             [enable seccomp
+                             default: no]),
+              [enable_seccomp=yes], [])
+
 AC_ARG_ENABLE([static-unimplemented],
               AS_HELP_STRING([--enable-static-unimplemented],
                              [generate static assertion errors for unimplemented
