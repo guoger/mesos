@@ -37,9 +37,9 @@ namespace slave {
 
 Try<Isolator*> LinuxSeccompIsolatorProcess::create(const Flags& flags)
 {
-  if (geteuid() != 0) {
-    return Error("Linux seccomp isolator requires root permissions");
-  }
+//  if (geteuid() != 0) {
+//    return Error("Linux seccomp isolator requires root permissions");
+//  }
 
   return new MesosIsolator(
       Owned<MesosIsolatorProcess>(new LinuxSeccompIsolatorProcess(flags)));

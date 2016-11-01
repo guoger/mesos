@@ -20,6 +20,7 @@
 #include <process/future.hpp>
 
 #include <seccomp.h>
+#include <string>
 
 #include <mesos/mesos.hpp>
 
@@ -30,47 +31,100 @@ namespace internal {
 namespace seccomp {
 
 extern "C" {
-void* seccomp_init(uint32_t def_action);
-int seccomp_reset(void* ctx, uint32_t def_action);
-int seccomp_rule_add(void* ctx, uint32_t action,
+scmp_filter_ctx seccomp_init(uint32_t def_action);
+int seccomp_reset(scmp_filter_ctx ctx, uint32_t def_action);
+int seccomp_rule_add(scmp_filter_ctx ctx, uint32_t action,
                      int syscall, unsigned int arg_cnt);
-int seccomp_load(void*);
+int seccomp_load(scmp_filter_ctx);
+uint32_t seccomp_arch_resolve_name(const char *arch_name);
+int seccomp_syscall_resolve_name(const char *name);
+void seccomp_release(scmp_filter_ctx ctx);
 }
 
-class SeccompProfile
+class ScmpFilter
 {
 public:
-  SeccompProfile(const SeccompInfo& _seccompInfo) : seccompInfo(_seccompInfo) {}
-
-  Try<int> set()
+  // Create a Seccomp filter based on provided info.
+  static Try<ScmpFilter> create(const SeccompInfo& scmpInfo)
   {
-    void* ctx = seccomp_init(SCMP_ACT_ALLOW);
+    // TODO(guoger) Check linux capabilities
+
+    // Init a Seccomp context
+    scmp_filter_ctx ctx = seccomp_init(
+        resolveScmpAction(scmpInfo.default_action()));
     if (ctx == nullptr) {
-      std::cout << "##### oh crap!" << std::endl;
-      return Error("Couldn't create seccomp ctx!");
+      return Error("Failed to initialize Seccomp filter.");
     }
 
-    std::cout << "##### created ctx!" << std::endl;
+    // TODO(guoger) add arch
 
-    int rc = -1;
-    rc = seccomp_rule_add(ctx, SCMP_ACT_KILL, SCMP_SYS(acct), 0);
-    if (rc < 0) {
-      std::cout << "Failed to add rule" << std::endl;
-      return Error("Failed to add rule!");
-    }
-    std::cout << "rule added" << std::endl;
+    // Add rules
+    int syscallNumber, rc = -1;
+    foreach (const SeccompInfo_Syscall& syscall, scmpInfo.syscalls()) {
+      std::cout << "Adding Seccomp rule for syscall: '" << syscall.name()
+                << "' with action '" << syscall.action() << std::endl;
 
-    rc = seccomp_load(ctx);
-    if (rc < 0) {
-      std::cout << "Failed to load rule" << std::endl;
-      return Error("Failed to load rule!");
+      syscallNumber = seccomp_syscall_resolve_name(syscall.name().c_str());
+      if (syscallNumber == __NR_SCMP_ERROR) {
+        return Error("Unrecognized syscall: '" + syscall.name() + "'.");
+      }
+
+      rc = seccomp_rule_add(
+          ctx,
+          resolveScmpAction(syscall.action()),
+          syscallNumber,
+          0);
+      if (rc < 0) {
+        return Error("Cannot add rule for syscall: '"
+            + syscall.name() + "' with action: '" + SeccompInfo_Syscall_Action_Name(syscall.action()) + "'.");
+      }
     }
-    std::cout << "rule loaded" << std::endl;
-    return 1;
+
+    return ScmpFilter(ctx);
   }
 
+
+  Try<Nothing> load()
+  {
+    int rc = -1;
+    rc = seccomp_load(scmpCtx);
+    if (rc < 0) {
+      return Error("Failed to load Seccomp filter.");
+    }
+
+    return Nothing();
+  }
+
+
+  ~ScmpFilter()
+  {
+    // Should release scmp ctx here but get double free problem...
+//    seccomp_release(scmpCtx);
+  }
 private:
-  const SeccompInfo seccompInfo;
+  explicit ScmpFilter(const scmp_filter_ctx& _scmpCtx)
+    : scmpCtx(_scmpCtx)
+  {
+    std::cout << "In constructor" << std::endl;
+  }
+
+  // We should have valid action enum at this point,
+  // so we don't do error check here.
+  static uint32_t resolveScmpAction(
+      const SeccompInfo_Syscall_Action& action)
+  {
+    switch (action) {
+      case SeccompInfo_Syscall_Action_SCMP_ACT_ALLOW:
+        return SCMP_ACT_ALLOW;
+
+      case SeccompInfo_Syscall_Action_SCMP_ACT_KILL:
+        return SCMP_ACT_KILL;
+    }
+
+    UNREACHABLE();
+  }
+
+  scmp_filter_ctx scmpCtx;
 };
 
 } // namespace seccomp {

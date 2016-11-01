@@ -2067,7 +2067,7 @@ message SeccompInfo {
 
   message Syscall {
     enum Action {
-      SCMP_ACT_ERRNO = 0;
+      SCMP_ACT_KILL = 0;
       SCMP_ACT_ALLOW = 1;
     }
 

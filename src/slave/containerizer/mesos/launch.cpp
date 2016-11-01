@@ -61,7 +61,7 @@ using std::vector;
 using mesos::internal::capabilities::Capabilities;
 using mesos::internal::capabilities::Capability;
 using mesos::internal::capabilities::ProcessCapabilities;
-using mesos::internal::seccomp::SeccompProfile;
+using mesos::internal::seccomp::ScmpFilter;
 #endif // __linux__
 
 namespace mesos {
@@ -609,12 +609,23 @@ int MesosContainerizerLaunch::execute()
 
 #ifdef __linux__
   if (flags.seccomp_profile.isSome()) {
-    SeccompProfile sp(flags.seccomp_profile.get());
-    Try<int> res = sp.set();
-    if (res.isError()) {
-      std::cout << "###### Seccomp error!" << std::endl;
+    Try<ScmpFilter> sf = ScmpFilter::create(flags.seccomp_profile.get());
+    std::cout << "Post-create" << std::endl;
+    if (sf.isError()) {
+      cout << "Failed to create Seccomp filter: " << sf.error() << endl;
       exitWithStatus(EXIT_FAILURE);
     }
+
+    std::cout << "Pre-load" << std::endl;
+    Try<Nothing> res = sf.get().load();
+    std::cout << "Post-load" << std::endl;
+    if (res.isError()) {
+      std::cout << "Failed to load Seccomp filter." << res.error() << std::endl;
+      cerr << "Failed to load Seccomp filter." << endl;
+      exitWithStatus(EXIT_FAILURE);
+    }
+
+    std::cout << "###### Seccomp set success!" << std::endl;
   }
 
   if (flags.capabilities.isSome()) {
