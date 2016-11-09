@@ -1017,6 +1017,7 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   tests/containerizer/memory_test_helper.hpp				\
   tests/containerizer/mock_containerizer.hpp				\
   tests/containerizer/rootfs.hpp					\
+  tests/containerizer/seccomp_test_helper.hpp		\
   tests/containerizer/setns_test_helper.hpp				\
   tests/containerizer/store.hpp						\
   uri/fetcher.hpp							\
@@ -1953,6 +1954,7 @@ test_helper_SOURCES =						\
 if OS_LINUX
 test_helper_SOURCES +=						\
   tests/containerizer/capabilities_test_helper.cpp		\
+  tests/containerizer/seccomp_test_helper.cpp		\
   tests/containerizer/setns_test_helper.cpp
 endif
 test_helper_CPPFLAGS = $(mesos_tests_CPPFLAGS)
@@ -2245,6 +2247,8 @@ mesos_tests_SOURCES +=						\
   tests/containerizer/perf_tests.cpp				\
   tests/containerizer/runtime_isolator_tests.cpp		\
   tests/containerizer/sched_tests.cpp				\
+  tests/containerizer/seccomp_tests.cpp			\
+  tests/containerizer/seccomp_test_helper.cpp		\
   tests/containerizer/setns_test_helper.cpp
 endif
 

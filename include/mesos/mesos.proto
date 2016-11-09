@@ -2125,6 +2125,9 @@ message SeccompInfo {
 message LinuxInfo {
   // Represents the capability whitelist.
   optional CapabilityInfo capability_info = 1;
+
+  // Represents Seccomp filter.
+  optional SeccompInfo seccomp_info = 2;
 }
 
 
