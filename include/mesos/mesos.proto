@@ -2058,6 +2058,67 @@ message CapabilityInfo {
 
 
 /**
+ * Encapsulation for Linux seccomp filter
+ * TODO(jay_guo) consider compatibility issue stated in MESOS-4997
+ */
+message SeccompInfo {
+  enum Architecture {
+    SCMP_ARCH_X86 = 0;
+    SCMP_ARCH_X86_64 = 1;
+    SCMP_ARCH_X32 = 2;
+    SCMP_ARCH_ARM = 3;
+    SCMP_ARCH_AARCH64 = 4;
+    SCMP_ARCH_MIPS = 5;
+    SCMP_ARCH_MIPSEL = 6;
+    SCMP_ARCH_MIPS64 = 7;
+    SCMP_ARCH_MIPSEL64 = 8;
+    SCMP_ARCH_MIPS64N32 = 9;
+    SCMP_ARCH_MIPSEL64N32 = 10;
+    SCMP_ARCH_PPC = 11;
+    SCMP_ARCH_PPC64 = 12;
+    SCMP_ARCH_PPC64LE = 13;
+    SCMP_ARCH_S390 = 14;
+    SCMP_ARCH_S390X = 15;
+  }
+
+  message Syscall {
+    enum Action {
+      SCMP_ACT_KILL = 0;
+      SCMP_ACT_TRAP = 1;
+      SCMP_ACT_ERRNO = 2;
+      SCMP_ACT_TRACE = 3;
+      SCMP_ACT_ALLOW = 4;
+    }
+
+    message Arg {
+      enum Operator {
+        SCMP_CMP_NE = 0;        // not equal
+        SCMP_CMP_LT = 1;        // less than
+        SCMP_CMP_LE = 2;        // less than or equal
+        SCMP_CMP_EQ = 3;        // equal
+        SCMP_CMP_GE = 4;        // greater than or equal
+        SCMP_CMP_GT = 5;        // greater than
+        SCMP_CMP_MASKED_EQ = 6; // masked equality
+      }
+
+      required uint32 index = 1;
+      required Operator op = 2;
+      required uint64 value = 3;
+      optional uint64 value_two = 4;
+    }
+
+    required string name = 1;
+    required Action action = 2;
+    repeated Arg args = 3;
+  }
+
+  required Syscall.Action default_action = 1;
+  repeated Architecture architectures = 2;
+  repeated Syscall syscalls = 3;
+}
+
+
+/**
  * Encapsulation for Linux specific configuration.
  * E.g, capabilities, limits etc.
  */
