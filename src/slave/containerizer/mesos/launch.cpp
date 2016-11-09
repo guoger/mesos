@@ -151,6 +151,10 @@ MesosContainerizerLaunch::Flags::Flags()
       "The target 'pid' of the process whose mount namespace we'd like\n"
       "to enter before executing the command.");
 
+  add(&Flags::seccomp_profile,
+      "seccomp_profile",
+      "seccomp profile to be loaded for container process.");
+
   add(&Flags::unshare_namespace_mnt,
       "unshare_namespace_mnt",
       "Whether to launch the command in a new mount namespace.",

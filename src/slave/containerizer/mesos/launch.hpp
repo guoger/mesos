@@ -53,6 +53,7 @@ public:
 #ifdef __linux__
     Option<CapabilityInfo> capabilities;
     Option<pid_t> namespace_mnt_target;
+    Option<SeccompInfo> seccomp_profile;
     bool unshare_namespace_mnt;
 #endif // __linux__
   };

@@ -1063,6 +1063,7 @@ MESOS_LINUX_FILES =									\
   slave/containerizer/mesos/isolators/namespaces/pid.cpp				\
   slave/containerizer/mesos/isolators/network/cni/cni.cpp				\
   slave/containerizer/mesos/isolators/network/cni/plugins/port_mapper/port_mapper.cpp	\
+  slave/containerizer/mesos/isolators/linux/seccomp.cpp					\
   slave/containerizer/mesos/isolators/volume/image.cpp					\
   slave/containerizer/mesos/provisioner/backends/aufs.cpp				\
   slave/containerizer/mesos/provisioner/backends/bind.cpp				\
@@ -1102,6 +1103,7 @@ MESOS_LINUX_FILES +=									\
   slave/containerizer/mesos/isolators/namespaces/pid.hpp				\
   slave/containerizer/mesos/isolators/network/cni/cni.hpp				\
   slave/containerizer/mesos/isolators/network/cni/plugins/port_mapper/port_mapper.hpp	\
+  slave/containerizer/mesos/isolators/linux/seccomp.hpp				\
   slave/containerizer/mesos/isolators/volume/image.hpp					\
   slave/containerizer/mesos/provisioner/backends/aufs.hpp				\
   slave/containerizer/mesos/provisioner/backends/bind.hpp				\

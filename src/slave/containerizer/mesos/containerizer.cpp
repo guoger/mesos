@@ -85,6 +85,7 @@
 #include "slave/containerizer/mesos/isolators/filesystem/shared.hpp"
 #include "slave/containerizer/mesos/isolators/gpu/nvidia.hpp"
 #include "slave/containerizer/mesos/isolators/linux/capabilities.hpp"
+#include "slave/containerizer/mesos/isolators/linux/seccomp.hpp"
 #include "slave/containerizer/mesos/isolators/namespaces/pid.hpp"
 #include "slave/containerizer/mesos/isolators/network/cni/cni.hpp"
 #include "slave/containerizer/mesos/isolators/volume/image.hpp"
@@ -307,6 +308,7 @@ Try<MesosContainerizer*> MesosContainerizer::create(
     {"docker/runtime", &DockerRuntimeIsolatorProcess::create},
     {"docker/volume", &DockerVolumeIsolatorProcess::create},
     {"linux/capabilities", &LinuxCapabilitiesIsolatorProcess::create},
+    {"linux/seccomp", &LinuxSeccompIsolatorProcess::create},
 
     {"volume/image",
       [&provisioner] (const Flags& flags) -> Try<Isolator*> {
@@ -1231,6 +1233,7 @@ Future<bool> MesosContainerizerProcess::_launch(
   JSON::Array preExecCommands;
   Option<CapabilityInfo> capabilities;
   Option<RLimitInfo> rlimits;
+  Option<SeccompInfo> seccomp_profile;
 
   Option<int> enterNamespaces = None();
   Option<int> cloneNamespaces = None();
@@ -1318,6 +1321,15 @@ Future<bool> MesosContainerizerProcess::_launch(
             "At most one rlimits set can be returned from isolators");
       } else {
         rlimits = launchInfo->rlimits();
+      }
+    }
+
+    if (launchInfo->has_seccomp_profile()) {
+      if (seccomp_profile.isSome()) {
+        return Failure(
+            "At most one seccomp info set can be returned from isolators");
+      } else {
+        seccomp_profile = launchInfo->seccomp_profile();
       }
     }
   }
@@ -1453,6 +1465,8 @@ Future<bool> MesosContainerizerProcess::_launch(
     // capabilities, but no capabilities isolation was configured for
     // the agent, the master should reject the task.
     launchFlags.capabilities = capabilities;
+
+    launchFlags.seccomp_profile = seccomp_profile;
 #endif // __linux__
 
 #ifdef __WINDOWS__
