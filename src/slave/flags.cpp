@@ -508,6 +508,11 @@ mesos::internal::slave::Flags::Flags()
       "       \"SYS_ADMIN\"\n"
       "     ]\n"
       "}");
+
+  add(&Flags::seccomp_profile,
+      "seccomp_profile",
+      "JSON representation of Seccomp filter profile that the operator\n"
+      "enforces on all container processes launched on a Mesos agent.\n");
 #endif
 
   add(&Flags::firewall_rules,

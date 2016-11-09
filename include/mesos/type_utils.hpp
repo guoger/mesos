@@ -249,6 +249,9 @@ std::ostream& operator<<(
     const CapabilityInfo& capabilityInfo);
 
 
+std::ostream& operator<<(std::ostream& stream, const SeccompInfo& seccompInfo);
+
+
 std::ostream& operator<<(std::ostream& stream, const CommandInfo& commandInfo);
 
 
