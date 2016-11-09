@@ -1077,6 +1077,7 @@ MESOS_LINUX_FILES +=									\
   linux/ns.hpp										\
   linux/perf.hpp									\
   linux/sched.hpp									\
+  linux/seccomp.hpp									\
   linux/systemd.hpp									\
   slave/containerizer/mesos/linux_launcher.hpp						\
   slave/containerizer/mesos/isolators/appc/runtime.hpp					\

@@ -40,6 +40,7 @@
 #include "linux/capabilities.hpp"
 #include "linux/fs.hpp"
 #include "linux/ns.hpp"
+#include "linux/seccomp.hpp"
 #endif
 
 #ifndef __WINDOWS__
@@ -60,6 +61,7 @@ using std::vector;
 using mesos::internal::capabilities::Capabilities;
 using mesos::internal::capabilities::Capability;
 using mesos::internal::capabilities::ProcessCapabilities;
+using mesos::internal::seccomp::ScmpFilter;
 #endif // __linux__
 
 namespace mesos {
@@ -623,6 +625,21 @@ int MesosContainerizerLaunch::execute()
 #endif // __WINDOWS__
 
 #ifdef __linux__
+  if (flags.seccomp_profile.isSome()) {
+    Try<Owned<ScmpFilter>> scmpFilter =
+      ScmpFilter::create(flags.seccomp_profile.get());
+    if (scmpFilter.isError()) {
+      cerr << "Failed to create Seccomp filter: " << scmpFilter.error() << endl;
+      exitWithStatus(EXIT_FAILURE);
+    }
+
+    Try<Nothing> load = scmpFilter.get()->load();
+    if (load.isError()) {
+      cerr << "Failed to load Seccomp filter: " << load.error() << endl;
+      exitWithStatus(EXIT_FAILURE);
+    }
+  }
+
   if (flags.capabilities.isSome()) {
     Try<ProcessCapabilities> capabilities = capabilitiesManager->get();
     if (capabilities.isError()) {
