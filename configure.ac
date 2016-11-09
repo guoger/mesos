@@ -223,6 +223,12 @@ AC_ARG_ENABLE([python-dependency-install],
                               downloaded or installed]),
               [], [enable_python_dependency_install=yes])
 
+AC_ARG_ENABLE([seccomp],
+              AS_HELP_STRING([--enable-seccomp],
+                             [enable Linux Seccomp support
+                             default: no]),
+              [enable_seccomp=yes], [])
+
 AC_ARG_ENABLE([ssl],
               AS_HELP_STRING([--enable-ssl],
                              [use ssl for libprocess communication]),
@@ -365,6 +371,11 @@ AC_ARG_WITH([protobuf],
 AC_ARG_WITH([sasl],
             AS_HELP_STRING([--with-sasl=@<:@=DIR@:>@],
                            [specify where to locate the sasl2 library]),
+            [], [])
+
+AC_ARG_WITH([seccomp],
+            AS_HELP_STRING([--with-seccomp=@<:@=DIR@:>@],
+                           [specify where to locate the seccomp library]),
             [], [])
 
 AC_ARG_WITH([ssl],
@@ -1609,6 +1620,32 @@ AS_IF([test "x$crammd5test" = "xfound"],
 -------------------------------------------------------------------
 We need CRAM-MD5 support for SASL authentication.
 -------------------------------------------------------------------])])
+
+
+# Check if libseccomp prefix path was provided, and if so, add it to
+# the CPPFLAGS and LDFLAGS with respective /include and /lib path
+# suffixes.
+if test -n "`echo $with_seccomp`" ; then
+    CPPFLAGS="-I${with_seccomp}/include $CPPFLAGS"
+    LDFLAGS="-L${with_seccomp}/lib $LDFLAGS"
+fi
+
+if test "x$enable_seccomp" = "xyes"; then
+  AC_CHECK_HEADERS([seccomp.h],
+                   [AC_CHECK_LIB([seccomp],
+                                 [seccomp_init],
+                                 [],
+                                 [AC_MSG_ERROR([cannot find libseccomp
+-------------------------------------------------------------------
+libseccomp is required for an Seccomp-enabled build.
+-------------------------------------------------------------------
+                                 ])])],
+                   [AC_MSG_ERROR([cannot find libseccomp headers
+-------------------------------------------------------------------
+libseccomp is required for an Seccomp-enabled build.
+-------------------------------------------------------------------
+  ])])
+fi
 
 
 # Check if libssl prefix path was provided, and if so, add it to
