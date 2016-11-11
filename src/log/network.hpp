@@ -73,6 +73,8 @@ public:
   // Set the PIDs that are part of this network.
   void set(const std::set<process::UPID>& pids);
 
+  virtual void initialize(const process::UPID& base) {}
+
   // Returns a future which gets set when the network size satisfies
   // the constraint specified by 'size' and 'mode'. For example, if
   // 'size' is 2 and 'mode' is GREATER_THAN, then the returned future
@@ -112,8 +114,11 @@ public:
       const std::string& servers,
       const Duration& timeout,
       const std::string& znode,
-      const Option<zookeeper::Authentication>& auth,
-      const std::set<process::UPID>& base = std::set<process::UPID>());
+      const Option<zookeeper::Authentication>& auth)
+  : group(servers, timeout, znode, auth),
+    renewGroup(servers, timeout, znode, auth) {}
+
+  void initialize(const process::UPID& _base);
 
 private:
   typedef ZooKeeperNetwork This;
@@ -122,8 +127,16 @@ private:
   ZooKeeperNetwork(const ZooKeeperNetwork&);
   ZooKeeperNetwork& operator=(const ZooKeeperNetwork&);
 
+  void renewWatch(
+      const process::UPID& pid,
+      const std::set<zookeeper::Group::Membership>& memberships);
+
   // Helper that sets up a watch on the group.
   void watch(const std::set<zookeeper::Group::Membership>& expected);
+
+  void failed(const std::string& message);
+
+  void discarded();
 
   // Invoked when the group memberships have changed.
   void watched(const process::Future<std::set<zookeeper::Group::Membership>>&);
@@ -133,7 +146,9 @@ private:
       const process::Future<std::list<Option<std::string>>>& datas);
 
   zookeeper::Group group;
+  zookeeper::Group renewGroup;
   process::Future<std::set<zookeeper::Group::Membership>> memberships;
+  process::Future<zookeeper::Group::Membership> membership;
 
   // The set of PIDs that are always in the network.
   std::set<process::UPID> base;
@@ -391,19 +406,56 @@ process::Future<Nothing> Network::broadcast(
 }
 
 
-inline ZooKeeperNetwork::ZooKeeperNetwork(
-    const std::string& servers,
-    const Duration& timeout,
-    const std::string& znode,
-    const Option<zookeeper::Authentication>& auth,
-    const std::set<process::UPID>& _base)
-  : group(servers, timeout, znode, auth),
-    base(_base)
+inline void ZooKeeperNetwork::initialize(const process::UPID& _base)
 {
+  base = {_base};
   // PIDs from the base set are in the network from beginning.
   set(base);
 
   watch(std::set<zookeeper::Group::Membership>());
+
+  membership = renewGroup.join(_base)
+    .onFailed(executor.defer(lambda::bind(&This::failed, this, lambda::_1)))
+    .onDiscarded(executor.defer(lambda::bind(&This::discarded, this)));
+
+  renewGroup.watch()
+    .onReady(executor.defer(
+        lambda::bind(&This::renewWatch, this, _base, lambda::_1)))
+    .onFailed(executor.defer(lambda::bind(&This::failed, this, lambda::_1)))
+    .onDiscarded(executor.defer(lambda::bind(&This::discarded, this)));
+}
+
+
+inline void ZooKeeperNetwork::renewWatch(
+    const process::UPID& pid,
+    const std::set<zookeeper::Group::Membership>& _memberships)
+{
+  if (membership.isReady() && _memberships.count(membership.get()) == 0) {
+    // Our replica's membership must have expired, join back up.
+    LOG(INFO) << "Renewing replica group membership";
+
+    membership = renewGroup.join(pid)
+      .onFailed(executor.defer(lambda::bind(&This::failed, this, lambda::_1)))
+      .onDiscarded(executor.defer(lambda::bind(&This::discarded, this)));
+  }
+
+  renewGroup.watch(_memberships)
+    .onReady(executor.defer(
+        lambda::bind(&This::renewWatch, this, pid, lambda::_1)))
+    .onFailed(executor.defer(lambda::bind(&This::failed, this, lambda::_1)))
+    .onDiscarded(executor.defer(lambda::bind(&This::discarded, this)));
+}
+
+
+inline void ZooKeeperNetwork::failed(const std::string& message)
+{
+  LOG(FATAL) << "Failed to participate in ZooKeeper group: " << message;
+}
+
+
+inline void ZooKeeperNetwork::discarded()
+{
+  LOG(FATAL) << "Not expecting future to get discarded!";
 }
 
 

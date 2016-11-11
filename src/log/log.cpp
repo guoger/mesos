@@ -73,7 +73,6 @@ LogProcess::LogProcess(
     replica(new Replica(path)),
     network(new Network(pids + (UPID) replica->pid())),
     autoInitialize(_autoInitialize),
-    group(nullptr),
     metrics(*this, metricsPrefix) {}
 
 
@@ -89,37 +88,32 @@ LogProcess::LogProcess(
   : ProcessBase(ID::generate("log")),
     quorum(_quorum),
     replica(new Replica(path)),
-    network(new ZooKeeperNetwork(
+    network(createNetwork(
         servers,
         timeout,
         znode,
         auth,
-        {replica->pid()})),
+        replica->pid())),
     autoInitialize(_autoInitialize),
-    group(new zookeeper::Group(servers, timeout, znode, auth)),
     metrics(*this, metricsPrefix) {}
+
+
+Network* LogProcess::createNetwork(
+    const string& servers,
+    const Duration& timeout,
+    const string& znode,
+    const Option<zookeeper::Authentication>& auth,
+    const process::UPID& _base)
+{
+  Network* zkNetwork = new ZooKeeperNetwork(servers, timeout, znode, auth);
+  zkNetwork->initialize(_base);
+
+  return zkNetwork;
+}
 
 
 void LogProcess::initialize()
 {
-  if (group != nullptr) {
-    // Need to add our replica to the ZooKeeper group!
-    LOG(INFO) << "Attempting to join replica to ZooKeeper group";
-
-    membership = group->join(replica->pid())
-      .onFailed(defer(self(), &Self::failed, lambda::_1))
-      .onDiscarded(defer(self(), &Self::discarded));
-
-    // We save and pass the pid of the replica to the 'watch' function
-    // because the field member 'replica' is not available during
-    // recovery. We need the pid to renew the replicas membership.
-    group->watch()
-      .onReady(defer(self(), &Self::watch, replica->pid(), lambda::_1))
-      .onFailed(defer(self(), &Self::failed, lambda::_1))
-      .onDiscarded(defer(self(), &Self::discarded));
-  }
-
-  // Start the recovery.
   recover();
 }
 
@@ -139,8 +133,6 @@ void LogProcess::finalize()
     delete promise;
   }
   promises.clear();
-
-  delete group;
 
   // Wait for the shared pointers 'network' and 'replica' to become
   // unique (i.e., no other reference to them). These calls should not
@@ -245,26 +237,6 @@ void LogProcess::_recover()
 double LogProcess::_recovered()
 {
   return recovered.future().isReady() ? 1 : 0;
-}
-
-
-void LogProcess::watch(
-    const UPID& pid,
-    const set<zookeeper::Group::Membership>& memberships)
-{
-  if (membership.isReady() && memberships.count(membership.get()) == 0) {
-    // Our replica's membership must have expired, join back up.
-    LOG(INFO) << "Renewing replica group membership";
-
-    membership = group->join(pid)
-      .onFailed(defer(self(), &Self::failed, lambda::_1))
-      .onDiscarded(defer(self(), &Self::discarded));
-  }
-
-  group->watch(memberships)
-    .onReady(defer(self(), &Self::watch, pid, lambda::_1))
-    .onFailed(defer(self(), &Self::failed, lambda::_1))
-    .onDiscarded(defer(self(), &Self::discarded));
 }
 
 

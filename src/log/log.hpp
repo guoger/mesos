@@ -71,16 +71,18 @@ private:
   friend class LogReaderProcess;
   friend class LogWriterProcess;
 
+  Network* createNetwork(
+      const std::string& servers,
+      const Duration& timeout,
+      const std::string& znode,
+      const Option<zookeeper::Authentication>& auth,
+      const process::UPID& _base);
+
   // Continuations.
   void _recover();
 
   // Return true if the log has finished recovery.
   double _recovered();
-
-  // TODO(benh): Factor this out into "membership renewer".
-  void watch(
-      const process::UPID& pid,
-      const std::set<zookeeper::Group::Membership>& memberships);
 
   void failed(const std::string& message);
   void discarded();
@@ -94,11 +96,6 @@ private:
   Option<process::Future<process::Owned<Replica>>> recovering;
   process::Promise<Nothing> recovered;
   std::list<process::Promise<process::Shared<Replica>>*> promises;
-
-  // For renewing membership. We store a Group instance in order to
-  // continually renew the replicas membership (when using ZooKeeper).
-  zookeeper::Group* group;
-  process::Future<zookeeper::Group::Membership> membership;
 
   struct Metrics
   {
