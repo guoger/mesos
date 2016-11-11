@@ -42,6 +42,7 @@
 #include <stout/lambda.hpp>
 #include <stout/nothing.hpp>
 #include <stout/set.hpp>
+#include <stout/try.hpp>
 
 #include "module/manager.hpp"
 
@@ -84,7 +85,6 @@ LogProcess::LogProcess(
     replica(new Replica(path)),
     pidGroup(new PIDGroup(pids + (UPID) replica->pid())),
     autoInitialize(_autoInitialize),
-    group(nullptr),
     metrics(*this, metricsPrefix) {}
 
 
@@ -100,14 +100,14 @@ LogProcess::LogProcess(
   : ProcessBase(ID::generate("log")),
     quorum(_quorum),
     replica(new Replica(path)),
-    pidGroup(new ZooKeeperPIDGroup(
+    pidGroup(createPIDGroup(
+        replica->pid(),
+        None(),
         servers,
         timeout,
         znode,
-        auth,
-        {replica->pid()})),
+        auth)),
     autoInitialize(_autoInitialize),
-    group(new zookeeper::Group(servers, timeout, znode, auth)),
     metrics(*this, metricsPrefix) {}
 
 
@@ -120,47 +120,63 @@ LogProcess::LogProcess(
   : ProcessBase(ID::generate("log")),
     quorum(_quorum),
     replica(new Replica(path)),
-    pidGroup(createPIDGroup(pidGroupModule, replica->pid())),
+    pidGroup(createPIDGroup(replica->pid(), pidGroupModule)),
     autoInitialize(_autoInitialize),
-    group(nullptr),
     metrics(*this, metricsPrefix) {}
 
 
 PIDGroup* LogProcess::createPIDGroup(
-    const string& pidGroupModule,
-    const process::UPID& upid)
+    const UPID& upid,
+    const Option<string>& pidGroupModule,
+    const Option<string>& servers,
+    const Option<Duration>& timeout,
+    const Option<string>& znode,
+    const Option<zookeeper::Authentication>& auth)
 {
-  Try<PIDGroup*> pidGroup =
-    modules::ModuleManager::create<PIDGroup>(pidGroupModule);
-  if (pidGroup.isError()) {
-    EXIT(EXIT_FAILURE)
-      << "Failed to create a pid group: " << pidGroup.error();
+  PIDGroup* pidGroup;;
+  if (pidGroupModule.isSome())
+  {
+    Try<PIDGroup*> _pidGroup =
+      modules::ModuleManager::create<PIDGroup>(pidGroupModule.get());
+    if (_pidGroup.isError()) {
+      EXIT(EXIT_FAILURE)
+        << "Failed to create a pid group: " << _pidGroup.error();
+    }
+    pidGroup = _pidGroup.get();
+  } else {
+    CHECK_SOME(servers);
+    CHECK_SOME(timeout);
+    CHECK_SOME(znode);
+    pidGroup = new ZooKeeperPIDGroup(
+        servers.get(),
+        timeout.get(),
+        znode.get(),
+        auth);
   }
 
-  pidGroup.get()->initialize(upid);
-
-  return pidGroup.get();
+  pidGroup->initialize(upid);
+  return pidGroup;
 }
 
 
 void LogProcess::initialize()
 {
-  if (group != nullptr) {
-    // Need to add our replica to the ZooKeeper group!
-    LOG(INFO) << "Attempting to join replica to ZooKeeper group";
-
-    membership = group->join(replica->pid())
-      .onFailed(defer(self(), &Self::failed, lambda::_1))
-      .onDiscarded(defer(self(), &Self::discarded));
-
-    // We save and pass the pid of the replica to the 'watch' function
-    // because the field member 'replica' is not available during
-    // recovery. We need the pid to renew the replicas membership.
-    group->watch()
-      .onReady(defer(self(), &Self::watch, replica->pid(), lambda::_1))
-      .onFailed(defer(self(), &Self::failed, lambda::_1))
-      .onDiscarded(defer(self(), &Self::discarded));
-  }
+//  if (group != nullptr) {
+//    // Need to add our replica to the ZooKeeper group!
+//    LOG(INFO) << "Attempting to join replica to ZooKeeper group";
+//
+//    membership = group->join(replica->pid())
+//      .onFailed(defer(self(), &Self::failed, lambda::_1))
+//      .onDiscarded(defer(self(), &Self::discarded));
+//
+//    // We save and pass the pid of the replica to the 'watch' function
+//    // because the field member 'replica' is not available during
+//    // recovery. We need the pid to renew the replicas membership.
+//    group->watch()
+//      .onReady(defer(self(), &Self::watch, replica->pid(), lambda::_1))
+//      .onFailed(defer(self(), &Self::failed, lambda::_1))
+//      .onDiscarded(defer(self(), &Self::discarded));
+//  }
 
   // Start the recovery.
   recover();
@@ -182,8 +198,6 @@ void LogProcess::finalize()
     delete promise;
   }
   promises.clear();
-
-  delete group;
 
   // Wait for the shared pointers 'pidGroup' and 'replica' to become
   // unique (i.e., no other reference to them). These calls should not
@@ -288,38 +302,6 @@ void LogProcess::_recover()
 double LogProcess::_recovered()
 {
   return recovered.future().isReady() ? 1 : 0;
-}
-
-
-void LogProcess::watch(
-    const UPID& pid,
-    const set<zookeeper::Group::Membership>& memberships)
-{
-  if (membership.isReady() && memberships.count(membership.get()) == 0) {
-    // Our replica's membership must have expired, join back up.
-    LOG(INFO) << "Renewing replica group membership";
-
-    membership = group->join(pid)
-      .onFailed(defer(self(), &Self::failed, lambda::_1))
-      .onDiscarded(defer(self(), &Self::discarded));
-  }
-
-  group->watch(memberships)
-    .onReady(defer(self(), &Self::watch, pid, lambda::_1))
-    .onFailed(defer(self(), &Self::failed, lambda::_1))
-    .onDiscarded(defer(self(), &Self::discarded));
-}
-
-
-void LogProcess::failed(const string& message)
-{
-  LOG(FATAL) << "Failed to participate in ZooKeeper group: " << message;
-}
-
-
-void LogProcess::discarded()
-{
-  LOG(FATAL) << "Not expecting future to get discarded!";
 }
 
 

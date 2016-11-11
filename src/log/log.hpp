@@ -72,10 +72,6 @@ public:
       bool _autoInitialize,
       const Option<std::string>& metricsPrefix);
 
-  static process::PIDGroup* createPIDGroup(
-      const std::string& pidGroupModule,
-      const process::UPID& upid);
-
   // Recovers the log by catching up if needed. Returns a shared
   // pointer to the local replica if the recovery succeeds.
   process::Future<process::Shared<Replica>> recover();
@@ -87,6 +83,14 @@ protected:
 private:
   friend class LogReaderProcess;
   friend class LogWriterProcess;
+
+  process::PIDGroup* createPIDGroup(
+      const process::UPID& upid,
+      const Option<std::string>& pidGroupModule = None(),
+      const Option<std::string>& servers = None(),
+      const Option<Duration>& timeout = None(),
+      const Option<std::string>& znode = None(),
+      const Option<zookeeper::Authentication>& auth = None());
 
   // Continuations.
   void _recover();
@@ -111,11 +115,6 @@ private:
   Option<process::Future<process::Owned<Replica>>> recovering;
   process::Promise<Nothing> recovered;
   std::list<process::Promise<process::Shared<Replica>>*> promises;
-
-  // For renewing membership. We store a Group instance in order to
-  // continually renew the replicas membership (when using ZooKeeper).
-  zookeeper::Group* group;
-  process::Future<zookeeper::Group::Membership> membership;
 
   struct Metrics
   {

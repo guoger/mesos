@@ -42,26 +42,42 @@ public:
       const std::string& servers,
       const Duration& timeout,
       const std::string& znode,
-      const Option<zookeeper::Authentication>& auth,
-      const std::set<process::UPID>& base = std::set<process::UPID>());
+      const Option<zookeeper::Authentication>& auth)
+  : observer(servers, timeout, znode, auth),
+    renewer(servers, timeout, znode, auth) {}
+
+  void initialize(const process::UPID& _base);
 
 private:
   // Not copyable, not assignable.
   ZooKeeperPIDGroup(const ZooKeeperPIDGroup&);
   ZooKeeperPIDGroup& operator=(const ZooKeeperPIDGroup&);
 
+  void renew(
+      const process::UPID& pid,
+      const std::set<zookeeper::Group::Membership>& _memberships);
+
+  void discarded();
+
+  void failed(const std::string& message);
+
   // Helper that sets up a watch on the group.
-  void watch(const std::set<zookeeper::Group::Membership>& expected);
+  void observe(const std::set<zookeeper::Group::Membership>& expected);
 
   // Invoked when the group memberships have changed.
-  void watched(const process::Future<std::set<zookeeper::Group::Membership> >&);
+  void observed(const process::Future<std::set<zookeeper::Group::Membership>>&);
 
   // Invoked when group members data has been collected.
   void collected(
-      const process::Future<std::list<Option<std::string> > >& datas);
+      const process::Future<std::list<Option<std::string>>>& datas);
 
-  zookeeper::Group group;
-  process::Future<std::set<zookeeper::Group::Membership> > memberships;
+  zookeeper::Group observer;
+  process::Future<std::set<zookeeper::Group::Membership>> memberships;
+
+  // For renewing membership. We store a Group instance in order to
+  // continually renew the replicas membership (when using ZooKeeper).
+  zookeeper::Group renewer;
+  process::Future<zookeeper::Group::Membership> membership;
 
   // NOTE: The declaration order here is important. We want to delete
   // the 'executor' before we delete the 'group' so that we don't get

@@ -43,44 +43,76 @@ namespace mesos {
 namespace internal {
 namespace log {
 
-ZooKeeperPIDGroup::ZooKeeperPIDGroup(
-    const std::string& servers,
-    const Duration& timeout,
-    const std::string& znode,
-    const Option<zookeeper::Authentication>& auth,
-    const std::set<process::UPID>& _base)
-  : PIDGroup(_base),
-    group(servers, timeout, znode, auth)
-
+void ZooKeeperPIDGroup::initialize(const process::UPID& _base)
 {
-  // PIDs from the base set are in the PID group from beginning.
+  base = {_base};
+
+  // PIDs from the base set are in the network from beginning.
   set(base);
 
-  watch(std::set<zookeeper::Group::Membership>());
+  observe(std::set<zookeeper::Group::Membership>());
+
+  membership = renewer.join(_base)
+    .onFailed(executor.defer(
+        lambda::bind(&ZooKeeperPIDGroup::failed, this, lambda::_1)))
+    .onDiscarded(executor.defer(
+        lambda::bind(&ZooKeeperPIDGroup::discarded, this)));
+
+  renewer.watch()
+    .onReady(executor.defer(
+        lambda::bind(&ZooKeeperPIDGroup::renew, this, _base, lambda::_1)))
+    .onFailed(executor.defer(
+        lambda::bind(&ZooKeeperPIDGroup::failed, this, lambda::_1)))
+    .onDiscarded(executor.defer(
+        lambda::bind(&ZooKeeperPIDGroup::discarded, this)));
 }
 
 
-void ZooKeeperPIDGroup::watch(
-    const std::set<zookeeper::Group::Membership>& expected)
+void ZooKeeperPIDGroup::renew(
+    const process::UPID& pid,
+    const std::set<zookeeper::Group::Membership>& _memberships)
 {
-  memberships = group.watch(expected);
-  memberships
-    .onAny(executor.defer(
-        lambda::bind(&ZooKeeperPIDGroup::watched, this, lambda::_1)));
-}
+  if (membership.isReady() && _memberships.count(membership.get()) == 0) {
+    // Our replica's membership must have expired, join back up.
+    LOG(INFO) << "Renewing replica group membership";
 
-
-void ZooKeeperPIDGroup::watched(
-    const process::Future<std::set<zookeeper::Group::Membership> >&)
-{
-  if (memberships.isFailed()) {
-    // We can't do much here, we could try creating another Group but
-    // that might just continue indefinitely, so we fail early
-    // instead. Note that Group handles all retryable/recoverable
-    // ZooKeeper errors internally.
-    LOG(FATAL) << "Failed to watch ZooKeeper group: " << memberships.failure();
+    membership = renewer.join(pid)
+      .onFailed(executor.defer(
+          lambda::bind(&ZooKeeperPIDGroup::failed, this, lambda::_1)))
+      .onDiscarded(executor.defer(
+          lambda::bind(&ZooKeeperPIDGroup::discarded, this)));
   }
 
+  renewer.watch(_memberships)
+    .onReady(executor.defer(
+        lambda::bind(&ZooKeeperPIDGroup::renew, this, pid, lambda::_1)))
+    .onFailed(executor.defer(
+        lambda::bind(&ZooKeeperPIDGroup::failed, this, lambda::_1)))
+    .onDiscarded(executor.defer(
+        lambda::bind(&ZooKeeperPIDGroup::discarded, this)));
+}
+
+
+void ZooKeeperPIDGroup::observe(
+    const std::set<zookeeper::Group::Membership>& expected)
+{
+  // We can't do much here upon failure, we could try creating another Group but
+  // that might just continue indefinitely, so we fail early
+  // instead. Note that Group handles all retryable/recoverable
+  // ZooKeeper errors internally.
+  memberships = observer.watch(expected)
+    .onReady(executor.defer(
+        lambda::bind(&ZooKeeperPIDGroup::observed, this, lambda::_1)))
+    .onFailed(executor.defer(
+        lambda::bind(&ZooKeeperPIDGroup::failed, this, lambda::_1)))
+    .onDiscarded(executor.defer(
+        lambda::bind(&ZooKeeperPIDGroup::discarded, this)));
+}
+
+
+void ZooKeeperPIDGroup::observed(
+    const process::Future<std::set<zookeeper::Group::Membership>>&)
+{
   CHECK_READY(memberships);  // Not expecting Group to discard futures.
 
   LOG(INFO) << "ZooKeeper group memberships changed";
@@ -89,7 +121,7 @@ void ZooKeeperPIDGroup::watched(
   std::list<process::Future<Option<std::string>>> futures;
 
   foreach (const zookeeper::Group::Membership& membership, memberships.get()) {
-    futures.push_back(group.data(membership));
+    futures.push_back(observer.data(membership));
   }
 
   process::collect(futures)
@@ -106,7 +138,7 @@ void ZooKeeperPIDGroup::watched(
 
 
 void ZooKeeperPIDGroup::collected(
-    const process::Future<std::list<Option<std::string> > >& datas)
+    const process::Future<std::list<Option<std::string>>>& datas)
 {
   if (datas.isFailed()) {
     LOG(WARNING) << "Failed to get data for ZooKeeper group members: "
@@ -114,7 +146,7 @@ void ZooKeeperPIDGroup::collected(
 
     // Try again later assuming empty group. Note that this does not
     // remove any of the current group members.
-    watch(std::set<zookeeper::Group::Membership>());
+    observe(std::set<zookeeper::Group::Membership>());
     return;
   }
 
@@ -138,7 +170,18 @@ void ZooKeeperPIDGroup::collected(
   // are always in the PID group.
   set(pids | base);
 
-  watch(memberships.get());
+  observe(memberships.get());
+}
+
+void ZooKeeperPIDGroup::failed(const std::string& message)
+{
+  LOG(FATAL) << "Failed to watch/join the ZooKeeper group: " << message;
+}
+
+
+void ZooKeeperPIDGroup::discarded()
+{
+  LOG(FATAL) << "Not expecting future to get discarded!";
 }
 
 } // namespace log {

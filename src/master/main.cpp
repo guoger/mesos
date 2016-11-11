@@ -251,7 +251,7 @@ int main(int argc, char** argv)
     os::setenv("LIBPROCESS_ADVERTISE_PORT", flags.advertise_port.get());
   }
 
-  if (zk.isNone()) {
+  if (flags.zk.isNone()) {
     if (!(flags.master_contender.isSome() &&
           flags.master_detector.isSome() &&
           flags.pid_group.isSome()) &&
