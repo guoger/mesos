@@ -35,8 +35,12 @@ class SeccompTest : public ::testing::Test
 {
 public:
   // Launch 'ping' using the given capabilities and user.
-  Try<Subprocess> sleep()
+  Try<Subprocess> sleep(const SeccompInfo& seccompInfo)
   {
+    SeccompTestHelper helper;
+
+    helper.flags.seccomp_profile = seccompInfo;
+
     vector<string> argv = {
       "test-helper",
       SeccompTestHelper::NAME
@@ -47,17 +51,24 @@ public:
         argv,
         Subprocess::FD(STDIN_FILENO),
         Subprocess::FD(STDOUT_FILENO),
-        Subprocess::FD(STDERR_FILENO));
+        Subprocess::FD(STDERR_FILENO),
+        &helper.flags);
   }
 };
 
 
 TEST_F(SeccompTest, FooTest)
 {
-  Try<Subprocess> s = sleep();
+  SeccompInfo seccompInfo;
+  seccompInfo.set_default_action(SeccompInfo_Syscall_Action_SCMP_ACT_ALLOW);
+  SeccompInfo_Syscall* seccompInfoSyscall = seccompInfo.add_syscalls();
+  seccompInfoSyscall->set_name("nanosleep");
+  seccompInfoSyscall->set_action(SeccompInfo_Syscall_Action_SCMP_ACT_KILL);
+
+  Try<Subprocess> s = sleep(seccompInfo);
   ASSERT_SOME(s);
 
-  AWAIT_EXPECT_WEXITSTATUS_NE(0, s->status());
+  AWAIT_EXPECT_WEXITSTATUS_EQ(0, s->status());
 }
 
 } // namespace tests {

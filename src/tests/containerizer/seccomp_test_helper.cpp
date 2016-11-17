@@ -14,7 +14,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <errno.h>
+
 #include "tests/containerizer/seccomp_test_helper.hpp"
+
 
 namespace mesos {
 namespace internal {
@@ -24,13 +27,15 @@ const char SeccompTestHelper::NAME[] = "Seccomp";
 
 SeccompTestHelper::Flags::Flags()
 {
+  add(&Flags::seccomp_profile,
+      "seccomp_profile",
+      "Seccomp filter to be set for the process.");
 }
 
 
 int SeccompTestHelper::execute()
 {
-  std::cout << "######### Hello #########" << std::endl;
-  return 0;
+  return EXIT_SUCCESS;
 }
 
 } // namespace tests {

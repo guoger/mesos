@@ -23,6 +23,7 @@
 #include "tests/containerizer/memory_test_helper.hpp"
 #ifdef __linux__
 #include "tests/containerizer/capabilities_test_helper.hpp"
+#include "tests/containerizer/seccomp_test_helper.hpp"
 #include "tests/containerizer/setns_test_helper.hpp"
 #endif
 
@@ -31,6 +32,7 @@ using mesos::internal::tests::HealthCheckTestHelper;
 using mesos::internal::tests::MemoryTestHelper;
 #ifdef __linux__
 using mesos::internal::tests::CapabilitiesTestHelper;
+using mesos::internal::tests::SeccompTestHelper;
 using mesos::internal::tests::SetnsTestHelper;
 #endif
 
@@ -43,6 +45,7 @@ int main(int argc, char** argv)
       argv,
 #ifdef __linux__
       new CapabilitiesTestHelper(),
+      new SeccompTestHelper(),
       new SetnsTestHelper(),
 #endif
       new ActiveUserTestHelper(),

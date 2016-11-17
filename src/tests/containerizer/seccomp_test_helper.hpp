@@ -34,6 +34,8 @@ public:
   struct Flags : public virtual flags::FlagsBase
   {
     Flags();
+
+    Option<SeccompInfo> seccomp_profile;
   };
 
   SeccompTestHelper() : Subcommand(NAME) {}
