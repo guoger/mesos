@@ -19,7 +19,12 @@
 #include <stout/foreach.hpp>
 #include <stout/strings.hpp>
 
+#include "common/protobuf_utils.hpp"
+
+using mesos::internal::protobuf::frameworkHasCapability;
+
 using std::initializer_list;
+using std::set;
 using std::string;
 using std::vector;
 
@@ -94,6 +99,55 @@ Option<Error> validate(const vector<string>& roles)
     if (error.isSome()) {
       return error.get();
     }
+  }
+
+  return None();
+}
+
+
+Option<Error> validate(const FrameworkInfo& frameworkInfo)
+{
+  // First we check if role, roles and MULTI_ROLE are set properly,
+  // see comments in function declaration for more details.
+  if (frameworkHasCapability(
+          frameworkInfo,
+          FrameworkInfo::Capability::MULTI_ROLE)) {
+    if (frameworkInfo.has_role()) {
+      return Error("FrameworkInfo.role should NOT be set when MULTI_ROLE "
+                   "framework capability is provided.");
+    }
+
+  } else {
+    if (frameworkInfo.roles_size()) {
+      if (frameworkInfo.has_role()) {
+        return Error("Only one of FrameworkInfo.role and FrameworkInfo.roles "
+                     "must be set at a time.");
+      } else {
+        return Error("If FrameworkInfo.roles is set, then the MULTI_ROLE "
+                     "framework capability must be provided.");
+      }
+    }
+  }
+
+  // Validate role if exists
+  if (frameworkInfo.has_role()) {
+    return validate(frameworkInfo.role());
+  }
+
+  // Validate each role in roles.
+  set<string> roles;
+  Option<Error> error;
+  foreach (const string& role, frameworkInfo.roles()) {
+    if (roles.count(role) > 0) {
+      return Error("FrameworkInfo.roles must not contain duplicate entries.");
+    }
+
+    error = validate(role);
+    if (error.isSome()) {
+      return error.get();
+    }
+
+    roles.insert(role);
   }
 
   return None();

@@ -2330,7 +2330,7 @@ void Master::subscribe(
   LOG(INFO) << "Received subscription request for"
             << " HTTP framework '" << frameworkInfo.name() << "'";
 
-  Option<Error> validationError = roles::validate(frameworkInfo.role());
+  Option<Error> validationError = roles::validate(frameworkInfo);
 
   if (validationError.isNone() && !isWhitelistedRole(frameworkInfo.role())) {
     validationError = Error("Role '" + frameworkInfo.role() + "' is not" +

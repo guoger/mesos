@@ -663,6 +663,60 @@ TEST(RolesTest, Validate)
 }
 
 
+// This tests the validate function of FrameworkInfo. For 3 attributes, we
+// have 2^3 cases to test in total. See comments of roles::validate() for the
+// expected results.
+TEST(RolesTest, ValidateFrameworkInfo)
+{
+  FrameworkInfo frameworkInfo1;
+  EXPECT_NONE(roles::validate(frameworkInfo1));
+
+  frameworkInfo1.set_role("foo");
+  EXPECT_NONE(roles::validate(frameworkInfo1));
+
+  frameworkInfo1.add_capabilities()->set_type(
+      FrameworkInfo::Capability::MULTI_ROLE);
+  // Role is set, but MULTI_ROLE capability is also provided.
+  EXPECT_SOME(roles::validate(frameworkInfo1));
+
+  frameworkInfo1.add_roles("bar");
+  frameworkInfo1.add_roles("qux");
+  // All role, roles and MULTI_ROLE are set.
+  EXPECT_SOME(roles::validate(frameworkInfo1));
+
+  FrameworkInfo frameworkInfo2;
+  frameworkInfo2.add_roles("bar");
+  frameworkInfo2.add_roles("qux");
+  // Roles is set but not MULTI_ROLE capability provided.
+  EXPECT_SOME(roles::validate(frameworkInfo2));
+
+  frameworkInfo2.set_role("foo");
+  // Both role and roles are set.
+  EXPECT_SOME(roles::validate(frameworkInfo2));
+
+  FrameworkInfo frameworkInfo3;
+  frameworkInfo3.add_capabilities()->set_type(
+      FrameworkInfo::Capability::MULTI_ROLE);
+  EXPECT_NONE(roles::validate(frameworkInfo3));
+
+  frameworkInfo3.add_roles("bar");
+  frameworkInfo3.add_roles("qux");
+  EXPECT_NONE(roles::validate(frameworkInfo3));
+
+  // Duplicate entries in roles
+  frameworkInfo3.add_roles("bar");
+  EXPECT_SOME(roles::validate(frameworkInfo3));
+
+  // Check invalid character in roles
+  FrameworkInfo frameworkInfo4;
+  frameworkInfo4.add_roles("bar");
+  frameworkInfo4.add_roles("/x");
+  frameworkInfo4.add_capabilities()->set_type(
+      FrameworkInfo::Capability::MULTI_ROLE);
+  EXPECT_SOME(roles::validate(frameworkInfo4));
+}
+
+
 // Testing get without authentication and with bad credentials.
 TEST_F(RoleTest, EndpointBadAuthentication)
 {

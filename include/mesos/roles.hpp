@@ -20,6 +20,8 @@
 #include <string>
 #include <vector>
 
+#include <mesos/mesos.hpp>
+
 #include <stout/try.hpp>
 
 namespace mesos {
@@ -55,6 +57,34 @@ Option<Error> validate(const std::string& role);
  * @return Error if validation fails, None otherwise.
  */
 Option<Error> validate(const std::vector<std::string>& roles);
+
+
+/**
+ * Validates the roles in given FrameworkInfo.
+ * Return Error/None according to following matrix:
+ *
+ * -- MULTI_ROLE is NOT set -
+ *         |-------|---------|
+ *         |Roles  |No Roles |
+ * |-------|-------|---------|
+ * |Role   | Error |  None   |
+ * |-------|-------|---------|
+ * |No Role| Error |  None   |
+ * |-------|-------|---------|
+ *
+ * --- MULTI_ROLE is set ----
+ *         |-------|---------|
+ *         |Roles  |No Roles |
+ * |-------|-------|---------|
+ * |Role   | Error |  Error  |
+ * |-------|-------|---------|
+ * |No Role| None  |  None   |
+ * |-------|-------|---------|
+ *
+ * @param frameworkInfo FrameworkInfo to be validated
+ * @return Error if validation fails, None otherwise.
+ */
+Option<Error> validate(const mesos::FrameworkInfo& frameworkInfo);
 
 } // namespace roles {
 } // namespace mesos {
