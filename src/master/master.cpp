@@ -8093,9 +8093,12 @@ void Master::addSlave(
     unavailability = machines[slave->machineId].info.unavailability();
   }
 
+  auto capabilities = slave->capabilities.toRepeatedPtrField();
+
   allocator->addSlave(
       slave->id,
       slave->info,
+      vector<SlaveInfo::Capability>(capabilities.begin(), capabilities.end()),
       unavailability,
       slave->totalResources,
       slave->usedResources);
