@@ -222,7 +222,7 @@ protected:
     // whether the framework is MULTI_ROLE capable. The logic between a
     // non-MULTI_ROLE scheduler and a single role MULTI_ROLE scheduler is
     // the same as far as the allocator is concerned.
-    if (!multiRole) {
+    if (multiRole || roles.size() > 1) {
       frameworkInfo.add_capabilities()->set_type(
           FrameworkInfo::Capability::MULTI_ROLE);
     }
