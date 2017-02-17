@@ -1586,6 +1586,104 @@ TYPED_TEST(MasterAllocatorTest, SlaveReregistersFirst)
 }
 
 
+// This test ensures that a MULTI_ROLE framework should not receive offers
+// from non-MULTI_ROLE agents. To mock a non-MULTI_ROLE agent, we spoof the
+// registerSlaveMessage to strip `MULTI_ROLE` capability.
+TYPED_TEST(MasterAllocatorTest, NonMultiRoleAgentNotOfferedToMultiRoleFramework)
+{
+  Clock::pause();
+
+  TestAllocator<TypeParam> allocator;
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _));
+
+  master::Flags masterFlags = this->CreateMasterFlags();
+  Try<Owned<cluster::Master>> master =
+    this->StartMaster(&allocator, masterFlags);
+  ASSERT_SOME(master);
+
+  EXPECT_CALL(allocator, addSlave(_, _, _, _, _, _));
+
+  slave::Flags slaveFlags = this->CreateSlaveFlags();
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave =
+    this->StartSlave(detector.get(), slaveFlags);
+  ASSERT_SOME(slave);
+
+  // Drop subsequent `RegisterSlaveMessage`s to prevent a race condition
+  // where an unspoofed retry reaches master before the spoofed one.
+  DROP_PROTOBUFS(RegisterSlaveMessage(), slave.get()->pid, master.get()->pid);
+
+  Future<RegisterSlaveMessage> registerSlaveMessage =
+    DROP_PROTOBUF(RegisterSlaveMessage(), slave.get()->pid, master.get()->pid);
+
+  Future<SlaveRegisteredMessage> agentRegisteredMessage =
+    FUTURE_PROTOBUF(
+        SlaveRegisteredMessage(),
+        master.get()->pid,
+        slave.get()->pid);
+
+  Clock::advance(slaveFlags.registration_backoff_factor);
+  AWAIT_READY(registerSlaveMessage);
+
+  // Strip 'MULTI_ROLE' from agent capabilities.
+  RegisterSlaveMessage strippedRegisterSlaveMessage =
+    registerSlaveMessage.get();
+  EXPECT_EQ(1u, strippedRegisterSlaveMessage.agent_capabilities_size());
+  EXPECT_EQ(
+      SlaveInfo::Capability::MULTI_ROLE,
+      strippedRegisterSlaveMessage.agent_capabilities(0).type());
+  strippedRegisterSlaveMessage.clear_agent_capabilities();
+
+  // Prevent this from being dropped per the DROP_PROTOBUFS above.
+  FUTURE_PROTOBUF(
+      RegisterSlaveMessage(),
+      slave.get()->pid,
+      master.get()->pid);
+
+  process::post(
+      slave.get()->pid,
+      master.get()->pid,
+      strippedRegisterSlaveMessage);
+
+  Clock::settle();
+
+  AWAIT_READY(agentRegisteredMessage);
+
+  FrameworkInfo framework = DEFAULT_FRAMEWORK_INFO;
+  framework.add_roles("foo");
+  framework.add_capabilities()->set_type(
+      FrameworkInfo::Capability::MULTI_ROLE);
+
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, framework, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  Future<FrameworkID> frameworkId;
+  EXPECT_CALL(sched, registered(&driver, _, _))
+    .WillOnce(FutureArg<1>(&frameworkId));
+
+  EXPECT_CALL(allocator, addFramework(_, _, _, _));
+
+  // Framework should not receive any offer.
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .Times(0);
+
+  driver.start();
+
+  Clock::settle();
+
+  AWAIT_READY(frameworkId);
+  EXPECT_NE("", frameworkId.get().value());
+
+  // Advance clock to trigger an allocation.
+  Clock::advance(masterFlags.allocation_interval);
+  Clock::settle();
+
+  driver.stop();
+  driver.join();
+}
+
+
 #ifndef __WINDOWS__
 // This test ensures that resource allocation is correctly rebalanced
 // according to the updated weights.

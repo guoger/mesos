@@ -1532,6 +1532,17 @@ void HierarchicalAllocatorProcess::__allocate()
           continue;
         }
 
+        // Prevent offers from non-MULTI_ROLE agents to be allocated
+        // to MULTI_ROLE frameworks.
+        if (framework.capabilities.multiRole &&
+            !slave.capabilities.multiRole) {
+          LOG(WARNING)
+            << "MULTI_ROLE framework " << frameworkId << " should not"
+            << " receive offer from agent " << slaveId << " because it"
+            << " is not MULTI_ROLE capable.";
+          continue;
+        }
+
         // Calculate the currently available resources on the slave, which
         // is the difference in non-shared resources between total and
         // allocated, plus all shared resources on the agent (if applicable).
@@ -1694,6 +1705,17 @@ void HierarchicalAllocatorProcess::__allocate()
         // See MESOS-5634.
         if (!framework.capabilities.gpuResources &&
             slave.total.gpus().getOrElse(0) > 0) {
+          continue;
+        }
+
+        // Prevent offers from non-MULTI_ROLE agents to be allocated
+        // to MULTI_ROLE frameworks.
+        if (framework.capabilities.multiRole &&
+            !slave.capabilities.multiRole) {
+          LOG(WARNING)
+            << "MULTI_ROLE framework " << frameworkId << " should not"
+            << " receive offer from agent " << slaveId << " because it"
+            << " is not MULTI_ROLE capable.";
           continue;
         }
 
